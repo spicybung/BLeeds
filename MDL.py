@@ -93,13 +93,32 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             print("==================================\n")
 
             # -------------------------------
-            # Read Root Boone & Traverse
+            # Read Root Bone & traverse
             # -------------------------------
             if root_bone_offset > 0:
                 print("Traversing Bone Hierarchy:")
                 self.read_bone(f, root_bone_offset)
             else:
                 print("Root Bone Offset is 0 — skipping root bone read.\n")
+
+            # -------------------------------
+            # Read objectInfo(if valid)
+            # -------------------------------
+            if first_obj_info_offset > 0:
+                f.seek(first_obj_info_offset)
+                object_info = struct.unpack("<7i", f.read(28))
+
+                print("==== Reading ObjectInfo ====")
+                print(f"Next Object Offset:       0x{object_info[0]:08X}")
+                print(f"Prev Object Offset:       0x{object_info[1]:08X}")
+                print(f"Parent Bone Offset:       0x{object_info[2]:08X}")
+                print(f"Object Data Offset:       0x{object_info[3]:08X}")
+                print(f"Root Entry Offset:        0x{object_info[4]:08X}")
+                print(f"Zero Field:               0x{object_info[5]:08X}")
+                print(f"Unknown (Always 3):       0x{object_info[6]:08X}")
+                print("==================================\n")
+            else:
+                print("First ObjectInfo Offset is 0 — no objects present.\n")
 
         return {'FINISHED'}
 
