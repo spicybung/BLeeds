@@ -9,38 +9,71 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
     filename_ext = ".mdl"
     filter_glob: bpy.props.StringProperty(default="*.mdl", options={'HIDDEN'})
 
-    def read_bone(self, f, offset, depth=0):
-        indent = "  " * depth
-        f.seek(offset)
-        bone_data = f.read(24)
-        bone = struct.unpack("<6i", bone_data)
-
-        sibling_offset = bone[1]
-        parent_offset = bone[2]
-        subbone_offset = bone[4]
-        anim_bone_index_offset = bone[5]
-
-        print(f"{indent}==== Bone at 0x{offset:08X} ====")
-        print(f"{indent}Sibling Offset:         0x{sibling_offset:08X}")
-        print(f"{indent}Parent Offset:          0x{parent_offset:08X}")
-        print(f"{indent}SubBone Offset:         0x{subbone_offset:08X}")
-        print(f"{indent}AnimBoneDataIdx Offset: 0x{anim_bone_index_offset:08X}")
-        print(f"{indent}=============================")
-
-        if subbone_offset > 0:
-            self.read_bone(f, subbone_offset, depth + 1)
-
-        if sibling_offset > 0:
-            self.read_bone(f, sibling_offset, depth)
-
     def execute(self, context):
+        def read_bone(f, offset, depth=0):
+            indent = "  " * depth
+            f.seek(offset)
+            bone_data = f.read(24)
+            if len(bone_data) < 24:
+                print(f"{indent}!! Incomplete bone read at 0x{offset:08X}")
+                return
+
+            bone = struct.unpack("<6I", bone_data)
+            sibling_offset = bone[1]
+            parent_offset = bone[2]
+            subbone_offset = bone[4]
+            anim_data_idx_offset = bone[5]
+
+            print(f"{indent}==== Bone at 0x{offset:08X} ====")
+            print(f"{indent}Sibling Offset:         0x{sibling_offset:08X}")
+            print(f"{indent}Parent Offset:          0x{parent_offset:08X}")
+            print(f"{indent}SubBone Offset:         0x{subbone_offset:08X}")
+            print(f"{indent}AnimBoneDataIdx Offset: 0x{anim_data_idx_offset:08X}")
+            print(f"{indent}=============================")
+
+            # -------------------------------
+            # Read AnimBone data(if valid)
+            # -------------------------------
+            if anim_data_idx_offset != 0:
+                f.seek(anim_data_idx_offset)
+                anim_data_idx_data = f.read(24)
+                anim = struct.unpack("<6I", anim_data_idx_data)
+                num_bones = anim[0]
+                anim_bone_data_offset = anim[3]
+                bone_transform_offset = anim[4]
+
+                print(f"{indent}-- AnimBoneDataIndex --")
+                print(f"{indent}Num Bones:             {num_bones}")
+                print(f"{indent}AnimBoneData Offset:   0x{anim_bone_data_offset:08X}")
+                print(f"{indent}BoneTransform Offset:  0x{bone_transform_offset:08X}")
+
+                if anim_bone_data_offset != 0:
+                    f.seek(anim_bone_data_offset)
+                    print(f"{indent}-- AnimBoneData [{num_bones}] --")
+                    for i in range(num_bones):
+                        data = f.read(8)
+                        bone_id, bone_type, bone_offset = struct.unpack("<HHi", data)
+                        print(f"{indent}  Bone {i}: ID={bone_id} Type={bone_type} Offset=0x{bone_offset:08X}")
+
+                if bone_transform_offset != 0:
+                    f.seek(bone_transform_offset)
+                    print(f"{indent}-- BoneTransform [{num_bones}] --")
+                    for i in range(num_bones):
+                        floats = struct.unpack("<8f", f.read(32))
+                        print(f"{indent}  Bone {i} Transform: {floats}")
+
+            if subbone_offset != 0:
+                read_bone(f, subbone_offset, depth + 1)
+            if sibling_offset != 0:
+                read_bone(f, sibling_offset, depth)
+
         with open(self.filepath, "rb") as f:
-            # Step 1: Read MDLHeader
             data = f.read(0x28)
             header = struct.unpack("<4sIIIIIIIii", data)
+
             signature = header[0].decode("ascii")
             first_entry_offset = header[8]
-
+            
             # -------------------------------
             # Read MDL Header
             # Signature is determined by ModelInfo struct
@@ -48,14 +81,14 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             # -------------------------------
 
             print("\n==== Reading MDL Header ====")
-            print(f"Signature:           {signature}")          # ModelInfo struct
+            print(f"Signature:           {signature}")
             print(f"Version:             {header[1]:08X}")
-            print(f"File Size:           {header[2]} bytes")    # Physical size
+            print(f"File Size:           {header[2]} bytes")
             print(f"Data Size:           {header[3]} bytes")
             print(f"Offset Table Start:  0x{header[4]:08X}")
             print(f"Num Table Entries:   {header[5]}")
-            print(f"Zero1:               {header[6]}")          # Padding
-            print(f"Zero2:               {header[7]}")          # Padding
+            print(f"Zero1:               {header[6]}")
+            print(f"Zero2:               {header[7]}")
             print(f"First Entry Offset:  0x{first_entry_offset:08X}")
             print(f"Last Entry Offset:   0x{header[9]:08X}")
             print("============================\n")
@@ -64,7 +97,8 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             # Read EntryIndex
             # -------------------------------
             f.seek(first_entry_offset)
-            entry_index = struct.unpack("<iiii", f.read(16))
+            entry_index_data = f.read(16)
+            entry_index = struct.unpack("<iiii", entry_index_data)
             entry_data_offset = entry_index[2]
 
             print("==== Reading First EntryIndex ====")
@@ -78,12 +112,13 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             # Read Entry Structure
             # -------------------------------
             f.seek(entry_data_offset)
-            entry = struct.unpack("<7i", f.read(0x1C))
+            entry_struct_data = f.read(0x1C)
+            entry = struct.unpack("<7i", entry_struct_data)
 
             root_bone_offset = entry[0]
+            unknown = entry[3]
             first_obj_info_offset = entry[4]
             last_obj_info_offset = entry[5]
-            unknown = entry[3]
 
             print("==== Reading Entry ====")
             print(f"Root Bone Offset:         0x{root_bone_offset:08X}")
@@ -97,7 +132,7 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             # -------------------------------
             if root_bone_offset > 0:
                 print("Traversing Bone Hierarchy:")
-                self.read_bone(f, root_bone_offset)
+                read_bone(f, root_bone_offset)
             else:
                 print("Root Bone Offset is 0 — skipping root bone read.\n")
 
@@ -106,7 +141,8 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             # -------------------------------
             if first_obj_info_offset > 0:
                 f.seek(first_obj_info_offset)
-                object_info = struct.unpack("<7i", f.read(28))
+                object_info_data = f.read(28)
+                object_info = struct.unpack("<7i", object_info_data)
 
                 print("==== Reading ObjectInfo ====")
                 print(f"Next Object Offset:       0x{object_info[0]:08X}")
