@@ -31,54 +31,20 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             print(f"{indent}AnimBoneDataIdx Offset: 0x{anim_data_idx_offset:08X}")
             print(f"{indent}=============================")
 
-            # -------------------------------
-            # Read AnimBone data(if valid)
-            # -------------------------------
-            if anim_data_idx_offset != 0:
-                f.seek(anim_data_idx_offset)
-                anim_data_idx_data = f.read(24)
-                anim = struct.unpack("<6I", anim_data_idx_data)
-                num_bones = anim[0]
-                anim_bone_data_offset = anim[3]
-                bone_transform_offset = anim[4]
-
-                print(f"{indent}-- AnimBoneDataIndex --")
-                print(f"{indent}Num Bones:             {num_bones}")
-                print(f"{indent}AnimBoneData Offset:   0x{anim_bone_data_offset:08X}")
-                print(f"{indent}BoneTransform Offset:  0x{bone_transform_offset:08X}")
-
-                if anim_bone_data_offset != 0:
-                    f.seek(anim_bone_data_offset)
-                    print(f"{indent}-- AnimBoneData [{num_bones}] --")
-                    for i in range(num_bones):
-                        data = f.read(8)
-                        bone_id, bone_type, bone_offset = struct.unpack("<HHi", data)
-                        print(f"{indent}  Bone {i}: ID={bone_id} Type={bone_type} Offset=0x{bone_offset:08X}")
-
-                if bone_transform_offset != 0:
-                    f.seek(bone_transform_offset)
-                    print(f"{indent}-- BoneTransform [{num_bones}] --")
-                    for i in range(num_bones):
-                        floats = struct.unpack("<8f", f.read(32))
-                        print(f"{indent}  Bone {i} Transform: {floats}")
-
             if subbone_offset != 0:
                 read_bone(f, subbone_offset, depth + 1)
             if sibling_offset != 0:
                 read_bone(f, sibling_offset, depth)
 
         with open(self.filepath, "rb") as f:
+            # -------------------------------
+            # Read WDR Header
+            # -------------------------------
             data = f.read(0x28)
             header = struct.unpack("<4sIIIIIIIii", data)
 
             signature = header[0].decode("ascii")
             first_entry_offset = header[8]
-            
-            # -------------------------------
-            # Read MDL Header
-            # Signature is determined by ModelInfo struct
-            # i.e PMLC = Ped Model Liberty City
-            # -------------------------------
 
             print("\n==== Reading MDL Header ====")
             print(f"Signature:           {signature}")
@@ -128,7 +94,7 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             print("==================================\n")
 
             # -------------------------------
-            # Read Root Bone & traverse
+            # Read Bone Hierarchy
             # -------------------------------
             if root_bone_offset > 0:
                 print("Traversing Bone Hierarchy:")
@@ -137,24 +103,88 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
                 print("Root Bone Offset is 0 — skipping root bone read.\n")
 
             # -------------------------------
-            # Read objectInfo(if valid)
+            # Read ObjectInfo
             # -------------------------------
-            if first_obj_info_offset > 0:
-                f.seek(first_obj_info_offset)
+            object_info_offset = first_obj_info_offset
+            if object_info_offset == 0 and last_obj_info_offset > 0:
+                print("First ObjectInfo Offset is 0 — falling back to Last ObjectInfo Offset.\n")
+                object_info_offset = last_obj_info_offset
+
+            if object_info_offset > 0:
+                f.seek(object_info_offset)
                 object_info_data = f.read(28)
                 object_info = struct.unpack("<7i", object_info_data)
+
+                object_data_offset = object_info[3]
 
                 print("==== Reading ObjectInfo ====")
                 print(f"Next Object Offset:       0x{object_info[0]:08X}")
                 print(f"Prev Object Offset:       0x{object_info[1]:08X}")
                 print(f"Parent Bone Offset:       0x{object_info[2]:08X}")
-                print(f"Object Data Offset:       0x{object_info[3]:08X}")
+                print(f"Object Data Offset:       0x{object_data_offset:08X}")
                 print(f"Root Entry Offset:        0x{object_info[4]:08X}")
                 print(f"Zero Field:               0x{object_info[5]:08X}")
                 print(f"Unknown (Always 3):       0x{object_info[6]:08X}")
                 print("==================================\n")
+
+                # -------------------------------
+                # Read Object Chunk Header
+                # -------------------------------
+                f.seek(object_data_offset)
+                obj_chunk = f.read(64)
+                if len(obj_chunk) < 64:
+                    print("!! Incomplete Object Header read")
+                else:
+                    material_offset, num_materials, bone_trans_offset, unknown_f, unknown1, *rest = struct.unpack("<3I f I 12s", obj_chunk[:32])
+                    print("==== Reading Object Chunk Header ====")
+                    print(f"Material Offset:          0x{material_offset:08X}")
+                    print(f"Num Materials:            {num_materials}")
+                    print(f"BoneTransDataIndexOffset: 0x{bone_trans_offset:08X}")
+                    print(f"Unknown Float:            {unknown_f}")
+                    print(f"Unknown Int:              0x{unknown1:08X}")
+                    print("======================================\n")
             else:
-                print("First ObjectInfo Offset is 0 — no objects present.\n")
+                print("ObjectInfo Offset not valid — skipping object read.\n")
+                
+            # -------------------------------
+            # Read Materials if present
+            # -------------------------------
+            if material_offset != 0 and num_materials > 0:
+                print(f"Reading {num_materials} Material(s) at offset 0x{material_offset:08X}:\n")
+                f.seek(material_offset)
+
+                for i in range(num_materials):
+                    start_pos = f.tell()
+                    mat_data = f.read(12)  # TexNameOffset (4), bLoaded (1), ColorRGBA (4), padding (3)
+                    if len(mat_data) < 12:
+                        print(f"Material {i}: Incomplete material struct")
+                        continue
+
+                    texname_offset, b_loaded = struct.unpack("<IB", mat_data[:5])
+                    color_rgba = struct.unpack("4B", mat_data[5:9])
+
+                    print(f"  Material {i}:")
+                    print(f"    Texture Offset:    0x{texname_offset:08X}")
+                    print(f"    Loaded Flag:       {b_loaded}")
+                    print(f"    Diffuse RGBA:      ({color_rgba[0]}, {color_rgba[1]}, {color_rgba[2]}, {color_rgba[3]})")
+
+                    # Save position, jump to TexNameOffset to read texture name
+                    next_mat_pos = start_pos + 12
+                    f.seek(texname_offset)
+
+                    tex_bytes = bytearray()
+                    while True:
+                        c = f.read(1)
+                        if not c or c == b'\x00':
+                            break
+                        tex_bytes.extend(c)
+
+                    texname = tex_bytes.decode("ascii", errors="ignore")
+                    print(f"    Texture Name:      {texname}\n")
+
+                    # Go to next material entry
+                    f.seek(next_mat_pos)
+
 
         return {'FINISHED'}
 
