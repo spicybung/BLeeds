@@ -184,7 +184,33 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
 
                     # Go to next material entry
                     f.seek(next_mat_pos)
+            # -------------------------------
+            # Read BoneTransDataIndex if present
+            # -------------------------------
+            if bone_trans_index_offset != 0:
+                f.seek(bone_trans_index_offset)
+                bone_idx_data = f.read(8)
+                if len(bone_idx_data) == 8:
+                    num_bones, bone_trans_data_offset = struct.unpack("<II", bone_idx_data)
 
+                    print(f"==== Reading BoneTransDataIndex ====")
+                    print(f"Num Bones:               {num_bones}")
+                    print(f"BoneTransData Offset:    0x{bone_trans_data_offset:08X}")
+                    print("======================================\n")
+
+                    if bone_trans_data_offset != 0:
+                        f.seek(bone_trans_data_offset)
+                        print(f"-- Reading {num_bones} Bone Inverse Matrices --")
+                        for i in range(num_bones):
+                            floats = struct.unpack("<16f", f.read(64))
+                            print(f"  Bone {i} Inverse Matrix:")
+                            for r in range(0, 16, 4):
+                                print(f"    {floats[r]:.4f} {floats[r+1]:.4f} {floats[r+2]:.4f} {floats[r+3]:.4f}")
+                        print()
+                else:
+                    print("!! BoneTransDataIndex read was incomplete.\n")
+            else:
+                print("No BoneTransDataIndex present.\n")
 
         return {'FINISHED'}
 
