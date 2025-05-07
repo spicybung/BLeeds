@@ -1,26 +1,34 @@
+import importlib
+import bpy
+
+from . import mdl_importer
+from . import mdl_parser
+from . import matrix_utils
+
 bl_info = {
-    "name": "MDL Importer",
-    "author": "YourName",
+    "name": "Manhunt 2 MDL Importer",
+    "author": "spicybung",
     "version": (1, 0, 0),
     "blender": (3, 0, 0),
     "location": "File > Import > MDL (.mdl)",
-    "description": "Import MDL models (e.g. Manhunt 2 format)",
+    "description": "Importer for Manhunt 2 .mdl models.",
     "category": "Import-Export"
 }
 
-import importlib
-from . import ops, ui
-
-modules = [ops.mdl_importer, ui.import_panel]
+modules = [mdl_importer, mdl_parser, matrix_utils]
 
 def register():
     for mod in modules:
         importlib.reload(mod)
-        mod.register()
+        if hasattr(mod, "register"):
+            mod.register()
+    bpy.types.TOPBAR_MT_file_import.append(mdl_importer.menu_func_import)
 
 def unregister():
     for mod in reversed(modules):
-        mod.unregister()
+        if hasattr(mod, "unregister"):
+            mod.unregister()
+    bpy.types.TOPBAR_MT_file_import.remove(mdl_importer.menu_func_import)
 
 if __name__ == "__main__":
     register()
