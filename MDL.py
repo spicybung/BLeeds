@@ -570,7 +570,22 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             print("Creating Blender Armature from Matrices...")
             arm_data = bpy.data.armatures.new("MDL_Armature")
             arm_obj = bpy.data.objects.new("MDL_Armature", arm_data)
+            # Link armature to the scene (after mesh is created)
             bpy.context.collection.objects.link(arm_obj)
+
+            # Parent armature to the mesh to appear nested under it
+            # Find the top-level mesh object you created (the first one, or the main one)
+            mesh_obj = None
+            for obj in bpy.context.collection.objects:
+                if obj.name.startswith(base_filename):
+                    mesh_obj = obj
+                    break
+
+            if mesh_obj:
+                arm_obj.parent = mesh_obj
+                arm_obj.parent_type = 'OBJECT'
+                print(f"✓ Armature '{arm_obj.name}' parented to mesh '{mesh_obj.name}' (Outliner structure fixed)")
+                                                                                
             bpy.context.view_layer.objects.active = arm_obj
             bpy.ops.object.mode_set(mode='EDIT')
 
@@ -603,12 +618,7 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
             print("Setting up bone groups by hierarchy and parenting meshes...")
 
 
-            # Parent meshes to armature
-            for obj in bpy.context.collection.objects:
-                if obj.name.startswith(base_filename):
-                    obj.parent = arm_obj
-                    obj.parent_type = 'ARMATURE'
-                    print(f"✓ Parented {obj.name} to armature.")
+
 
             print("✔️ Bone groups assigned by hierarchy and meshes parented.")
 
