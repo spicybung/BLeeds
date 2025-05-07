@@ -1,3 +1,4 @@
+import os
 import struct
 import bpy
 from mathutils import Matrix, Vector
@@ -86,52 +87,65 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
                 }
 
 
-        def read_vertex_by_type(f, vtype, count):
+        def read_vertex_by_type(f, vtype, count, per_vertex_size):
             vertices = []
-            for _ in range(count):
+
+            for i in range(count):
                 if vtype == 0x52:
-                    data = struct.unpack("<3f3hH4B", f.read(28))
-                    pos = data[0:3]
-                    norm = tuple(i / 32768.0 for i in data[3:6])
-                    color = data[7:11]
+                    data = f.read(24)
+                    pos = struct.unpack_from("<3f", data, 0)
+                    norm_raw = struct.unpack_from("<3h", data, 12)
+                    color = struct.unpack_from("<4B", data, 18)
+                    norm = tuple(n / 32768.0 for n in norm_raw)
                     vertices.append((pos, norm, color, None))
+
                 elif vtype == 0x152:
-                    data = struct.unpack("<3f3hH4B2f", f.read(36))
-                    pos = data[0:3]
-                    norm = tuple(i / 32768.0 for i in data[3:6])
-                    color = data[7:11]
-                    uv = data[11:13]
+                    data = f.read(32)
+                    pos = struct.unpack_from("<3f", data, 0)
+                    norm_raw = struct.unpack_from("<3h", data, 12)
+                    color = struct.unpack_from("<4B", data, 18)
+                    uv = struct.unpack_from("<2f", data, 22)
+                    norm = tuple(n / 32768.0 for n in norm_raw)
                     vertices.append((pos, norm, color, uv))
+
                 elif vtype == 0x115E:
-                    data = struct.unpack("<3f4f4B3hH4B2f", f.read(52))
-                    pos = data[0:3]
-                    skin_weights = data[3:7]
-                    bone_ids = data[7:11]
-                    norm = tuple(i / 32768.0 for i in data[11:14])
-                    color = data[15:19]
-                    uv = data[19:21]
-                    vertices.append((pos, norm, color, uv, skin_weights, bone_ids))
+                    data = f.read(52)
+                    pos = struct.unpack_from("<3f", data, 0)
+                    weights = struct.unpack_from("<4f", data, 12)
+                    bone_ids = struct.unpack_from("<4B", data, 28)
+                    norm_raw = struct.unpack_from("<3h", data, 32)
+                    color = struct.unpack_from("<4B", data, 38)
+                    uv = struct.unpack_from("<2f", data, 42)
+                    norm = tuple(n / 32768.0 for n in norm_raw)
+                    vertices.append((pos, norm, color, uv, weights, bone_ids))
+
                 elif vtype == 0x125E:
-                    data = struct.unpack("<3f4f4B3hH4B4f", f.read(60))
-                    pos = data[0:3]
-                    skin_weights = data[3:7]
-                    bone_ids = data[7:11]
-                    norm = tuple(i / 32768.0 for i in data[11:14])
-                    color = data[15:19]
-                    uv1 = data[19:21]
-                    uv2 = data[21:23]
-                    vertices.append((pos, norm, color, uv1, uv2, skin_weights, bone_ids))
+                    data = f.read(60)
+                    pos = struct.unpack_from("<3f", data, 0)
+                    weights = struct.unpack_from("<4f", data, 12)
+                    bone_ids = struct.unpack_from("<4B", data, 28)
+                    norm_raw = struct.unpack_from("<3h", data, 32)
+                    color = struct.unpack_from("<4B", data, 38)
+                    uv1 = struct.unpack_from("<2f", data, 42)
+                    uv2 = struct.unpack_from("<2f", data, 50)
+                    norm = tuple(n / 32768.0 for n in norm_raw)
+                    vertices.append((pos, norm, color, uv1, uv2, weights, bone_ids))
+
                 elif vtype == 0x252:
-                    data = struct.unpack("<3f3hH4B4f", f.read(44))
-                    pos = data[0:3]
-                    norm = tuple(i / 32768.0 for i in data[3:6])
-                    color = data[7:11]
-                    uv1 = data[11:13]
-                    uv2 = data[13:15]
+                    data = f.read(40)
+                    pos = struct.unpack_from("<3f", data, 0)
+                    norm_raw = struct.unpack_from("<3h", data, 12)
+                    color = struct.unpack_from("<4B", data, 18)
+                    uv1 = struct.unpack_from("<2f", data, 22)
+                    uv2 = struct.unpack_from("<2f", data, 30)
+                    norm = tuple(n / 32768.0 for n in norm_raw)
                     vertices.append((pos, norm, color, uv1, uv2))
+
                 else:
                     raise ValueError(f"Unknown VertexElementType: 0x{vtype:X}")
+
             return vertices
+
 
         with open(self.filepath, "rb") as f:
             # -------------------------------
@@ -211,80 +225,240 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
                 print("Root Bone Offset is 0 — skipping root bone read.\n")
 
             # -------------------------------
-            # Read ObjectInfo
+            # Read ObjectInfos (support multiple objects)
             # -------------------------------
-            object_info_offset = first_obj_info_offset
-            if object_info_offset == 0 and last_obj_info_offset > 0:
+            object_infos = []
+            current_info_offset = first_obj_info_offset
+            visited_offsets = set()
+
+            if current_info_offset == 0 and last_obj_info_offset > 0:
                 print("First ObjectInfo Offset is 0 — falling back to Last ObjectInfo Offset.\n")
-                object_info_offset = last_obj_info_offset
+                current_info_offset = last_obj_info_offset
 
-            if object_info_offset > 0:
-                f.seek(object_info_offset)
+            print("==== Traversing ObjectInfo blocks ====")
+            while current_info_offset not in visited_offsets and current_info_offset != 0:
+                visited_offsets.add(current_info_offset)
+                f.seek(current_info_offset)
                 object_info_data = f.read(28)
-                object_info = struct.unpack("<7i", object_info_data)
+                if len(object_info_data) < 28:
+                    print(f"!! Incomplete ObjectInfo at 0x{current_info_offset:08X}")
+                    break
 
+                object_info = struct.unpack("<7i", object_info_data)
+                next_info_offset = object_info[0]
                 object_data_offset = object_info[3]
 
-                print("==== Reading ObjectInfo ====")
-                print(f"Next Object Offset:       0x{object_info[0]:08X}")
-                print(f"Prev Object Offset:       0x{object_info[1]:08X}")
-                print(f"Parent Bone Offset:       0x{object_info[2]:08X}")
-                print(f"Object Data Offset:       0x{object_data_offset:08X}")
-                print(f"Root Entry Offset:        0x{object_info[4]:08X}")
-                print(f"Zero Field:               0x{object_info[5]:08X}")
-                print(f"Unknown (Always 3):       0x{object_info[6]:08X}")
-                print("==================================\n")
+                object_infos.append((current_info_offset, object_data_offset))
+
+                print(f"ObjectInfo @ 0x{current_info_offset:08X}")
+                print(f"  Next Object Offset:   0x{object_info[0]:08X}")
+                print(f"  Prev Object Offset:   0x{object_info[1]:08X}")
+                print(f"  Parent Bone Offset:   0x{object_info[2]:08X}")
+                print(f"  Object Data Offset:   0x{object_data_offset:08X}")
+                print(f"  Root Entry Offset:    0x{object_info[4]:08X}")
+                print(f"  Zero Field:           0x{object_info[5]:08X}")
+                print(f"  Unknown (Always 3):   0x{object_info[6]:08X}\n")
+
+                if next_info_offset == current_info_offset or next_info_offset == 0:
+                    break
+                current_info_offset = next_info_offset
+
+            print(f"✅ Found {len(object_infos)} ObjectInfo entries.")
+            print("============================================\n")
+
 
             # -------------------------------
-            # Read Object Chunk Header
+            # Read Object Chunk Header for Each Object
             # -------------------------------
-            f.seek(object_data_offset)
-            obj_chunk = f.read(180)
-            if len(obj_chunk) < 180:
-                print("!! Incomplete Object Header read")
-            else:
-                (
-                    material_offset, num_materials, bone_trans_offset, unknown_f, unknown1,
-                    ux, uy, uz, model_chunk_flag, model_chunk_size,
-                    zero, numMaterialIDs, numFaceIndex,
-                    bs_x, bs_y, bs_z, bs_radius,
-                    scale_x, scale_y, scale_z,
-                    num_vertices, zero2_0, zero2_1, zero2_2,
-                    per_vertex_size,
-                    unk4_0, unk4_1, unk4_2, unk4_3, unk4_4,
-                    unk4_5, unk4_6, unk4_7, unk4_8, unk4_9, unk4_10,
-                    vertex_element_type,
-                    unk5_0, unk5_1, unk5_2, unk5_3,
-                    unk5_4, unk5_5, unk5_6, unk5_7
-                ) = struct.unpack("<3I f I 3f 2I 3I 3f f 3f I 3I I 11I I 8I", obj_chunk)
+            for obj_index, (info_offset, object_data_offset) in enumerate(object_infos):
+                print(f"\n======= Reading Object Chunk Header for Object {obj_index} =======")
+                f.seek(object_data_offset)
+                obj_chunk = f.read(180)
+                if len(obj_chunk) < 180:
+                    print("!! Incomplete Object Header read, skipping.")
+                    continue
 
-                unknown4 = [unk4_0, unk4_1, unk4_2, unk4_3, unk4_4, unk4_5, unk4_6, unk4_7, unk4_8, unk4_9, unk4_10]
-                unknown5 = [unk5_0, unk5_1, unk5_2, unk5_3, unk5_4, unk5_5, unk5_6, unk5_7]
+                try:
+                    (
+                        material_offset, num_materials, bone_trans_offset, unknown_f, unknown1,
+                        ux, uy, uz, model_chunk_flag, model_chunk_size,
+                        zero, numMaterialIDs, numFaceIndex,
+                        bs_x, bs_y, bs_z, bs_radius,
+                        scale_x, scale_y, scale_z,
+                        num_vertices, zero2_0, zero2_1, zero2_2,
+                        per_vertex_size,
+                        *unk_rest
+                    ) = struct.unpack("<3I f I 3f 2I 3I 3f f 3f I 3I I 11I I 8I", obj_chunk)
 
-                print("==== Reading Object Chunk Header ====")
-                print(f"Material Offset:           0x{material_offset:08X}")
-                print(f"Num Materials:             {num_materials}")
-                print(f"BoneTransDataIndexOffset:  0x{bone_trans_offset:08X}")
-                print(f"Unknown Float:             {unknown_f}")
-                print(f"Unknown Int:               0x{unknown1:08X}")
-                print(f"Unknown3 Vector:           ({ux:.4f}, {uy:.4f}, {uz:.4f})")
-                print(f"Model Chunk Flag:          0x{model_chunk_flag:08X}")
-                print(f"Model Chunk Size:          {model_chunk_size}")
-                print(f"Zero:                      0x{zero:08X}")
-                print(f"Number of Material IDs:    {numMaterialIDs}")
-                print(f"Number of Face Indices:    {numFaceIndex}")
-                print(f"Bounding Sphere XYZ:       ({bs_x:.3f}, {bs_y:.3f}, {bs_z:.3f})")
-                print(f"Bounding Sphere Radius:    {bs_radius:.3f}")
-                print(f"Bounding Scale XYZ:        ({scale_x:.3f}, {scale_y:.3f}, {scale_z:.3f})")
-                print(f"Number of Vertices:        {num_vertices}")
-                print(f"Zero2 (int[3]):            ({zero2_0}, {zero2_1}, {zero2_2})")
-                print(f"Per-Vertex Element Size:   {per_vertex_size}")
-                print(f"Unknown4 (int[11]):        {unknown4}")
-                print(f"Vertex Element Type:       0x{vertex_element_type:X}")
-                print(f"Unknown5 (int[8]):         {unknown5}")
-                print("======================================\n")
+                    unk4 = unk_rest[:11]
+                    vertex_element_type = unk_rest[11]
+                    unk5 = unk_rest[12:]
 
+                    print(f"Material Offset:           0x{material_offset:08X}")
+                    print(f"Num Materials:             {num_materials}")
+                    print(f"BoneTransDataIndexOffset:  0x{bone_trans_offset:08X}")
+                    print(f"Vertex Element Type:       0x{vertex_element_type:X}")
+                    print(f"Number of Vertices:        {num_vertices}")
+                    print(f"Number of Face Indices:    {numFaceIndex}")
+                except Exception as e:
+                    print(f"!! Failed to unpack object chunk: {e}")
+                    continue
+
+                # Seek and read faces
+                try:
+                    face_offset = object_data_offset + 180 + (numMaterialIDs * 0x30)
+                    f.seek(face_offset)
+                    faces = []
+                    for i in range(numFaceIndex // 3):
+                        face_raw = f.read(6)
+                        if len(face_raw) < 6:
+                            print(f"⚠️ Incomplete face at triangle {i}")
+                            break
+                        a, b, c = struct.unpack("<3H", face_raw)
+                        if a >= num_vertices or b >= num_vertices or c >= num_vertices:
+                            print(f"⚠️ Face {i} references invalid vertex index: {a}, {b}, {c}")
+                            continue
+                        faces.append((a, b, c))
+                    if not faces:
+                        print("❌ No valid faces, skipping.")
+                        continue
+                except Exception as e:
+                    print(f"❌ Failed to read faces: {e}")
+                    continue
+
+                # Read vertices
+                try:
+                    # Calculate vertex buffer offset
+                    vertex_offset = object_data_offset + 180 + (numMaterialIDs * 32) + ((numFaceIndex // 3) * 6)
+
+
+
+                    print(f"🔍 Calculated Vertex Buffer Offset: 0x{vertex_offset:08X}")
+                    f.seek(vertex_offset + 36)
+
+                    try:
+                        vertices = read_vertex_by_type(f, vertex_element_type, num_vertices, per_vertex_size)
+                    except Exception as e:
+                        print(f"❌ Failed to read vertices at calculated offset: {e}")
+                        continue
+
+                except Exception as e:
+                    print(f"❌ Failed to read vertices: {e}")
+                    continue
+
+                if len(vertices) != num_vertices:
+                    print(f"❌ Vertex count mismatch. Got {len(vertices)} expected {num_vertices}")
+                    continue
                 
+                # -------------------------------
+                # Read Materials
+                # -------------------------------
+                materials = []
+                if material_offset != 0 and num_materials > 0:
+                    f.seek(material_offset)
+                    for i in range(num_materials):
+                        mat_raw = f.read(16)
+                        if len(mat_raw) < 16:
+                            print(f"!! Material {i} read incomplete")
+                            break
+
+                        tex_offset, b_loaded = struct.unpack("<IB", mat_raw[:5])
+                        color = struct.unpack("4B", mat_raw[5:9])
+                        # Skips 3 bytes of padding
+
+                        # Save current position to come back after reading TexName
+                        current = f.tell()
+
+                        # Read Texture Name
+                        f.seek(tex_offset)
+                        tex_name_bytes = bytearray()
+                        while True:
+                            b = f.read(1)
+                            if not b or b == b'\x00':
+                                break
+                            tex_name_bytes += b
+                        tex_name = tex_name_bytes.decode("ascii", errors="replace")
+
+                        materials.append({
+                            "tex_name": tex_name,
+                            "color": color,
+                            "loaded": b_loaded
+                        })
+
+                        print(f"Material {i}: Loaded={b_loaded}, Color RGBA={color}, TexName='{tex_name}'")
+
+                        f.seek(current)
+                else:
+                    print("No material block found or num_materials == 0.")
+
+                # Create Blender Mesh
+                try:
+                    # Get the base name of the file, strip extension
+                    base_filename = os.path.splitext(os.path.basename(self.filepath))[0]
+
+                    # Build a unique name per mesh object
+                    name = f"{base_filename}_{obj_index}"
+
+                    # Create mesh and object
+                    mesh = bpy.data.meshes.new(name)
+                    obj = bpy.data.objects.new(name, mesh)
+                    bpy.context.collection.objects.link(obj)
+                    mesh.from_pydata([v[0] for v in vertices], [], faces)
+                    mesh.update()
+                    print(f"✅ Blender Mesh created: MDL_Mesh_{obj_index}")
+                    
+                    # Add materials to the mesh
+                    for mat_data in materials:
+                        mat_name = mat_data['tex_name'] or f"Material_{obj_index}"
+                        mat = bpy.data.materials.get(mat_name)
+                        if mat is None:
+                            mat = bpy.data.materials.new(name=mat_name)
+                            mat.use_nodes = True
+                            bsdf = mat.node_tree.nodes.get("Principled BSDF")
+                            if bsdf:
+                                b, g, r, a = mat_data['color']
+                                bsdf.inputs['Base Color'].default_value = (r/255.0, g/255.0, b/255.0, a/255.0)
+                        mesh.materials.append(mat)
+
+                    # Apply material indices to polygons using MaterialIDs
+                    try:
+                        material_ids_offset = object_data_offset + 180  # right after the header
+                        f.seek(material_ids_offset)
+                        material_ids = []
+
+                        for i in range(numMaterialIDs):
+                            entry = f.read(32)
+                            if len(entry) < 32:
+                                break
+                            (
+                                bb_min_x, bb_min_y, bb_min_z,
+                                bb_max_x, bb_max_y, bb_max_z,
+                                num_faces, material_id,
+                                start_face_id, _,
+                                *_  # skip 12 bytes
+                            ) = struct.unpack("<6f4H12x", entry)
+                            material_ids.append({
+                                "material_id": material_id,
+                                "start_face_id": start_face_id,
+                                "num_faces": num_faces
+                            })
+
+                        print(f"🎯 Applying MaterialIDs to mesh polygons...")
+
+                        for matid in material_ids:
+                            start = matid["start_face_id"]
+                            end = start + matid["num_faces"]
+                            for poly_idx in range(start, end):
+                                if poly_idx < len(mesh.polygons):
+                                    mesh.polygons[poly_idx].material_index = matid["material_id"]
+                    except Exception as e:
+                        print(f"⚠️ Failed to apply MaterialIDs: {e}")
+
+
+                except Exception as e:
+                    print(f"❌ Failed to create Blender mesh: {e}")
+                    continue
+
             # -------------------------------
             # Read BoneTransDataIndex (header)
             # -------------------------------
@@ -425,7 +599,18 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
 
             bpy.ops.object.mode_set(mode='OBJECT')
             print("Armature created.")
+            
+            print("Setting up bone groups by hierarchy and parenting meshes...")
 
+
+            # Parent meshes to armature
+            for obj in bpy.context.collection.objects:
+                if obj.name.startswith(base_filename):
+                    obj.parent = arm_obj
+                    obj.parent_type = 'ARMATURE'
+                    print(f"✓ Parented {obj.name} to armature.")
+
+            print("✔️ Bone groups assigned by hierarchy and meshes parented.")
 
 
         return {'FINISHED'}
