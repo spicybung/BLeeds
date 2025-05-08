@@ -14,6 +14,10 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
     def execute(self, context):
         bone_map = {}
 
+        # ================================
+        # === Reading Helper Functions ===
+        # ================================
+
         def read_element_group(f, offset):
             f.seek(offset)
             raw = f.read(12)
@@ -40,7 +44,7 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
                     print(f"!! RslElement block too short at 0x{offset:08X}")
                     return None, None
 
-                print(f"\n!! Raw RslElement @ 0x{offset:08X}: {raw.hex(' ', 4)}")
+                print(f"\n!! Raw RslElement @ 0x{offset:08X}: {raw.hex(' ', 4)}")   # '!!'... Emojis are more "modern-friendly" :(
 
                 obj_type, obj_subtype, flags, priv_flags = struct.unpack("4B", raw[:4])
                 geometry_ptr = struct.unpack("<I", raw[4:8])[0]
@@ -73,7 +77,7 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
                 self.report({'ERROR'}, "Header too short, aborting...")
                 return {'CANCELLED'}
 
-            ident, version, filesize, datasize, tocoffset, tocnum, zero1, zero2, entry_end, entry_start, material, material2 = struct.unpack("<4sIIIIIIIiiii", header_data)
+            ident, version, filesize, datasize, tocoffset, tocnum, zero1, zero2, entry_end, entry_start, material, unk1 = struct.unpack("<4sIIIIIIIiiii", header_data)
             ident = ident.decode('ascii')
 
             # ================================
@@ -87,12 +91,12 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
             print(f"Data Size:           {datasize} bytes")     # Data size, or flags?
             print(f"Num Table Ptr:       0x{tocoffset:08X}")    # Num Table pointer
             print(f"Num Table Entries:   {tocnum}")             # Number of table entries
-            print(f"Data Size (again):   0x{zero1:08X}")        # Data size again, or private flags?
+            print(f"Data Size (again?):  0x{zero1:08X}")        # Data size again, or private flags?
             print(f"Allocated Mem Size:  0x{zero2:08X}")        # Allocated memory size or unknown?
             print(f"Clump Ptr:           0x{entry_start:08X}")  # Clump pointer
-            print(f"Geometry Ptr:         0x{entry_end:08X}")   # Geometry pointer?
+            print(f"Geometry Ptr:        0x{entry_end:08X}")    # Geometry pointer?
             print(f"Material List Ptr:   0x{material:08X}")     # Material name list pointer
-            print(f"Unknown Offset 1:    0x{material2:08X}")    # Padding?
+            print(f"Unknown 1:           0x{unk1:08X}")         # Padding?
             print("=================================\n")
 
 
