@@ -7,7 +7,7 @@ from bpy_extras.io_utils import ImportHelper
 
 class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
     bl_idname = "import_scene.read_vcs_mdl_header"
-    bl_label = "Import VCS MDL and Read Header"
+    bl_label = "Import VCS MDL and Read"
     filename_ext = ".mdl"
     filter_glob: bpy.props.StringProperty(default="*.mdl", options={'HIDDEN'})
 
@@ -29,7 +29,7 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
             print(f"Flags:        {flags}")
             print(f"PrivateFlags: {priv_flags}")
             print(f"First Element Link:  0x{next_ptr:08X}")
-            print(f"Last Element Link:   0x{prev_ptr:08X}")
+            print(f"Last Element Link:   0x{prev_ptr:08X}")     
 
             return next_ptr, offset  # link pointer and the group start for circular test
 
@@ -37,10 +37,10 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
                 f.seek(offset)
                 raw = f.read(34)
                 if len(raw) < 34:
-                    print(f"❌ RslElement block too short at 0x{offset:08X}")
+                    print(f"!! RslElement block too short at 0x{offset:08X}")
                     return None, None
 
-                print(f"\n📄 Raw RslElement @ 0x{offset:08X}: {raw.hex(' ', 4)}")
+                print(f"\n!! Raw RslElement @ 0x{offset:08X}: {raw.hex(' ', 4)}")
 
                 obj_type, obj_subtype, flags, priv_flags = struct.unpack("4B", raw[:4])
                 geometry_ptr = struct.unpack("<I", raw[4:8])[0]
@@ -61,7 +61,8 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
                 print(f"RenderCB Ptr:          0x{render_cb:08X}")
                 print(f"Model Info ID:         {model_info_id}")
                 print(f"Vis ID Flag:           {vis_id_flag}")
-                print(f"Anim Tree Ptr:         0x{hier_ptr:08X}")
+                print(f"Anim Tree Ptr:         0x{hier_ptr:08X}")   # Wat is going on here? Doesn't seem right.
+                                                                    # Who wrote the GTAMods .MDL article stub?
 
                 return link_next, offset
 
@@ -69,26 +70,30 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
         with open(self.filepath, "rb") as f:
             header_data = f.read(0x30)
             if len(header_data) != 0x30:
-                self.report({'ERROR'}, "MDL header too short.")
+                self.report({'ERROR'}, "Header too short, aborting...")
                 return {'CANCELLED'}
 
             ident, version, filesize, datasize, tocoffset, tocnum, zero1, zero2, entry_end, entry_start, material, material2 = struct.unpack("<4sIIIIIIIiiii", header_data)
             ident = ident.decode('ascii')
 
-            print("==== Reading MDL Header ====")
-            print(f"Signature:           {ident}")
-            print(f"Version:             {version:08X}")
-            print(f"File Size:           {filesize} bytes")
-            print(f"Data Size:           {datasize} bytes")
-            print(f"Offset Table Start:  0x{tocoffset:08X}")
-            print(f"Num Table Entries:   {tocnum}")
-            print(f"Data Size (again):   0x{zero1:08X}")
-            print(f"Allocated Mem Size:  0x{zero2:08X}")
-            print(f"First Entry Offset:  0x{entry_start:08X}")
-            print(f"Last Entry Offset:   0x{entry_end:08X}")
-            print(f"Material Offset:   0x{material:08X}")
-            print(f"Unknown Offset 1:   0x{material2:08X}")
-            print("============================\n")
+            # ================================
+            # === Read VCS ver .MDL Header ===
+            # ================================
+
+            print("==== Reading VCS .MDL Header... ====")
+            print(f"Signature:           {ident}")              # .mdl for VCS(& LCS?)
+            print(f"Version:             {version:08X}")        # 0 for VCS, or unknown DWORD?
+            print(f"File Size:           {filesize} bytes")     # File size
+            print(f"Data Size:           {datasize} bytes")     # Data size, or flags?
+            print(f"Num Table Ptr:       0x{tocoffset:08X}")    # Num Table pointer
+            print(f"Num Table Entries:   {tocnum}")             # Number of table entries
+            print(f"Data Size (again):   0x{zero1:08X}")        # Data size again, or private flags?
+            print(f"Allocated Mem Size:  0x{zero2:08X}")        # Allocated memory size or unknown?
+            print(f"Clump Ptr:           0x{entry_start:08X}")  # Clump pointer
+            print(f"Geometry Ptr:         0x{entry_end:08X}")   # Geometry pointer?
+            print(f"Material List Ptr:   0x{material:08X}")     # Material name list pointer
+            print(f"Unknown Offset 1:    0x{material2:08X}")    # Padding?
+            print("=================================\n")
 
 
             # ================================
@@ -127,6 +132,7 @@ class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
                 print(f"Unused Data:   0x{unused1:08X}")
 
                 # Looks like we've found the Material struct.
+                # We're not actually reading the entire material name list atm.
                 # Return to where we left off
                 f.seek(current_pos)
 
