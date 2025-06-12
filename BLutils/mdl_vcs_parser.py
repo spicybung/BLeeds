@@ -1,157 +1,429 @@
-import os
-import struct
-import bpy
-from mathutils import Matrix, Vector
-from bpy.types import Operator
-from bpy_extras.io_utils import ImportHelper
+bl_info = {
+    "name": "Import LCS/VCS .MDL (Fixed)",
+    "author": "spicybung",
+    "version": (0, 0, 1),
+    "blender": (2, 80, 0),
+    "location": "File > Import > GTA .MDL (LCS/VCS)",
+    "description": "Import LCS/VCS .MDL",
+    "category": "Import-Export"
+}
 
-class IMPORT_OT_read_vcs_mdl_header(Operator, ImportHelper):
-    bl_idname = "import_scene.read_vcs_mdl_header"
-    bl_label = "Import VCS MDL and Read"
+import bpy
+import struct
+from bpy_extras.io_utils import ImportHelper
+from bpy.types import Operator
+from bpy.props import StringProperty
+
+
+
+
+class ImportMDLOperator(bpy.types.Operator, ImportHelper):
+    bl_idname = "import_scene.mdl_fixed"
+    bl_label = "Import LCS/VCS .MDL"
+    bl_description = "Import a GTA LCS/VCS .MDL file"
     filename_ext = ".mdl"
-    filter_glob: bpy.props.StringProperty(default="*.mdl", options={'HIDDEN'})
+    filter_glob: StringProperty(default="*.mdl", options={'HIDDEN'})
 
     def execute(self, context):
-        bone_map = {}
+        return self.read_mdl(self.filepath)
 
-        # ================================
-        # === Reading Helper Functions ===
-        # ================================
+    def read_mdl(self, filepath):
+        try:
+            with open(filepath, "rb") as f:  # Read file as bytes
+                print(f"✔ Opened: {filepath}")
 
-        def read_element_group(f, offset):      # RW(RenderWare) sections replaced with Rsl(R* Leeds) sections
-            f.seek(offset)
-            raw = f.read(12)
-            if len(raw) < 12:
-                print(f"!! Failed to read RslElementGroup at 0x{offset:08X}")
-                return 0
-            rsl_type, subtype, flags, priv_flags = struct.unpack("4B", raw[:4])
-            next_ptr, prev_ptr = struct.unpack("<2I", raw[4:12])
+                scaleFactor = 100.0 
 
-            print("\n🎯 RslElementGroup")
-            print(f"Type:         {rsl_type}")
-            print(f"Subtype:      {subtype}")
-            print(f"Flags:        {flags}")
-            print(f"PrivateFlags: {priv_flags}")
-            print(f"First Element Link:  0x{next_ptr:08X}")
-            print(f"Last Element Link:   0x{prev_ptr:08X}")     
+                def read_frame_chain(f, start_ptr, import_type, scale_factor):
+                    """Parses a chain of frames starting at frame_ptr, creating Blender empties and returning them."""
+                    bones = []
+                    visited_ptrs = set()
+                    current_ptr = start_ptr
 
-            return next_ptr, offset  # link pointer and the group start for circular test
+                    while current_ptr != 0 and current_ptr not in visited_ptrs:
+                        visited_ptrs.add(current_ptr)
 
-        def read_element(f, offset):
-                f.seek(offset)
-                raw = f.read(34)
-                if len(raw) < 34:
-                    print(f"!! RslElement block too short at 0x{offset:08X}")
-                    return None, None
+                        f.seek(current_ptr + 8)
+                        _ = read_u32()  # unknown
 
-                print(f"\n!! Raw RslElement @ 0x{offset:08X}: {raw.hex(' ', 4)}")   # '!!'... Emojis are more "modern-friendly" :(
+                        # Read 3x3 rotation matrix and translation vector
+                        rot1 = (read_f32(), read_f32(), read_f32()); _ = read_u32()
+                        rot2 = (read_f32(), read_f32(), read_f32()); _ = read_u32()
+                        rot3 = (read_f32(), read_f32(), read_f32()); _ = read_u32()
+                        trans = (read_f32(), read_f32(), read_f32()); _ = read_u32()
 
-                obj_type, obj_subtype, flags, priv_flags = struct.unpack("4B", raw[:4])
-                geometry_ptr = struct.unpack("<I", raw[4:8])[0]
-                clump_ptr = struct.unpack("<I", raw[12:16])[0]
-                link_next, link_prev = struct.unpack("<2I", raw[16:24])
-                render_cb = struct.unpack("<I", raw[24:28])[0]
-                model_info_id, vis_id_flag = struct.unpack("<hH", raw[28:32])
-                hier_ptr = struct.unpack("<I", raw[32:36])[0] if len(raw) >= 36 else 0  # safety for overread
+                        trans = tuple(coord * (scale_factor / 100.0) for coord in trans)
 
-                print(f"\n🔶 RslElement")
-                print(f"Type/Subtype:          {obj_type}/{obj_subtype}")
-                print(f"Flags:                 {flags}")
-                print(f"Private Flags:         {priv_flags}")
-                print(f"Geometry Ptr:          0x{geometry_ptr:08X}")
-                print(f"Clump (ElementGroup):  0x{clump_ptr:08X}")
-                print(f"Link Next:             0x{link_next:08X}")
-                print(f"Link Prev:             0x{link_prev:08X}")
-                                                                    # Wat is going on here? Doesn't seem right.
-                                                                    # Who wrote the GTAMods .MDL article stub?
-                                                                    # S.O.S
+                        if import_type == 2:
+                            f.seek(4, 1)
 
-                return link_next, offset
+                        bone_name_ptr = read_u32()
+                        name = "unnamed"
+                        if bone_name_ptr > 0:
+                            f.seek(bone_name_ptr)
+                            name_bytes = bytearray()
+                            while True:
+                                c = f.read(1)
+                                if not c or c == b'\x00':
+                                    break
+                                name_bytes.append(c[0])
+                            name = name_bytes.decode("utf-8", errors="ignore")
 
+                        # Create empty object in Blender
+                        empty = bpy.data.objects.new(name, None)
+                        empty.empty_display_type = 'ARROWS'
+                        empty.location = trans
+                        bpy.context.collection.objects.link(empty)
+                        bones.append(empty)
 
-        with open(self.filepath, "rb") as f:
-            header_data = f.read(0x30)
-            if len(header_data) != 0x30:
-                self.report({'ERROR'}, "Header too short, aborting...")
-                return {'CANCELLED'}
+                        # Get next pointer from current frame
+                        f.seek(current_ptr + 0x90)
+                        next_ptr = read_u32()
 
-            ident, version, filesize, datasize, tocoffset, tocnum, zero1, zero2, entry_end, entry_start, material, unk1 = struct.unpack("<4sIIIIIIIiiii", header_data)
-            ident = ident.decode('ascii')
+                        current_ptr = next_ptr
 
-            # ================================
-            # === Read VCS ver .MDL Header ===
-            # ================================
-
-            print("==== Reading VCS .MDL Header... ====")
-            print(f"Signature:           {ident}")              # .mdl for VCS(& LCS)
-            print(f"Version:             {version:08X}")        # 0 for VCS, or unknown DWORD?
-            print(f"File Size:           {filesize} bytes")     # File size
-            print(f"Data Size:           {datasize} bytes")     # Data size, or flags?
-            print(f"Num Table Ptr:       0x{tocoffset:08X}")    # Num Table pointer
-            print(f"Num Table Entries:   {tocnum}")             # Number of table entries
-            print(f"Data Size (again?):  0x{zero1:08X}")        # Data size again, or private flags?
-            print(f"Allocated Mem Size:  0x{zero2:08X}")        # Allocated memory size or unknown?
-            print(f"Clump Ptr:           0x{entry_start:08X}")  # Clump pointer
-            print(f"Top Lvl Ptr:        0x{entry_end:08X}")    # Top level pointer? Geometry?
-            print(f"Material List Ptr:   0x{material:08X}")     # Material name list pointer
-            print(f"Unknown 1:           0x{unk1:08X}")         # Padding?
-            print("=================================\n")
+                    print(f"✔ Imported {len(bones)} bones/frames.")
+                    return bones
 
 
-            # ================================
-            # === Read VCS-Style Materials ===
-            # ================================
-            f.seek(material)
-            print("==== Reading Materials at 0x%08X ====" % material)
-
-            for i in range(16):  
-                entry_offset = f.tell()
-                entry = f.read(16)
-                if len(entry) < 16:
-                    print(f"Reached end of material data at {entry_offset:08X}")
-                    break
-
-                texname_ptr, r, g, b, a, shader_flags, unused1 = struct.unpack("<I4B2I", entry)
-
-                # Store current pointer
-                current_pos = f.tell()
-
-                # Go read the string
-                f.seek(texname_ptr)
-                name_bytes = bytearray()
-                while True:
-                    byte = f.read(1)
-                    if byte == b'\x00' or byte == b'':
-                        break
-                    name_bytes.append(byte[0])
-                tex_name = name_bytes.decode('ascii', errors='replace')
-
-                print(f"\n🎨 Material[{i}] @ 0x{entry_offset:08X}")
-                print(f"Texture Ptr:   0x{texname_ptr:08X}")        # Offset pointer to texture name
-                print(f"Name:          {tex_name}")                 # Texture name
-                print(f"Color RGBA:    ({r}, {g}, {b}, {a})")       # RGBA
-                print(f"Shader Flags:  0x{shader_flags:08X}")       # Shader flags?
-                print(f"Unused Data:   0x{unused1:08X}")            # Padding?
-
-                # Looks like we've found the Material struct.
-                # We're not actually reading the entire material name list atm.
-                # Return to where we left off
-                f.seek(current_pos)
+                def read_u32():
+                    return struct.unpack("<I", f.read(4))[0]  # Read unsigned 32bit integer
+                
+                def read_f32():
+                    return struct.unpack("<f", f.read(4))[0]  # Read float-32
+                
+                def jump_and_read_u32(offset=4):
+                    f.seek(offset, 1)  # Jump ahead by 'offset' bytes relative to current position
+                    return struct.unpack("<I", f.read(4))[0]
 
 
+                # --- Header parsing ---
+                magic = f.read(4)
+                if magic != b'ldm\x00': # .mdl in reverse endianness
+                    self.report({'ERROR'}, "Invalid MDL header.")
+                    return {'CANCELLED'}
+                print(f"✔ Header: {magic.decode(errors='ignore')!r}")
+
+                shrink = read_u32()  # loaded by Leeds Engine but seemingly unused - maybe used later?
+                file_len = read_u32()         # physical fiile size
+                local_numTable = read_u32()   # local entries numtable
+                global_numTable = read_u32()  # global entries numtable 
+                numEntries = read_u32()  # number of entries
+                ptr2_before_tex = read_u32()
+                allocMem = read_u32()  # amount of memory allocated to file
+                _ = read_u32()  # skip D-WORD 0x1D10
+                top_level_ptr = read_u32()  # pointer at 0x24
+
+                print(f"File Size: 0x{file_len}")
+                print(f"Local numTable: 0x{local_numTable:X}, Global numTable: 0x{global_numTable:X}")
+                print(f"Number of entries: 0x{numEntries}")
+                print(f"Ptr2BeforeTexNameList: 0x{ptr2_before_tex:X}")
+                print(f"Allocated memory: 0x{allocMem}")
+                print(f"Top-level ptr or magic value: 0x{top_level_ptr:X}")
+
+                if top_level_ptr >= file_len:
+                    print("❌ Top-level pointer is beyond file size.")
+                    return {'CANCELLED'}
+
+                f.seek(top_level_ptr)
+                top_magic = read_u32()
+                print(f"Magic at top-level ptr: 0x{top_magic:X}")
+
+                # --- Section & import type detection ---
+                section_type = 0
+                import_type = 0
+
+                LCSCLUMP = 0x00000002
+                LCSATOMIC1 = 0x01050001
+                LCSATOMIC2 = 0x01000001
+                VCSCLUMP = 0x0000AA02
+                VCSATOMIC1 = 0x0004AA01
+                VCSATOMIC2 = 0x0004AA01
+
+                if top_magic in (LCSCLUMP, VCSCLUMP):
+                    section_type = 7
+                    import_type = 1 if top_magic == LCSCLUMP else 2
+                elif top_magic in (LCSATOMIC1, LCSATOMIC2, VCSATOMIC1, VCSATOMIC2):
+                    section_type = 2
+                    import_type = 1 if top_magic in (LCSATOMIC1, LCSATOMIC2) else 2
+                else:
+                    print(f"❌ Unrecognized pointer content: 0x{top_magic:X}")
+
+                print(f"Section Type: {section_type}")
+                print(f"Import Type: {import_type} (0=Unknown, 1=LCS, 2=VCS)")
+
+                # --- Section 7 handling (Clump) ---
+                if section_type == 7:
+
+                    f.seek(-4, 1)
+
+                    print("✔ Detected Section Type 7: Clump")
+
+                    clump_start = f.tell()
+                    print(f"Clump found at: 0x{clump_start:X}")
+
+                    clump_id = read_u32()
+                    first_frame = read_u32()
+                    first_atomic_pos = read_u32()
+
+                    print(f"firstFrame: 0x{first_frame:X}")
+                    print(f"firstAtomicPos: 0x{first_atomic_pos:X}")
+
+                    atomic_seek_pos = first_atomic_pos - 0x1C
+                    print(f"→ Seeking to atomic at: 0x{atomic_seek_pos:X}")
+
+                    if atomic_seek_pos >= file_len:
+                        print("❌ Atomic pointer is beyond file size.")
+                        return {'CANCELLED'}
+
+                    f.seek(atomic_seek_pos)
+
+                    # Update parsing state as if in section type 2
+                    section_type = 2
+                    atomics_count = 1
+                    cur_atomic = 1
+
+                    print("✔ Jumped to embedded atomic (Section 2 emulation)")
+                    print("--- End of header parsing ---")
+
+                if section_type == 2:
+                    print("✔ Detected Section Type 2: Atomic")
+
+                    atomics = []
+                    frame_data_list = []
+                    dummies = []
+                    bone_list = []
+                    frame_ptr_list = []
+
+                    actor_mdl = False
+                    root_bone_link = not actor_mdl  # dun goofed here pretty sure...
+                    cur_atomic_index = 1
+
+                    atomic_start = f.tell()
+                    print(f"Atomic section begins at: 0x{atomic_start:X}")
+
+                    _ = read_u32()  # Unknown
+                    
+                    f.seek(22, 1)
+                    
+                    frame_ptr = read_u32()
+                    print(f"frame_ptr: 0x{frame_ptr:X}")
+
+                    bones = read_frame_chain(f, frame_ptr, import_type, scaleFactor)
+                    
+                    
+                    return {'FINISHED'}
+            
+            if section_type == 3:
+                    print(f"✔ Parsing Section 3 (Geometry) at offset {f.tell():X}")
+
+                    _ = read_u32()
+                    _ = read_u32()
+                    _ = read_u32()
+
+                    material_list_ptr = read_u32()
+                    material_count = read_u32()
+
+                    materials = []
+
+                    if material_count > 0:
+                        old_pos = f.tell()
+                        f.seek(material_list_ptr)
+
+                        for _ in range(material_count):
+                            mat_ptr = read_u32()
+                            old_mat_pos = f.tell()
+
+                            f.seek(mat_ptr)
+                            tex_ptr = read_u32()
+
+                            material = {'texture': '', 'rgba': 0, 'specular': 0.0}
+
+                            if tex_ptr != 0:
+                                temp_pos = f.tell()
+                                f.seek(tex_ptr)
+                                texture_bytes = bytearray()
+                                while True:
+                                    b = f.read(1)
+                                    if b == b'\x00' or not b:
+                                        break
+                                    texture_bytes.append(b[0])
+                                material['texture'] = texture_bytes.decode('utf-8', errors='ignore')
+                                f.seek(temp_pos)
+
+                            material['rgba'] = read_u32()
+                            _ = read_u32()
+                            spec_ptr = read_u32()
+
+                            if spec_ptr != 0:
+                                temp_pos = f.tell()
+                                f.seek(spec_ptr)
+                                _ = read_u32()
+                                _ = read_u32()
+                                material['specular'] = read_f32()
+                                f.seek(temp_pos)
+
+                            f.seek(old_mat_pos)
+                            materials.append(material)
+
+                        f.seek(old_pos)
+
+                    for _ in range(13):
+                        _ = read_u32()
+
+                    x_scale = read_f32()
+                    y_scale = read_f32()
+                    z_scale = read_f32()
+
+                    overall_translation = (
+                        read_f32(),
+                        read_f32(),
+                        read_f32()
+                    )
+
+                    overall_translation = tuple(coord * (scaleFactor / 100.0) for coord in overall_translation)
+
+                    part_offsets = []
+                    part_materials = []
+
+                    temp = read_u32()
+                    temp_check = temp & 0x60000000
+
+                    while temp_check != 0x60000000:
+                        for _ in range(6):
+                            _ = read_u32()
+
+                        temp = read_u32()
+                        part_offsets.append(temp)
+
+                        _ = struct.unpack('<H', f.read(2))[0]
+                        material_idx = struct.unpack('<H', f.read(2))[0]
+                        part_materials.append(material_idx)
+
+                        _ = read_u32()
+                        _ = read_u32()
+                        _ = read_u32()
+
+                        temp = read_u32()
+                        temp_check = temp & 0x60000000
+
+                    f.seek(-4, 1)
+
+                    print("✔ Geometry Parts Sub-Section Reached")
+                    
+                    geo_start = f.tell()
+                    print(f"→ Geometry start: 0x{geo_start:X}")
+
+                    strips = []
+                    strip_count = 0
+
+                    while True:
+                        cur_part = 0
+                        cur_pos = f.tell()
+
+                        for i, offset in enumerate(part_offsets):
+                            if cur_pos >= geo_start + offset:
+                                cur_part += 1
+                            else:
+                                break
+
+                        temp = read_u32()
+                        temp_check = temp & 0x60000000
+
+                        # Skip until we hit the 0x60000000 block
+                        while temp_check != 0x60000000:
+                            for _ in range(11):
+                                _ = read_u32()
+                            temp = read_u32()
+                            temp_check = temp & 0x60000000
+
+                        f.seek(-4, 1)
+
+                        # If we haven't yet hit a 6C018000 tag, skip 4 unknowns
+                        for _ in range(4):
+                            _ = read_u32()
+
+                        tri_strip_start = f.tell()
+                        print(f"→ Tri-strip start: 0x{tri_strip_start:X}")
+
+                        for _ in range(12):
+                            _ = read_u32()
+
+                        _ = struct.unpack('<H', f.read(2))[0]
+                        cur_strip_vert_count = struct.unpack('<B', f.read(1))[0]
+                        _ = struct.unpack('<B', f.read(1))[0]  # Unknown byte
+
+                        verts = []
+                        faces = []
+                        valid_faces_indices = []
+
+                        cur_strip_face_count = 0
+
+                        for i in range(cur_strip_vert_count):
+                            x = struct.unpack('<h', f.read(2))[0]
+                            y = struct.unpack('<h', f.read(2))[0]
+                            z = struct.unpack('<h', f.read(2))[0]
+
+                            vert = (
+                                (x * x_scale * scaleFactor / 100.0) + overall_translation[0],
+                                (y * y_scale * scaleFactor / 100.0) + overall_translation[1],
+                                (z * z_scale * scaleFactor / 100.0) + overall_translation[2],
+                            )
+                            verts.append(vert)
+
+                            if i > 1:
+                                cur_strip_face_count += 1
+                                # triangle strip face order (flip every other face)
+                                if i % 2 == 0:
+                                    face = (i - 2, i - 1, i)
+                                else:
+                                    face = (i - 1, i - 2, i)
+                                faces.append(face)
+                                valid_faces_indices.append(True)
+
+                        if cur_strip_vert_count % 2 == 1:
+                            _ = struct.unpack('<h', f.read(2))[0]
+
+                        # store or print the strip
+                        strips.append({
+                            'verts': verts,
+                            'faces': faces,
+                            'material_index': part_materials[cur_part] if cur_part < len(part_materials) else -1
+                        })
+
+                        strip_count += 1
+
+                        # stop
+                        if f.tell() >= file_len:
+                            break
+
+                    print(f"✔ Parsed {strip_count} triangle strips")
+
+            #  Section 4(F0) type handling ()        
+            if section_type == 4:
+
+
+
+        except Exception as e:
+            self.report({'ERROR'}, f"Error reading file: {e}")
+            return {'CANCELLED'}
 
         return {'FINISHED'}
 
+
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_read_vcs_mdl_header.bl_idname, text="Read VCS MDL (.mdl)")
+    self.layout.operator(ImportMDLOperator.bl_idname, text="GTA .MDL (LCS/VCS)")
+
 
 def register():
-    bpy.utils.register_class(IMPORT_OT_read_vcs_mdl_header)
+    bpy.utils.register_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
+
 def unregister():
-    bpy.utils.unregister_class(IMPORT_OT_read_vcs_mdl_header)
+    bpy.utils.unregister_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+
 
 if __name__ == "__main__":
     register()
