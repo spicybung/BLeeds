@@ -6,12 +6,12 @@ from . import mdl_parser
 from . import matrix_utils
 
 bl_info = {
-    "name": "Manhunt 2 MDL Importer",
+    "name": "BLeeds",
     "author": "spicybung",
     "version": (1, 0, 0),
     "blender": (3, 0, 0),
     "location": "File > Import > MDL (.mdl)",
-    "description": "Importer for Manhunt 2 .mdl models.",
+    "description": "Import Leeds GTA Stories/CW & Manhunt 2 .MDL model(s).",
     "category": "Import-Export"
 }
 
