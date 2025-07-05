@@ -1,9 +1,6 @@
 # BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: SpicyBung
-# Years: 2023 - 2025
-
-# This is a fork of DragonFF by Parik27 - maintained by Psycrow, and various others!
-# Check it out at: https://github.com/Parik27/DragonFF
+# Years: 2025 - 
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
