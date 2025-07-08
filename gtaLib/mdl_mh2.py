@@ -24,7 +24,7 @@ from bpy.types import Operator
 from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
-# - Mod Resources:
+# - Script resources:
 # • https://gtamods.com/wiki/Leeds_Engine
 # • https://manhuntgame.fandom.com/wiki/MDL
 

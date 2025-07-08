@@ -27,20 +27,23 @@ from bpy.props import EnumProperty
 from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
-# - Mod resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-processed)
+# - Script resources:
+# • https://gtamods.com/wiki/Relocatable_chunk
 # • https://gtamods.com/wiki/Leeds_Engine (TODO: update stub)
 # • https://github.com/aap/librwgta (re'd RW/Leeds Engine source by The_Hero)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp
 # • https://gtamods.com/wiki/MDL (TODO: update stub with more documentation in own words)
 # • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (Russian)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (ditto - by Alex/AK73 & good resource)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (ditto - by Alex/AK73 & good resource to start)
 # • https://web.archive.org/web/20180714005051/https://www.gtamodding.ru/wiki/GTA_Stories_RAW_Editor (ditto)
 # • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (English)
-# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource)
-# - Cool stuff:
+# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start)
+# - Mod resources/cool stuff:
 # • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
 # • https://gtaforums.com/topic/285544-gtavcslcs-modding/page/11/
 # • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
+# • https://umdatabase.net/view.php?id=CB00495D
 # • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
 # • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
 
@@ -206,12 +209,13 @@ skin_modifier = None
 first_frame = 0
 frame_data_list = []
 cur_frame_data = None
-import_type = 0        # TODO: sort these out
+import_type = 0 
 root_dummy = None
 root_names = {"none"}
 debug_log = []
 found_6C018000 = False
 actor_mdl = False 
+# TODO: sort these out
 
 # === Model Rendering Flags ===
 FLAG_DRAWLAST             = 0x4 | 0x8
@@ -295,7 +299,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                     if import_type == 2:
                         f.seek(4, 1)
                     bone_name_ptr = struct.unpack('<I', f.read(4))[0]
-                    log(f" pad1: {pad1:X}")
+                    log(f" padAAAA: {padAAAA:X}")
                     if bone_name_ptr != 0:
                         cur = f.tell()
                         f.seek(bone_name_ptr)
@@ -415,7 +419,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
 
                     bpy.ops.object.mode_set(mode='OBJECT')
 
-                    # delete original dummies
+                    # delete our helper empties/dummies
                     if delete_dummies:
                         bpy.ops.object.select_all(action='DESELECT')
                         for dummy in dummies:
@@ -447,12 +451,13 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                     f.read(4)
 
                     scaleFactor = 100 # always >100, never lower!
-                    # NOTE: A Leeds MDL will use a scale + translation factor from the file multipied by 32768.0 or 128.0,
+                    # NOTE: A Leeds MDL will use a scale + translation factor from the file multipied by 32768.0 or 128.0(rare?),
                     # but for custom scaling options in modelling programms such as 3DSMax - or perhaps Maya -
-                    # you have to multiply scale by a ridiculous number. However we don't rly need it in Blender.
-                    # Don't ask me how. It works!
+                    # you have to multiply scale by a ridiculous number. However, we don't rly need it in Blender.
+                    # You could just do XYZ * scale_XYZ + posXYZ -- for now we're using globalScale anyways.
+                    # Don't ask me how or why for now. It works!
                     globalScale = scaleFactor * 0.00000030518203134641490805874367518203
-                    # Apply x, y, z scale and any global scalefactor(model scale) if we really wanted to
+                    # Apply x, y, z as well as any model scales + translations if we really wanted to do that
                     x = row4.x * scale_factor
                     y = row4.y * scale_factor
                     z = row4.z * scale_factor
@@ -534,48 +539,87 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                     log(f"✔ Non-actor MDL detected: possibly a prop.") # than modelinfo =/= ped, although props may use an armature
                     if is_psp: 
                         f.seek(4, 1)
-                                    
+                
                 numEntries = read_u32()  # number of entries
                 ptr2_before_tex = read_u32()
                 allocMem = read_u32()  # amount of memory allocated to file(maximum file size)
-                if global_numTable == (local_numTable + 4): # if global_numTable after local than = VCS
-                    actor_MDL = True
-                    log(f"✔ Ped model/actor MDL detected.") # this is an actor/ped model
-                    if self.mdl_type == 'PROP':
-                        log("MDL type is Prop: skipped 4 bytes after global_numTable check.")
+
+                # Peek at the DWORD just after allocMem, without consuming it for flow
+                next_ptr_offset = f.tell()
+                possible_ptr = read_u32()
+                log(f"Pointer after allocMem (offset 0x{next_ptr_offset:X}): 0x{possible_ptr:X}")
+
+                def is_known_vtable(val):
+                    KNOWN_VTABLES = {
+                        0xAA02,        # VCSCLUMP (PS2)
+                        0x00000002,    # LCSCLUMP or CLUMPPSP
+                    }
+                    return val in KNOWN_VTABLES or (val & 0xFFFF) in KNOWN_VTABLES
+
+                peek_type = "unknown"
+                string_val = ""
+                file_current = f.tell()
+                # Defensive: check if within file
+                if 0 < possible_ptr < file_len:
+                    f.seek(possible_ptr)
+                    peek_bytes = f.read(8)
+                    # Try to decode as string (ascii+null)
+                    s = peek_bytes.split(b'\x00')[0]
+                    if s and all(32 <= b <= 126 for b in s):
+                        string_val = s.decode('ascii', errors='ignore')
+                        peek_type = "string"
                     else:
-                        renderflags_offset = read_u32()  # offset to flags for rendering
-                        log("MDL type is Ped: did NOT skip 4 bytes after global_numTable check.")
+                        # Try if it's a vtable or struct
+                        val = struct.unpack('<I', peek_bytes[:4])[0]
+                        if is_known_vtable(val):
+                            peek_type = "vtable"
+                        else:
+                            peek_type = "struct_or_flags"
+                    f.seek(file_current)
                 else:
-                    log(f"✔ Non-actor MDL: moving forward for top ptr.") # than modelinfo =/= ped
-                    renderflags_offset = read_u32() 
-                    f.seek(-4, 1)
-                    if is_psp:
-                        f.seek(4, 1)
-                top_level_ptr = read_u32()  # pointer at 0x24(or 0x20 depending)
-                
+                    # It might just be a local offset (not a global pointer)
+                    # Try interpreting as a direct value (for vtable/flags)
+                    if is_known_vtable(possible_ptr):
+                        peek_type = "vtable"
+                    elif 32 <= (possible_ptr & 0xFF) <= 126:
+                        peek_type = "string_candidate"
+                    else:
+                        peek_type = "unknown"
+                log(f"Analysis: pointer after allocMem is {peek_type}" + (f" ('{string_val}')" if string_val else ""))
+
+                if peek_type == "vtable":
+                    log("This pointer is a vtable/top-level struct (Clump/Atomic etc).")
+                    # Top-level pointer, proceed to read top ptr, section parsing as before
+                    renderflags_offset = None
+                    top_level_ptr = possible_ptr
+                elif peek_type == "string" or peek_type == "string_candidate":
+                    log(f"This pointer is a string (probably a material/texture name): '{string_val}'")
+                    renderflags_offset = None
+                elif peek_type == "struct_or_flags":
+                    log("This pointer appears to point to a struct or flags; treat as renderflags offset or substruct.")
+                    renderflags_offset = possible_ptr
+                    top_level_ptr = read_u32()
+                else:
+                    log("Pointer after allocMem type could not be determined; treating as unknown/flags.")
+                    renderflags_offset = possible_ptr
+                    top_level_ptr = read_u32()
+
                 log(f"File Size: 0x{file_len}")
                 log(f"Local Realloc Table: 0x{local_numTable:X}, Global Realloc Table: 0x{global_numTable:X}")
                 log(f"Number of entries: 0x{numEntries}")
                 log(f"Ptr2BeforeTexNameList: 0x{ptr2_before_tex:X}")
                 log(f"Allocated memory: 0x{allocMem}")
-                log(f"Render flags offset: 0x{renderflags_offset:X}")
                 log(f"Top-level ptr or magic value: 0x{top_level_ptr:X}")
-                
-                f.seek(renderflags_offset)
-                flags = [read_bu32(), read_bu32(), read_bu32(), read_bu32()] # render flag or number of render flags?
-
-                for i, value in enumerate(flags):
-                    names = get_render_flag_names(value)
-                    log(f" ModelInfo render flag[{i}]: 0x{value:X} ({', '.join(names)})")
 
                 f.seek(top_level_ptr)
+                if is_psp:
+                    f.seek(-8, 1)
                 top_magic = read_u32()
 
                 # Markers(vTables?) for R* Leeds section extensions since Leeds Engine doesn't use RW plug-ins
-                LCSCLUMP = 0x00000002   # ditto for LCS/VCS PSP
-                VCSCLUMP = 0x0000AA02
-                VCSCLUMPPSP = 0x00000002
+                LCSCLUMPPS2 = 0x00000002   # ditto for LCS/VCS PSP
+                VCSCLUMPPS2 = 0x0000AA02
+                CLUMPPSP = 0x00000002
                 LCSATOMIC1 = 0x01050001      # renders first
                 LCSATOMIC2 = 0x01000001      # renders last
                 VCSATOMIC1 = 0x0004AA01      # renders first
@@ -584,16 +628,16 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 VCSATOMICPSP2 = 0x01F40400   # this structure appears similar to VCSATOMIC1&2
                 VCSPS2FRAME1 = 0x0180AA00    # (?) or something else, like VCSSKIN
                 VCSPS2FRAME2 = 0x0003AA01
-                VCSFRAMEPSP1 = 0X0380B100    # this is similar to RAGE gtaDrawables - are these vtables?
+                VCSFRAMEPSP1 = 0X0380B100    # this is similar to gtaDrawables in RAGE; are these vtables?
 
-                if top_magic in (LCSCLUMP, VCSCLUMP):
+                if top_magic in (LCSCLUMPPS2, VCSCLUMPPS2):
                     section_type = 7
                     if self.platform == 'PSP':
-                        if top_magic == VCSCLUMPPSP:
+                        if top_magic == CLUMPPSP:
                             log(f" Top magic matches PSP values, setting import type 3.")
                             import_type = 3  # VCSCLUMPPSP
                     else:
-                        import_type = 1 if top_magic == LCSCLUMP else 2
+                        import_type = 1 if top_magic == LCSCLUMPPS2 else 2
                 elif top_magic in (LCSATOMIC1, LCSATOMIC2, VCSATOMIC1, VCSATOMIC2):
                     section_type = 2
                     import_type = 1 if top_magic in (LCSATOMIC1, LCSATOMIC2) else 2
@@ -607,23 +651,23 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 if section_type == 7:
                     log("✔ Detected Section Type: 7 (Clump)")
                     #RslElementGroup
-                    clump_id = read_u32()
-                    first_frame = read_u32()
-                    first_atomic = read_u32() 
-                    atomic_seek = first_atomic - 0x1C
+                    clump_id = read_u32()   # vTable?
+                    first_frame = read_u32()    # our entry into frames
+                    first_atomic = read_u32()   # our entry into atomics
+                    atomic_seek = first_atomic - 0x1C   # we'll start by seeking & reading atomics to see if we can get frames
                     f.seek(atomic_seek)
-                    section_type = 2 
+                    section_type = 2    # change section type to 2(atomics)
                     
                 # === Update parsing state to Section Type: 2 (Atomic) if successful -
                 if section_type == 2: 
                     log("✔ Detected Section Type: 2 (Atomic)")
                 
                     atomics = []
-                    frame_data_list = []
+                    frame_data_list = [] # if theres frames, we create a list
                     dummies = []    # dummylist for bones
-                    bone_list = []
+                    bone_list = []  # if there's bones, we create a list
                     frame_ptr_list = []
-                    root_bone_link = not actor_mdl
+                    root_bone_link = not actor_mdl # not dun goofing here anymore, it would appear
                     cur_atomic_index = 1
                     
                     # RslElement
@@ -636,9 +680,9 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                     else:
                         log("MDL type is Ped: did NOT perform f.seek(-4, 1) before reading atomic_id.")
 
-                    atomic_id = read_u32()  # vtable(?)
+                    atomic_id = read_u32()  # vTable?
                     
-                    frame_ptr = read_u32()  # our entry into the frames
+                    frame_ptr = read_u32()  # our entry into the frame(s)
                     
                     prev_link = read_u32() # prev atomic ptr somehow?
                     
@@ -962,9 +1006,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                                 log(f"✔ Vertex counts match: {vert_count1}")
 
                                             log(f"=== END OF 0x6C018000 SPLIT BLOCK ===")
-                                            # continue reading vertex data for this split section
-
-                                            
+                                            # continue reading vertex data for this split section               
                                         else:
                                             log(f"✔ Valid tri-strip flag (0x{marker:08X}) found at 0x{marker_seek:X}, rewinding to flag")
                                             f.seek(-4, 1)
@@ -1383,39 +1425,6 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                             log(f"  nwght   = {nwght}: Number of weights per vertex (parsed as ((flags>>14) & 7) + 1)")
                             log("--------------------------------------")
 
-                            # print the meaning for each value too
-                            def describe_fmt(name, val):
-                                if name == "uvfmt":
-                                    return ["NONE", "U8", "U16", "U32"][val] if val < 4 else "UNKNOWN"
-                                if name == "colfmt":
-                                    # 0: none, 5: 16-bit RGBA5551 color
-                                    if val == 0: return "None"
-                                    if val == 5: return "RGBA5551"
-                                    return f"Unknown ({val})"
-                                if name == "normfmt":
-                                    if val == 0: return "None"
-                                    if val == 1: return "S8 (3 bytes)"
-                                    return f"Unknown ({val})"
-                                if name == "posfmt":
-                                    if val == 1: return "S8"
-                                    if val == 2: return "S16"
-                                    return f"Unknown ({val})"
-                                if name == "wghtfmt":
-                                    if val == 0: return "None"
-                                    if val == 1: return "U8"
-                                    return f"Unknown ({val})"
-                                return str(val)
-
-                            log("---- Format meaning ----")
-                            log(f"  uvfmt   : {describe_fmt('uvfmt', uvfmt)}")
-                            log(f"  colfmt  : {describe_fmt('colfmt', colfmt)}")
-                            log(f"  normfmt : {describe_fmt('normfmt', normfmt)}")
-                            log(f"  posfmt  : {describe_fmt('posfmt', posfmt)}")
-                            log(f"  wghtfmt : {describe_fmt('wghtfmt', wghtfmt)}")
-                            log(f"  idxfmt  : {'None' if idxfmt == 0 else 'Unknown'}")
-                            log(f"  nwght   : {nwght} (number of weights per vertex)")
-                            log("-----------------------------------------")
-
                             log("----- PSP Geometry Struct -----")
                             log(f"  size      (header+data): {size} (0x{size:08X})")
                             log(f"  flags     (VTYPE)      : {flags} (0x{flags:08X})")
@@ -1437,7 +1446,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                             log(f"  unk3                   : {unk3}")
                             log("--------------------------------")
 
-                            # 2. Read sPspGeometryMesh structs with detailed logging
+                            # reading and logging our sPspGeometryMesh structs
                             mesh_list = []
                             for i in range(numStrips):
                                 mesh_offset = f.tell()
@@ -1484,13 +1493,9 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
 
                             log(f"✔ Finished reading {len(mesh_list)} sPspGeometryMesh structs (expected: {numStrips})\n")
                             
-                        
                             # === Now parse actual vertex/index data and build Blender meshes for each PSP mesh/strip ===
-
                             # Calculate vertex buffer file offset
                             vertex_buffer_file_offset = header_offset + offset - 168
-                            
-                          
                             log(f"Vertex buffer begins at file offset: 0x{vertex_buffer_file_offset:X}")
 
                             # Seek to vertex buffer start
@@ -1518,7 +1523,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                 # The offset to the strip data is relative to the vertex buffer file offset.
                                 tri_strip_offset = vertex_buffer_file_offset + mesh['offset']
                                 f.seek(tri_strip_offset)
-                                # align the first strip to avoid overread/degenerates
+                                # align the first & subsequent strips to avoid overread/degenerates
                                 bytes_per_vert = 20 
                                 verts_to_skip = 10
                                 skip_bytes = bytes_per_vert * verts_to_skip
@@ -1526,13 +1531,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                 log(f"⏩ Skipped first {verts_to_skip} verts ({skip_bytes} bytes) for mesh {mesh_index}")
 
                                 num_verts_to_read = mesh['numTriangles'] + 2 - verts_to_skip
-                                if num_verts_to_read <= 0:
-                                    log(f"⚠️ Mesh {mesh_index} strip has less than or equal to {verts_to_skip} verts. Skipping mesh.")
-                                    continue  # nothing to import for this strip :(
-                                
-                                
                                 log(f"🟩 [PSP] Reading Mesh/Strip {mesh_index}: Vertex data starts at file offset 0x{tri_strip_offset:X} ({tri_strip_offset})")
-                                
                                 
                                 # Calculate number of vertices for this strip:
                                 # For a triangle strip, number of vertices = numTriangles + 2
@@ -1544,7 +1543,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                 strip_verts = []
                                 o = 0
                                 for vi in range(num_strip_verts):
-                                    vertex_data = f.read(20)  # read max size - never >20!!
+                                    vertex_data = f.read(20)  # read max size - never >20 or below!!
                                     if len(vertex_data) < 8:  # fail safe
                                         log(f"    ! Not enough data for vertex {vi} of strip {mesh_index}")
                                         break
@@ -1626,7 +1625,6 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                     if v0 != v1 and v1 != v2 and v2 != v0:
                                         mesh_faces.append((v0, v1, v2))
                                         
-
                                 # Create Blender mesh object for this mesh/strip
                                 # This is also the point I realized The_Hero and LCS Team updated
                                 # Alex(AK73)'s 3DSMax MDL Importer from 1.0.0 to 3.0.0 10+ years ago lol
@@ -1635,12 +1633,11 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                 mesh_obj = bpy.data.objects.new(f"PSP_Mesh_{mesh_index}", mesh_data)
                                 bpy.context.collection.objects.link(mesh_obj)
                                                        
-                                
                                 mesh_data.from_pydata(mesh_verts, [], mesh_faces)
                                 mesh_data.update()
                                 
                                 log(f"✔ Built Blender mesh: PSP_Mesh_{mesh_index}, verts={len(mesh_verts)}, faces={len(mesh_faces)}")
-                                # handle UVs, colors, normals, weights here by creating layers and assigning them
+                                # TODO: handle UVs, colors, normals, weights here by creating layers and assigning them
                             log("✔ All PSP geometry meshes have been imported and created in Blender.")
                             
 
