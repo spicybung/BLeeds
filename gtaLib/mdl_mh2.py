@@ -27,6 +27,7 @@ from bpy_extras.io_utils import ImportHelper
 # - Script resources:
 # • https://gtamods.com/wiki/Leeds_Engine
 # • https://manhuntgame.fandom.com/wiki/MDL
+# • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (MH2 textures)
 
 
 #######################################################
