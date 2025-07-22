@@ -16,16 +16,17 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import bpy
+
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
-from . import mdl_parser
 
+#######################################################
 class IMPORT_OT_mdl(Operator, ImportHelper):
     bl_idname = "import_scene.mdl"
     bl_label = "Import Manhunt 2 MDL"
     filename_ext = ".mdl"
     filter_glob: bpy.props.StringProperty(default="*.mdl", options={'HIDDEN'})
-
+    #######################################################
     def execute(self, context):
         print(f"Starting import of MDL: {self.filepath}")
         

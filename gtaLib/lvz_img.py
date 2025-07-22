@@ -37,22 +37,25 @@ from bpy_extras.io_utils import ImportHelper
 #######################################################
 def padhex(n, w=8):
     return "0x{:0{}X}".format(n, w)
+#######################################################
 def u32(b, o):
     return struct.unpack_from("<I", b, o)[0]
+#######################################################
 def u16(b, o):
     return struct.unpack_from("<H", b, o)[0]
+#######################################################
 def read_cstr(b, o, maxlen=64):
     s = b[o:o+maxlen]
     i = s.find(b'\x00')
     return s[:i].decode('ascii', errors='replace') if i >= 0 else s.decode('ascii', errors='replace')
-
+#######################################################
 class LeedsFullLVZIMGInspector(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.leeds_full_lvz_img"
     bl_label = "Leeds Full LVZ/IMG Inspector"
     bl_description = "Fully parse and analyze a Rockstar Leeds LVZ/BIN + IMG, print all sector WRLD info, follow all pointers (no brevity)"
     filename_ext = ".lvz;.bin"
     filter_glob: bpy.props.StringProperty(default="*.lvz;*.bin", options={'HIDDEN'})
-
+    #######################################################
     def execute(self, context):
         lvz_path = self.filepath
         base, ext = os.path.splitext(lvz_path)
@@ -194,9 +197,9 @@ class LeedsFullLVZIMGInspector(bpy.types.Operator, ImportHelper):
         img_file.close()
         self.report({'INFO'}, "Full parse complete. See system console for detailed output.")
         return {'FINISHED'}
-
+#######################################################
 def menu_func_import(self, context):
-    self.layout.operator(LeedsFullLVZIMGInspector.bl_idname, text="Full Leeds LVZ/IMG Inspector (No Brevity)")
+    self.layout.operator(LeedsFullLVZIMGInspector.bl_idname, text="R* Leeds Level/IMG Archive(.LVZ/.IMG)")
 
 def register():
     bpy.utils.register_class(LeedsFullLVZIMGInspector)
