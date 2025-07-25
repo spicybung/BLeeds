@@ -24,11 +24,15 @@ from bpy.types import Operator
 from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   This script is for Manhunt2 .MDLs, the file format for actors & props
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/Leeds_Engine
-# • https://manhuntgame.fandom.com/wiki/MDL
+# • https://manhuntgame.fandom.com/wiki/MDL (specifications about Manhunt 2 MDLs)
 # • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (MH2 textures)
-
+# - Mod resources/cool stuff:
+# • 
 
 #######################################################
 class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
@@ -649,15 +653,15 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
     
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_read_mdl_header.bl_idname, text="Read MDL Header (.mdl)")
-#######################################################
+    self.layout.operator(IMPORT_OT_read_mdl_header.bl_idname, text="R* Leeds Manhunt 2 Model(.MDL)")
+
 def register():
     bpy.utils.register_class(IMPORT_OT_read_mdl_header)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-#######################################################
+
 def unregister():
     bpy.utils.unregister_class(IMPORT_OT_read_mdl_header)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-#######################################################
+
 if __name__ == "__main__":
     register()

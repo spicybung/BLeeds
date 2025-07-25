@@ -28,26 +28,27 @@ from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .MDLs, the format for pedestrians/props(& some buildings)
+#   This script is for Stories .MDLs, the file format for pedestrians & props
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-processed before becoming Rsl DFF)
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-processed before becoming Rsl 'DFF a.k.a MDL)
 # • https://gtamods.com/wiki/Leeds_Engine (TODO: update stub)
 # • https://gtamods.com/wiki/MDL (TODO: update stub with more documentation in own words)
-# • https://github.com/aap/librwgta (re'd RW/Leeds Engine source by The_Hero)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (Russian)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (ditto - by Alex/AK73 & good resource to start)
+# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h (ditto)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp (ditto)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (*Russian*)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (*ditto - by Alex/AK73 & good resource to start*)
 # • https://web.archive.org/web/20180714005051/https://www.gtamodding.ru/wiki/GTA_Stories_RAW_Editor (ditto)
-# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (English)
-# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start)
+# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
+# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start w/out any other documentation)
 # - Mod resources/cool stuff:
 # • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
 # • https://gtaforums.com/topic/285544-gtavcslcs-modding/page/11/
 # • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
+# • http://aap.papnet.eu/gta/RE/lcs_pipes.txt (a brief binary rundown of how bitflags work for PS2/PSP/Mobile Stories games)
 # • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
-# • https://umdatabase.net/view.php?id=CB00495D
+# • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
 # • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
 
 #######################################################
@@ -562,10 +563,10 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 if f.read(4) != b'ldm\x00':  # ModelInfo identifier for file(i.e PedModel) - where we begin to read the file(TODO: WRLD)
                     self.report({'ERROR'}, "Invalid Stories MDL header") # Not a Stories MDL?
                     return {'CANCELLED'}     # eject process if invalid
-                shrink = read_u32()          # 1 if GTAG resource image, else always 0(file not shrank). Also used for Master/Slave WRLD's?
+                shrink = read_u32()          # 1 if GTAG resource image, else always 0(file not shrank). Bytes also used in Global/Master/Slave WRLDs
                 file_len = read_u32()        # physical fiile size
                 local_numTable = read_u32()  # local reallocation table (NOTE: if local_numTable = global_numTable, than file = global/one table only)
-                global_numTable = read_u32() # global reallocation table
+                global_numTable = read_u32() # global pointer reallocation table
                 
                 # --- If PSP, skip 4 bytes after global_numTable ---
                 is_psp = (self.platform == 'PSP') # import_type = 3
@@ -668,9 +669,9 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 VCSATOMIC2 = 0x0004AA01      # renders last
                 VCSATOMICPSP1 = 0x01F40400
                 VCSATOMICPSP2 = 0x01F40400   # this structure appears similar to VCSATOMIC1&2
-                VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN
+                VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN(unofficial ugly name)
                 VCSPS2FRAME2  = 0x0003AA01
-                VCSFRAMEPSP1  = 0X0380B100    # this is similar to gtaDrawables in RAGE; are these vtables?
+                VCSFRAMEPSP1  = 0X0380B100  
 
                 if top_magic in (LCSCLUMPPS2, VCSCLUMPPS2):
                     section_type = 7
@@ -1783,16 +1784,15 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Model(.MDL)")
-#######################################################
+    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Stories Model(.MDL)")
+
 def register():
     bpy.utils.register_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-#######################################################
+
 def unregister():
     bpy.utils.unregister_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-#######################################################
 
 if __name__ == "__main__":
     register()  
