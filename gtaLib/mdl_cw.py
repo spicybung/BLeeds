@@ -270,6 +270,74 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 print(f"        Z:  offset 0x{v_off+4:06X}  bytes {file_bytes[v_off+4:v_off+6].hex(' ').upper()}  raw {z_raw:6d}  value {z:.6f}")
                 print(f"        Norm: ({nx:.6f}, {ny:.6f}, {nz:.6f})  UV: ({u:.6f}, {v:.6f})")
 
+            # --- Vertex Buffer Parsing ---
+            # Chinatown Wars typically uses: pos, normals, texcoords
+            stride = 16  # Leeds/CW: 3x int16 (pos) + 3x int16 (normal) + 2x int16 (UV), so each model has a vertex stride of 16 bytes
+            vertex_base = MeshOffset + 48  # mesh header size = 0x30 (48 bytes)
+            print(f"    [0x{vertex_base:02X}] Vertex Buffer ({numVertices} entries, stride {stride}):")
+            verts = []
+            faces = []
+            
+            for vi in range(numVertices):
+                v_off = vertex_base + vi * stride
+
+                # Position (signed 16-bit)
+                x_raw = struct.unpack_from('<h', file_bytes, v_off + 0)[0]
+                y_raw = struct.unpack_from('<i', file_bytes, v_off + 2)[0]
+                z_raw = struct.unpack_from('<i', file_bytes, v_off + 4)[0]
+                # Normals (signed 16-bit)
+                nx_raw = struct.unpack_from('<h', file_bytes, v_off + 6)[0]
+                ny_raw = struct.unpack_from('<h', file_bytes, v_off + 8)[0]
+                nz_raw = struct.unpack_from('<h', file_bytes, v_off +10)[0]
+                # UVs
+                u_raw  = struct.unpack_from('<h', file_bytes, v_off +12)[0]
+                v_raw  = struct.unpack_from('<h', file_bytes, v_off +14)[0]
+
+                # Decoding vert buffer
+                x = x_raw / 64.0
+                y = y_raw / 64.0
+                z = z_raw / 64.0
+
+                if abs(x) > 100.0:
+                    x = x_raw / 128.0
+                if abs(y) > 100.0:
+                    y = y_raw / 128.0
+                if abs(z) > 100.0:
+                    z = z_raw / 128.0
+                
+                verts.append((x, y, z))
+
+
+                nx = nx_raw / 32767.0
+                ny = ny_raw / 32767.0
+                nz = nz_raw / 32767.0   # or 128.0 for normals? idk
+                u = u_raw / 2048.0
+                v = v_raw / 2048.0  # the most accurate I could get UVs so far
+
+                print(f"      Vertex {vi:3d}:")
+                print(f"        X:  offset 0x{v_off:06X}  bytes {file_bytes[v_off:v_off+2].hex(' ').upper()}  raw {x_raw:6f}  value {x:.6f}")
+                print(f"        Y:  offset 0x{v_off+2:06X}  bytes {file_bytes[v_off+2:v_off+4].hex(' ').upper()}  raw {y_raw:6d}  value {y:.6f}")
+                print(f"        Z:  offset 0x{v_off+4:06X}  bytes {file_bytes[v_off+4:v_off+6].hex(' ').upper()}  raw {z_raw:6d}  value {z:.6f}")
+                print(f"        Norm: ({nx:.6f}, {ny:.6f}, {nz:.6f})  UV: ({u:.6f}, {v:.6f})")
+                
+
+            flip = False
+            # Leeds likes to use tristrips for models, gonna guess that's the primitive type.
+            for i in range(len(verts) - 2):
+                if flip:
+                    faces.append((i, i+2, i+1))
+                else:
+                    faces.append((i, i+1, i+2))
+                flip = not flip
+
+            mesh = bpy.data.meshes.new("CW_Model")
+            mesh.from_pydata(verts, [], faces)
+            mesh.update()
+
+            obj = bpy.data.objects.new("CW_Model", mesh)
+            bpy.context.collection.objects.link(obj)
+
+
         except Exception as e:
             tb_str = traceback.format_exc()
             self.report({'ERROR'}, f"Import error: {e}\n{tb_str}")
