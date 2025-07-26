@@ -19,6 +19,7 @@ import os
 import bpy
 import struct
 import traceback
+import bmesh
 
 from bpy.types import Operator
 from bpy.props import StringProperty
@@ -28,15 +29,13 @@ from bpy_extras.io_utils import ImportHelper
 #   This script is for .mdl/.wbls - formats for models in GTA:CW Mobile/PSP/DS      #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
-# • https://gtamods.com/wiki/Leeds_Engine (some assets point to R* Leeds making CW in Unity?)
+# • https://gtamods.com/wiki/Leeds_Engine (some assets point to CW being made in Unity?)
 # • https://gtamods.com/wiki/MDL (TODO: update stub to include Chinatown Wars documentation)
-# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
 # • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)#.D0.9C.D0.BE.D0.B4.D0.B5.D0.BB.D0.B8 (*Russian*)
 # • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
 # - Mod resources/cool stuff:
 # • https://gtaforums.com/topic/781150-relctw-chinatown-wars-mobile-resource-explorer/
 # • https://web.archive.org/web/20221005045615/https://github.com/DK22Pac/ctw-gxt-tools (in case the repo goes down)
-# • https://www.ign.com/articles/2009/02/25/rockstar-leeds-talks-gta-ds ( ...it's IGN, but old IGN at least)
 
 #######################################################
 def print_bytes(data, start=0, end=None):
@@ -113,7 +112,7 @@ def read_leeds_cw_transform(data, offset):
 #######################################################
 class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.wbl_psp_sector"
-    bl_label = "Import Chinatown Wars WBL (.wbl)"
+    bl_label = "Import WBL Sectors (.wbl, PSP float32, BLeeds style)"
     filename_ext = ".wbl"
     filter_glob: StringProperty(default="*.wbl", options={'HIDDEN'})
 
@@ -127,15 +126,13 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
             PosnX, PosnY, PosnZ = header_transform["Pos"]
 
             # --- Sectors A to D: Each sector is 12 bytes, start at 0x28
-            sector_base = 0x28
+            sector_ofs = 0x28
             mesh_offsets_found = set()
             for sector_idx in range(4):
-                sector_ofs = sector_base + sector_idx * 12
+                # --- Read sector header (12 bytes) ---
                 sec = file_bytes[sector_ofs:sector_ofs + 12]
                 print(f"\n==== SECTOR {sector_idx} (0x{sector_ofs:02X} - 0x{sector_ofs+11:02X}) ====")
                 print(f"[0x{sector_ofs:02X}] Sector raw bytes: {' '.join(f'{b:02X}' for b in sec)}")
-
-                # Parse sector header (12 bytes)
                 Bool1 = bool(sec[0])
                 Bool2 = bool(sec[1])
                 NumInstances = struct.unpack_from("<h", sec, 2)[0]
@@ -143,9 +140,6 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 NumLevels    = struct.unpack_from("<h", sec, 6)[0]
                 NumLights    = struct.unpack_from("<h", sec, 8)[0]
                 NumTextures  = struct.unpack_from("<h", sec,10)[0]
-
-                print(f"\n==== SECTOR {sector_idx} (0x{sector_ofs:02X} - 0x{sector_ofs+11:02X}) ====")
-                print(f"[0x{sector_ofs:02X}] Sector raw bytes: {' '.join(f'{b:02X}' for b in sec)}")
                 print(f"[0x{sector_ofs:02X}] Bool1: {Bool1} (byte value: {sec[0]:02X})")
                 print(f"[0x{sector_ofs+1:02X}] Bool2: {Bool2} (byte value: {sec[1]:02X})")
                 print(f"[0x{sector_ofs+2:02X}] NumInstances (int16): {NumInstances}")
@@ -155,7 +149,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 print(f"[0x{sector_ofs+10:02X}] NumTextures  (int16): {NumTextures}")
                 print(f"Levels:\n")
 
-                # Print all levels
+                # --- Read all levels (each 16 bytes) ---
                 level_ofs = sector_ofs + 12
                 for level_idx in range(NumLevels):
                     X_raw = struct.unpack_from("<i", file_bytes, level_ofs)[0]
@@ -163,11 +157,9 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     Z_raw = struct.unpack_from("<i", file_bytes, level_ofs + 8)[0]
                     NumInstances_lvl = struct.unpack_from("<h", file_bytes, level_ofs + 12)[0]
                     Flags_lvl = struct.unpack_from("<h", file_bytes, level_ofs + 14)[0]
-
                     X = X_raw / 4096.0
                     Y = Y_raw / 4096.0
                     Z = Z_raw / 4096.0
-
                     print(f"    Level {level_idx}:")
                     print(f"      [0x{level_ofs:02X}] X (int32/4096): {X}")
                     print(f"      [0x{level_ofs+4:02X}] Y (int32/4096): {Y}")
@@ -176,29 +168,46 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     print(f"      [0x{level_ofs+14:02X}] Flags (int16): {Flags_lvl}")
                     level_ofs += 16
 
+                # --- Read all instances (each 16 bytes) ---
                 print(f"Instances:\n")
                 for instance_idx in range(NumInstances):
                     inst_base = level_ofs + instance_idx * 16
-                    mdlID = struct.unpack_from('<h', file_bytes, inst_base)[0]
-                    RenderListID = struct.unpack_from('<b', file_bytes, inst_base+2)[0]
+                    ID = struct.unpack_from('<h', file_bytes, inst_base)[0]
+                    Instances = struct.unpack_from('<b', file_bytes, inst_base+2)[0]
                     BuildingSwap = struct.unpack_from('<b', file_bytes, inst_base+3)[0]
                     ResourceID = struct.unpack_from('<I', file_bytes, inst_base+4)[0]
                     MeshOffset = struct.unpack_from('<I', file_bytes, inst_base+8)[0]
                     Pointer = struct.unpack_from('<I', file_bytes, inst_base+12)[0]
                     print(f"  Instance {instance_idx}:")
-                    print(f"    [0x{inst_base:02X}] ModelID (int16): {mdlID}")
-                    print(f"    [0x{inst_base+2:02X}] RenderListID (int8): {RenderListID}")
+                    print(f"    [0x{inst_base:02X}] ID (int16): {ID}")
+                    print(f"    [0x{inst_base+2:02X}] Instances (int8): {Instances}")
                     print(f"    [0x{inst_base+3:02X}] BuildingSwap (int8): {BuildingSwap}")
                     print(f"    [0x{inst_base+4:02X}] ResourceID (uint32): 0x{ResourceID:08X} ({ResourceID})")
                     print(f"    [0x{inst_base+8:02X}] MeshOffset (uint32): 0x{MeshOffset:08X} ({MeshOffset})")
                     print(f"    [0x{inst_base+12:02X}] Pointer (uint32): 0x{Pointer:08X} ({Pointer})")
-                    # Store for lookup
                     if MeshOffset != 0:
                         mesh_offsets_found.add(MeshOffset)
                 level_ofs += 16 * NumInstances
 
-            # ---- For all unique MeshOffsets, print MDL identifier and fields ----
+                # --- Read two material slots (4 bytes) ONLY if there are instances ---
+                if NumInstances > 0:
+                    material_slot_offset = level_ofs
+                    material_slot_1 = struct.unpack_from('<H', file_bytes, material_slot_offset)[0]
+                    material_slot_2 = struct.unpack_from('<H', file_bytes, material_slot_offset + 2)[0]
+                    print(f"    Material Slot 1 (uint16): {material_slot_1}  [0x{material_slot_offset:06X}]")
+                    print(f"    Material Slot 2 (uint16): {material_slot_2}  [0x{material_slot_offset+2:06X}]")
+                    sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + 4
+                else:
+                    sector_size = 12 + (NumLevels * 16) + (NumInstances * 16)
+
+                sector_ofs += sector_size
+
+
+
+            # ---- Parse all MeshOffsets ----
+            # After sector reading loop comes Geometry Model headers:
             print("\n==== MESH HEADERS FROM ALL INSTANCES ====")
+
             for MeshOffset in sorted(mesh_offsets_found):
                 if MeshOffset < 0 or MeshOffset > len(file_bytes) - 48:
                     print(f"  [0x{MeshOffset:02X}] MeshOffset out of file bounds")
@@ -217,9 +226,8 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 fieldC = struct.unpack_from('<I', file_bytes, MeshOffset+12)[0]
                 boundmin = read_vec3_int4096(file_bytes, MeshOffset+16)
                 boundmax = read_vec3_int4096(file_bytes, MeshOffset+28)
-                field_28 = struct.unpack_from('<I', file_bytes, MeshOffset+40)[0]
-                field_28f = struct.unpack_from('<f', file_bytes, MeshOffset+40)[0]
-                divFactor = struct.unpack_from('<f', file_bytes, MeshOffset+44)[0]
+                scaleFactor = struct.unpack_from('<f', file_bytes, MeshOffset+40)[0] # scaling factor to multiply divided XYZ with
+                divFactor = struct.unpack_from('<f', file_bytes, MeshOffset+44)[0] # number to divide vert XYZ (usually 64.0)
                 print(f"  [0x{MeshOffset:02X}] MDL Identifier: {ident_str} ('{mdl_ascii}')")
                 print(f"    [0x{MeshOffset+4:02X}] Unknown (int8): {unknown}")
                 print(f"    [0x{MeshOffset+5:02X}] numMaterials (int8): {numMaterials}")
@@ -228,78 +236,47 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 print(f"    [0x{MeshOffset+12:02X}] Field C (uint32): 0x{fieldC:08X} ({fieldC})")
                 print(f"    [0x{MeshOffset+16:02X}] BoundMin (3 floats): ({boundmin[0]}, {boundmin[1]}, {boundmin[2]})")
                 print(f"    [0x{MeshOffset+28:02X}] BoundMax (3 floats): ({boundmax[0]}, {boundmax[1]}, {boundmax[2]})")
-                print(f"    [0x{MeshOffset+40:02X}] Field 28 (uint32): 0x{field_28:08X} ({field_28}) | As float: {field_28f}")
-                print(f"    [0x{MeshOffset+44:02X}] Division Factor?: {divFactor}") # bytes could be interpreted as 64.0, which it appears
-                                                                                    # to be a vertex buffer division factor(sounds weird)
-                                                                                    # ... or maybe it's a bitflag field
+                print(f"    [0x{MeshOffset+40:02X}] Scale Factor: {scaleFactor}")
+                print(f"    [0x{MeshOffset+44:02X}] Division Factor: {divFactor}")
 
-            # --- Vertex Buffer Parsing ---
-            # Chinatown Wars typically uses: pos, normals, texcoords
-            stride = 16  # Leeds/CW: 3x int16 (pos) + 3x int16 (normal) + 2x int16 (UV), so each model has a vertex stride of 16 bytes
-            vertex_base = MeshOffset + 48  # mesh header size = 0x30 (48 bytes)
-            print(f"    [0x{vertex_base:02X}] Vertex Buffer ({numVertices} entries, stride {stride}):")
-            verts = []
-            faces = []
-            
-            for vi in range(numVertices):
-                v_off = vertex_base + vi * stride
+                # Read vertex buffer for this mesh
+                stride = 16
+                vertex_base = MeshOffset + 48
+                print(f"    [0x{vertex_base:02X}] Vertex Buffer ({numVertices} entries, stride {stride}):")
+                verts = []
+                faces = []
 
-                # Position (signed 16-bit)
-                x_raw = struct.unpack_from('<h', file_bytes, v_off + 0)[0]
-                y_raw = struct.unpack_from('<i', file_bytes, v_off + 2)[0]
-                z_raw = struct.unpack_from('<i', file_bytes, v_off + 4)[0]
-                # Normals (signed 16-bit)
-                nx_raw = struct.unpack_from('<h', file_bytes, v_off + 6)[0]
-                ny_raw = struct.unpack_from('<h', file_bytes, v_off + 8)[0]
-                nz_raw = struct.unpack_from('<h', file_bytes, v_off +10)[0]
-                # UVs
-                u_raw  = struct.unpack_from('<h', file_bytes, v_off +12)[0]
-                v_raw  = struct.unpack_from('<h', file_bytes, v_off +14)[0]
+                for vi in range(numVertices):
+                    v_off = vertex_base + vi * stride
+                    x_raw = struct.unpack_from('<h', file_bytes, v_off + 0)[0]
+                    y_raw = struct.unpack_from('<i', file_bytes, v_off + 2)[0]
+                    z_raw = struct.unpack_from('<i', file_bytes, v_off + 4)[0]
+                    x = x_raw / divFactor * scaleFactor + 2371.0
+                    y = y_raw / divFactor
+                    z = z_raw / divFactor
+                    # Any floats above 100.0 are double-divided
+                    if abs(x) > 100.0: x = x_raw / 128.0
+                    if abs(y) > 100.0: y = y_raw / 128.0
+                    if abs(z) > 100.0: z = z_raw / 128.0
+                    verts.append((x, y, z))
+                    # TODO: Normals and UVs
 
-                # Decoding vert buffer
-                x = x_raw / 64.0
-                y = y_raw / 64.0
-                z = z_raw / 64.0
+                flip = False
+                for i in range(len(verts) - 2):
+                    if flip:
+                        faces.append((i, i+2, i+1))
+                    else:
+                        faces.append((i, i+1, i+2))
+                    flip = not flip
 
-                if abs(x) > 100.0:
-                    x = x_raw / 128.0
-                if abs(y) > 100.0:
-                    y = y_raw / 128.0
-                if abs(z) > 100.0:
-                    z = z_raw / 128.0
+                mesh = bpy.data.meshes.new(f"CW_Model_{MeshOffset:06X}")
+                mesh.from_pydata(verts, [], faces)
+                mesh.update()
+                obj = bpy.data.objects.new(mesh.name, mesh)
+                bpy.context.collection.objects.link(obj)
+
+
                 
-                verts.append((x, y, z))
-
-
-                nx = nx_raw / 32767.0
-                ny = ny_raw / 32767.0
-                nz = nz_raw / 32767.0   # or 128.0 for normals? idk
-                u = u_raw / 2048.0
-                v = v_raw / 2048.0  # the most accurate I could get UVs so far
-
-                print(f"      Vertex {vi:3d}:")
-                print(f"        X:  offset 0x{v_off:06X}  bytes {file_bytes[v_off:v_off+2].hex(' ').upper()}  raw {x_raw:6f}  value {x:.6f}")
-                print(f"        Y:  offset 0x{v_off+2:06X}  bytes {file_bytes[v_off+2:v_off+4].hex(' ').upper()}  raw {y_raw:6d}  value {y:.6f}")
-                print(f"        Z:  offset 0x{v_off+4:06X}  bytes {file_bytes[v_off+4:v_off+6].hex(' ').upper()}  raw {z_raw:6d}  value {z:.6f}")
-                print(f"        Norm: ({nx:.6f}, {ny:.6f}, {nz:.6f})  UV: ({u:.6f}, {v:.6f})")
-                
-
-            flip = False
-            # Leeds likes to use tristrips for models, gonna guess that's the primitive type.
-            for i in range(len(verts) - 2):
-                if flip:
-                    faces.append((i, i+2, i+1))
-                else:
-                    faces.append((i, i+1, i+2))
-                flip = not flip
-
-            mesh = bpy.data.meshes.new("CW_Model")
-            mesh.from_pydata(verts, [], faces)
-            mesh.update()
-
-            obj = bpy.data.objects.new("CW_Model", mesh)
-            bpy.context.collection.objects.link(obj)
-
 
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -311,7 +288,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
     
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Worldblock(.wbl/.mdl)")
+    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Worldblock/Model(.wbl/.mdl)")
 
 def register():
     bpy.utils.register_class(ImportWBLPSPSectorOperator)
