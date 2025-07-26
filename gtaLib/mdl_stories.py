@@ -663,10 +663,10 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 LCSCLUMPPS2 = 0x00000002     # ditto for LCS/VCS PSP
                 VCSCLUMPPS2 = 0x0000AA02
                 CLUMPPSP   = 0x00000002      
-                LCSATOMIC1 = 0x01050001      # renders first
-                LCSATOMIC2 = 0x01000001      # renders last
-                VCSATOMIC1 = 0x0004AA01      # renders first
-                VCSATOMIC2 = 0x0004AA01      # renders last
+                LCSATOMIC1 = 0x01050001      # renders first?
+                LCSATOMIC2 = 0x01000001      # renders last?
+                VCSATOMIC1 = 0x0004AA01      # renders first?
+                VCSATOMIC2 = 0x0004AA01      # renders last?
                 VCSATOMICPSP1 = 0x01F40400
                 VCSATOMICPSP2 = 0x01F40400   # this structure appears similar to VCSATOMIC1&2
                 VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN(unofficial ugly name)
@@ -1784,7 +1784,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Stories Model(.MDL)")
+    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Stories Model(.mdl)")
 
 def register():
     bpy.utils.register_class(ImportMDLOperator)

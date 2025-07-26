@@ -232,43 +232,6 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 print(f"    [0x{MeshOffset+44:02X}] Division Factor?: {divFactor}") # bytes could be interpreted as 64.0, which it appears
                                                                                     # to be a vertex buffer division factor(sounds weird)
                                                                                     # ... or maybe it's a bitflag field
-            
-            # --- Vertex Buffer Parsing ---
-            # Chinatown Wars typically uses: pos, normals, texcoords
-            stride = 16  # Leeds/CW: 3x int16 (pos) + 3x int16 (normal) + 2x int16 (UV), therefore vertex stride is 16 bytes
-            vertex_base = MeshOffset + 48  # mesh header size = 0x30 (48 bytes)
-            print(f"    [0x{vertex_base:02X}] Vertex Buffer ({numVertices} entries, stride {stride}):")
-
-            for vi in range(numVertices):
-                v_off = vertex_base + vi * stride
-
-                # Position (signed 16-bit)
-                x_raw = struct.unpack_from('<h', file_bytes, v_off + 0)[0]
-                y_raw = struct.unpack_from('<h', file_bytes, v_off + 2)[0]
-                z_raw = struct.unpack_from('<h', file_bytes, v_off + 4)[0]
-                # Normals (signed 16-bit)
-                nx_raw = struct.unpack_from('<h', file_bytes, v_off + 6)[0]
-                ny_raw = struct.unpack_from('<h', file_bytes, v_off + 8)[0]
-                nz_raw = struct.unpack_from('<h', file_bytes, v_off +10)[0]
-                # UVs
-                u_raw  = struct.unpack_from('<h', file_bytes, v_off +12)[0]
-                v_raw  = struct.unpack_from('<h', file_bytes, v_off +14)[0]
-
-                # Decoding vert buffer
-                x = x_raw / 128.0
-                y = y_raw / 64.0
-                z = z_raw / 64.0
-                nx = nx_raw / 32767.0
-                ny = ny_raw / 32767.0
-                nz = nz_raw / 32767.0   # or 128.0 for normals? idk
-                u = u_raw / 2048.0
-                v = v_raw / 2048.0  # the most accurate I could get UVs so far
-
-                print(f"      Vertex {vi:3d}:")
-                print(f"        X:  offset 0x{v_off:06X}  bytes {file_bytes[v_off:v_off+2].hex(' ').upper()}  raw {x_raw:6d}  value {x:.6f}")
-                print(f"        Y:  offset 0x{v_off+2:06X}  bytes {file_bytes[v_off+2:v_off+4].hex(' ').upper()}  raw {y_raw:6d}  value {y:.6f}")
-                print(f"        Z:  offset 0x{v_off+4:06X}  bytes {file_bytes[v_off+4:v_off+6].hex(' ').upper()}  raw {z_raw:6d}  value {z:.6f}")
-                print(f"        Norm: ({nx:.6f}, {ny:.6f}, {nz:.6f})  UV: ({u:.6f}, {v:.6f})")
 
             # --- Vertex Buffer Parsing ---
             # Chinatown Wars typically uses: pos, normals, texcoords
