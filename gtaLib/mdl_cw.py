@@ -26,6 +26,19 @@ from bpy.types import Operator
 from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   This script is for .mdl/.wbls - formats for models in GTA:CW Mobile/PSP/DS      #
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+# - Script resources:
+# • https://gtamods.com/wiki/Leeds_Engine (some assets point to CW being made in Unity?)
+# • https://gtamods.com/wiki/MDL (TODO: update stub to include Chinatown Wars documentation)
+# • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)#.D0.9C.D0.BE.D0.B4.D0.B5.D0.BB.D0.B8 (*Russian*)
+# • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
+# - Mod resources/cool stuff:
+# • https://gtaforums.com/topic/781150-relctw-chinatown-wars-mobile-resource-explorer/
+# • https://web.archive.org/web/20221005045615/https://github.com/DK22Pac/ctw-gxt-tools (in case the repo goes down)
+
+
 # ======= DEBUG CONFIGURATION =======
 DEBUG_MODE = True  # set to True for debug print/log, False for silent
 # ===================================
@@ -79,19 +92,19 @@ def read_vec3_int4096(data, offset):
     return (x, y, z)
 #######################################################
 def read_leeds_cw_transform(data, offset, logf=None):
-    RightX = struct.unpack_from('<i', data, offset)[0] / 4096.0
-    RightY = struct.unpack_from('<h', data, offset+4)[0] / 4096.0
-    RightZ = struct.unpack_from('<h', data, offset+6)[0] / 4096.0
-    TopX   = struct.unpack_from('<h', data, offset+8)[0] / 4096.0
-    TopY   = struct.unpack_from('<i', data, offset+0x0A)[0] / 4096.0
-    TopZ   = struct.unpack_from('<h', data, offset+0x0E)[0] / 4096.0
-    AtX    = struct.unpack_from('<h', data, offset+0x10)[0] / 4096.0
-    AtY    = struct.unpack_from('<h', data, offset+0x12)[0] / 4096.0
-    AtZ    = struct.unpack_from('<i', data, offset+0x14)[0] / 4096.0
-    Padding = struct.unpack_from('<i', data, offset+0x18)[0]
-    PosnX = struct.unpack_from('<i', data, offset+0x1C)[0] / 4096.0
-    PosnY = struct.unpack_from('<i', data, offset+0x20)[0] / 4096.0
-    PosnZ = struct.unpack_from('<i', data, offset+0x24)[0] / 4096.0
+    RightX = struct.unpack_from('<h', data, offset)[0] / 4096.0
+    RightY = struct.unpack_from('<h', data, offset+2)[0] / 4096.0
+    RightZ = struct.unpack_from('<h', data, offset+4)[0] / 4096.0
+    TopX   = struct.unpack_from('<h', data, offset+6)[0] / 4096.0
+    TopY   = struct.unpack_from('<h', data, offset+8)[0] / 4096.0
+    TopZ   = struct.unpack_from('<h', data, offset+0x0A)[0] / 4096.0
+    AtX    = struct.unpack_from('<h', data, offset+0x0C)[0] / 4096.0
+    AtY    = struct.unpack_from('<h', data, offset+0x0E)[0] / 4096.0
+    AtZ    = struct.unpack_from('<h', data, offset+0x10)[0] / 4096.0
+    Padding = struct.unpack_from('<h', data, offset+0x12)[0]
+    PosnX = struct.unpack_from('<i', data, offset+0x14)[0] / 4096.0
+    PosnY = struct.unpack_from('<i', data, offset+0x18)[0] / 4096.0
+    PosnZ = struct.unpack_from('<i', data, offset+0x1C)[0] / 4096.0
     debug_print("    -Transform", logf)
     debug_print(f"      RightX {RightX:.6f}", logf)
     debug_print(f"      RightY {RightY:.6f}", logf)
@@ -143,6 +156,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 sec = file_bytes[sector_ofs:sector_ofs + 12]
                 debug_print(f"\n==== SECTOR {sector_idx} (0x{sector_ofs:02X} - 0x{sector_ofs+11:02X}) ====", logf)
                 debug_print(f"[0x{sector_ofs:02X}] Sector raw bytes: {' '.join(f'{b:02X}' for b in sec)}", logf)
+
                 Bool1 = bool(sec[0])
                 Bool2 = bool(sec[1])
                 NumInstances = struct.unpack_from("<h", sec, 2)[0]
@@ -150,6 +164,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 NumLevels    = struct.unpack_from("<h", sec, 6)[0]
                 NumLights    = struct.unpack_from("<h", sec, 8)[0]
                 NumTextures  = struct.unpack_from("<h", sec,10)[0]
+
                 debug_print(f"[0x{sector_ofs:02X}] Bool1: {Bool1} (byte value: {sec[0]:02X})", logf)
                 debug_print(f"[0x{sector_ofs+1:02X}] Bool2: {Bool2} (byte value: {sec[1]:02X})", logf)
                 debug_print(f"[0x{sector_ofs+2:02X}] NumInstances (int16): {NumInstances}", logf)
@@ -157,29 +172,33 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 debug_print(f"[0x{sector_ofs+6:02X}] NumLevels    (int16): {NumLevels}", logf)
                 debug_print(f"[0x{sector_ofs+8:02X}] NumLights    (int16): {NumLights}", logf)
                 debug_print(f"[0x{sector_ofs+10:02X}] NumTextures  (int16): {NumTextures}", logf)
-                debug_print(f"Levels:\n", logf)
 
-                # --- Read all levels (each 16 bytes) ---
                 level_ofs = sector_ofs + 12
+
+                # --- Read levels ---
+                debug_print(f"Levels:", logf)
                 for level_idx in range(NumLevels):
                     X_raw = struct.unpack_from("<i", file_bytes, level_ofs)[0]
                     Y_raw = struct.unpack_from("<i", file_bytes, level_ofs + 4)[0]
                     Z_raw = struct.unpack_from("<i", file_bytes, level_ofs + 8)[0]
                     NumInstances_lvl = struct.unpack_from("<h", file_bytes, level_ofs + 12)[0]
                     Flags_lvl = struct.unpack_from("<h", file_bytes, level_ofs + 14)[0]
+
                     X = X_raw / 4096.0
                     Y = Y_raw / 4096.0
                     Z = Z_raw / 4096.0
+
                     debug_print(f"    Level {level_idx}:", logf)
                     debug_print(f"      [0x{level_ofs:02X}] X (int32/4096): {X}", logf)
                     debug_print(f"      [0x{level_ofs+4:02X}] Y (int32/4096): {Y}", logf)
                     debug_print(f"      [0x{level_ofs+8:02X}] Z (int32/4096): {Z}", logf)
                     debug_print(f"      [0x{level_ofs+12:02X}] NumInstances (int16): {NumInstances_lvl}", logf)
                     debug_print(f"      [0x{level_ofs+14:02X}] Flags (int16): {Flags_lvl}", logf)
+
                     level_ofs += 16
 
-                # --- Read all instances (each 16 bytes) ---
-                debug_print(f"Instances:\n", logf)
+                # --- Read instances ---
+                debug_print(f"Instances:", logf)
                 for instance_idx in range(NumInstances):
                     inst_base = level_ofs + instance_idx * 16
                     ID = struct.unpack_from('<h', file_bytes, inst_base)[0]
@@ -188,6 +207,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     ResourceID = struct.unpack_from('<I', file_bytes, inst_base+4)[0]
                     MeshOffset = struct.unpack_from('<I', file_bytes, inst_base+8)[0]
                     Pointer = struct.unpack_from('<I', file_bytes, inst_base+12)[0]
+
                     debug_print(f"  Instance {instance_idx}:", logf)
                     debug_print(f"    [0x{inst_base:02X}] ID (int16): {ID}", logf)
                     debug_print(f"    [0x{inst_base+2:02X}] Instances (int8): {Instances}", logf)
@@ -195,24 +215,29 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     debug_print(f"    [0x{inst_base+4:02X}] ResourceID (uint32): 0x{ResourceID:08X} ({ResourceID})", logf)
                     debug_print(f"    [0x{inst_base+8:02X}] MeshOffset (uint32): 0x{MeshOffset:08X} ({MeshOffset})", logf)
                     debug_print(f"    [0x{inst_base+12:02X}] Pointer (uint32): 0x{Pointer:08X} ({Pointer})", logf)
+
                     if MeshOffset != 0:
                         mesh_offsets_found.add(MeshOffset)
+
                 level_ofs += 16 * NumInstances
 
-                # --- Read two material slots (4 bytes) ONLY if there are instances ---
-                if NumInstances > 0:
-                    material_slot_offset = level_ofs
-                    material_slot_1 = struct.unpack_from('<H', file_bytes, material_slot_offset)[0]
-                    material_slot_2 = struct.unpack_from('<H', file_bytes, material_slot_offset + 2)[0]
-                    debug_print(f"    Material Slot 1 (uint16): {material_slot_1}  [0x{material_slot_offset:06X}]", logf)
-                    debug_print(f"    Material Slot 2 (uint16): {material_slot_2}  [0x{material_slot_offset+2:06X}]", logf)
-                    sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + 4
-                else:
-                    sector_size = 12 + (NumLevels * 16) + (NumInstances * 16)
+                # --- Read texture IDs based on numTextures value ---
+                texture_ids = []
+                if NumTextures > 0:
+                    debug_print(f"Textures ({NumTextures} IDs):", logf)
+                    for tex_idx in range(NumTextures):
+                        tex_offset = level_ofs + tex_idx * 2
+                        tex_id = struct.unpack_from('<H', file_bytes, tex_offset)[0]
+                        texture_ids.append(tex_id)
+                        debug_print(f"  [0x{tex_offset:02X}] Texture ID {tex_idx}: {tex_id}", logf)
+                    level_ofs += NumTextures * 2
 
+                # Update sector offset
+                sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + (NumTextures * 2)
                 sector_ofs += sector_size
 
-            # ---- For all unique MeshOffsets, print MDL identifier and fields ----
+
+            # ---- Parse MeshOffsets, read GeometryMesh struct ----
             debug_print("\n==== MESH HEADERS FROM ALL INSTANCES ====", logf)
             for MeshOffset in sorted(mesh_offsets_found):
                 if MeshOffset < 0 or MeshOffset > len(file_bytes) - 48:
@@ -229,10 +254,10 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 numMaterials = struct.unpack_from('<b', file_bytes, MeshOffset+5)[0]
                 numVertices = struct.unpack_from('<h', file_bytes, MeshOffset+6)[0]
                 field8 = struct.unpack_from('<I', file_bytes, MeshOffset+8)[0]
-                fieldC = struct.unpack_from('<I', file_bytes, MeshOffset+12)[0]
+                fieldC = struct.unpack_from('<I', file_bytes, MeshOffset+12)[0]  # TODO: what do the numbers mean Mason?
                 boundmin = read_vec3_int4096(file_bytes, MeshOffset+16)
                 boundmax = read_vec3_int4096(file_bytes, MeshOffset+28)
-                scaleFactor = struct.unpack_from('<f', file_bytes, MeshOffset+40)[0]
+                unkFactor = struct.unpack_from('<f', file_bytes, MeshOffset+40)[0]  # float? not a scale factor?
                 divFactor = struct.unpack_from('<f', file_bytes, MeshOffset+44)[0]
                 debug_print(f"  [0x{MeshOffset:02X}] MDL Identifier: {ident_str} ('{mdl_ascii}')", logf)
                 debug_print(f"    [0x{MeshOffset+4:02X}] Unknown (int8): {unknown}", logf)
@@ -242,7 +267,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 debug_print(f"    [0x{MeshOffset+12:02X}] Field C (uint32): 0x{fieldC:08X} ({fieldC})", logf)
                 debug_print(f"    [0x{MeshOffset+16:02X}] BoundMin (3 floats): ({boundmin[0]}, {boundmin[1]}, {boundmin[2]})", logf)
                 debug_print(f"    [0x{MeshOffset+28:02X}] BoundMax (3 floats): ({boundmax[0]}, {boundmax[1]}, {boundmax[2]})", logf)
-                debug_print(f"    [0x{MeshOffset+40:02X}] Scale Factor: {scaleFactor}", logf)
+                debug_print(f"    [0x{MeshOffset+40:02X}] unkFactor: {unkFactor}", logf)
                 debug_print(f"    [0x{MeshOffset+44:02X}] Division Factor: {divFactor}", logf)
 
                 # Read vertex buffer for this mesh
@@ -251,21 +276,48 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 debug_print(f"    [0x{vertex_base:02X}] Vertex Buffer ({numVertices} entries, stride {stride}):", logf)
                 verts = []
                 faces = []
+                normals = []
+                uvs = []
 
                 for vi in range(numVertices):
                     v_off = vertex_base + vi * stride
+
+                    # Read position (int16)
                     x_raw = struct.unpack_from('<h', file_bytes, v_off + 0)[0]
-                    y_raw = struct.unpack_from('<i', file_bytes, v_off + 2)[0]
-                    z_raw = struct.unpack_from('<i', file_bytes, v_off + 4)[0]
-                    x = x_raw / divFactor * scaleFactor + 2371.0
-                    y = y_raw / divFactor
+                    y_raw = struct.unpack_from('<h', file_bytes, v_off + 2)[0]
+                    z_raw = struct.unpack_from('<h', file_bytes, v_off + 4)[0]
+                    # Mobile divides by division factor found in GeometryMesh struct
+                    x = x_raw / divFactor
+                    y = y_raw / divFactor 
                     z = z_raw / divFactor
-                    if abs(x) > 100.0: x = x_raw / 128.0
-                    if abs(y) > 100.0: y = y_raw / 128.0
-                    if abs(z) > 100.0: z = z_raw / 128.0
+
+                    # Read normal (int16)
+                    nx_raw = struct.unpack_from('<h', file_bytes, v_off + 6)[0]
+                    ny_raw = struct.unpack_from('<h', file_bytes, v_off + 8)[0]
+                    nz_raw = struct.unpack_from('<h', file_bytes, v_off + 10)[0]
+                    # Mobile divides by 32767
+                    nx = nx_raw / 32767.0
+                    ny = ny_raw / 32767.0
+                    nz = nz_raw / 32767.0
+
+                    # Read UV (int16)
+                    u_raw = struct.unpack_from('<h', file_bytes, v_off + 12)[0]
+                    v_raw = struct.unpack_from('<h', file_bytes, v_off + 14)[0]
+                    # Mobile divides by 2048
+                    u = u_raw / 2048.0
+                    v = v_raw / 2048.0
+
+                    # Hex and raw logging
+                    debug_print(f"      Vertex {vi:3d}:", logf)
+                    debug_print(f"        X:  offset 0x{v_off:06X}  bytes {file_bytes[v_off:v_off+2].hex(' ').upper()}  raw {x_raw:6d}  value {x:.6f}", logf)
+                    debug_print(f"        Y:  offset 0x{v_off+2:06X}  bytes {file_bytes[v_off+2:v_off+4].hex(' ').upper()}  raw {y_raw:6d}  value {y:.6f}", logf)
+                    debug_print(f"        Z:  offset 0x{v_off+4:06X}  bytes {file_bytes[v_off+4:v_off+6].hex(' ').upper()}  raw {z_raw:6d}  value {z:.6f}", logf)
+                    debug_print(f"        Norm: ({nx:.6f}, {ny:.6f}, {nz:.6f})  UV: ({u:.6f}, {v:.6f})", logf)
+
                     verts.append((x, y, z))
-                    # TODO: Normals and UVs
-                    debug_print(f"      Vertex {vi:3d}: x={x} y={y} z={z}", logf)
+                    normals.append((nx, ny, nz))
+                    uvs.append((u, v))
+
 
                 flip = False
                 for i in range(len(verts) - 2):
@@ -300,7 +352,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
     
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Model(.wbl/.mdl)")
+    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Worldblock/Model(.wbl/.mdl)")
 
 def register():
     bpy.utils.register_class(ImportWBLPSPSectorOperator)
