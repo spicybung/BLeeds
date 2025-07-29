@@ -30,7 +30,7 @@ from bpy_extras.io_utils import ImportHelper
 #   This script is for .mdl/.wbls - formats for models in GTA:CW Mobile/PSP/DS      #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
-# • https://gtamods.com/wiki/Leeds_Engine (some assets point to CW being made in Unity?)
+# • https://gtamods.com/wiki/Leeds_Engine (some assets point to CW being made in Unity? ports maybe?)
 # • https://gtamods.com/wiki/MDL (TODO: update stub to include Chinatown Wars documentation)
 # • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)#.D0.9C.D0.BE.D0.B4.D0.B5.D0.BB.D0.B8 (*Russian*)
 # • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
@@ -86,6 +86,7 @@ def read_u16(data, offset):
     return struct.unpack_from('<H', data, offset)[0]
 #######################################################
 def read_vec3_int4096(data, offset):
+    # CW mdls use integers, not floats
     x = struct.unpack_from('<i', data, offset)[0] / 4096.0
     y = struct.unpack_from('<i', data, offset + 4)[0] / 4096.0
     z = struct.unpack_from('<i', data, offset + 8)[0] / 4096.0
@@ -220,8 +221,42 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                         mesh_offsets_found.add(MeshOffset)
 
                 level_ofs += 16 * NumInstances
+                
+                # SHADOWS: Only read if NumShadows > 0
+                shadow_base = level_ofs
+                if NumShadows > 0:
+                    shadow_stride = 20
+                    debug_print(f"Shadows ({NumShadows} entries @0x{shadow_base:06X}):", logf)
+                    for shadow_idx in range(NumShadows):
+                        s_off = shadow_base + shadow_idx * shadow_stride
 
-                # --- Read texture IDs based on numTextures value ---
+                        # Print raw bytes for this shadow entry
+                        debug_print(f"    Shadow {shadow_idx}: [0x{s_off:06X}] " +
+                                    file_bytes[s_off:s_off+shadow_stride].hex(' ').upper(), logf)
+
+                        CenterX = struct.unpack_from('<i', file_bytes, s_off)[0] / 4096.0
+                        CenterY   = struct.unpack_from('<i', file_bytes, s_off + 4)[0] / 4096.0
+                        Unknown1  = struct.unpack_from('<e', file_bytes, s_off + 8)[0]
+                        SizeX     = struct.unpack_from('<h', file_bytes, s_off + 10)[0] / 4096.0
+                        SizeY     = struct.unpack_from('<h', file_bytes, s_off + 12)[0] / 4096.0
+                        Unknown2  = struct.unpack_from('<h', file_bytes, s_off + 14)[0] / 4096.0
+                        Unknown3  = struct.unpack_from('<h', file_bytes, s_off + 16)[0]
+                        Id        = struct.unpack_from('B', file_bytes, s_off + 18)[0]
+                        Pad       = struct.unpack_from('B', file_bytes, s_off + 19)[0]
+
+                        debug_print(f"      CenterX   {CenterX}", logf)
+                        debug_print(f"      CenterY   {CenterY}", logf)
+                        debug_print(f"      Unknown1  {Unknown1}", logf)
+                        debug_print(f"      SizeX     {SizeX}", logf)
+                        debug_print(f"      SizeY     {SizeY}", logf)
+                        debug_print(f"      Unknown2  {Unknown2}", logf)
+                        debug_print(f"      Unknown3  {Unknown3}", logf)
+                        debug_print(f"      Id        {Id}", logf)
+                        debug_print(f"      Padding   {Pad}", logf)
+                    # Advance level_ofs past the entire shadow block for subsequent reading
+                    level_ofs += NumShadows * shadow_stride
+
+                # TEXTURE IDs: Always read, but position depends on if shadows exist
                 texture_ids = []
                 if NumTextures > 0:
                     debug_print(f"Textures ({NumTextures} IDs):", logf)
@@ -233,7 +268,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     level_ofs += NumTextures * 2
 
                 # Update sector offset
-                sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + (NumTextures * 2)
+                sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + (NumShadows * 20) + (NumTextures * 2)
                 sector_ofs += sector_size
 
 
@@ -255,10 +290,10 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 numVertices = struct.unpack_from('<h', file_bytes, MeshOffset+6)[0]
                 field8 = struct.unpack_from('<I', file_bytes, MeshOffset+8)[0]
                 fieldC = struct.unpack_from('<I', file_bytes, MeshOffset+12)[0]  # TODO: what do the numbers mean Mason?
-                boundmin = read_vec3_int4096(file_bytes, MeshOffset+16)
+                boundmin = read_vec3_int4096(file_bytes, MeshOffset+16) # bounding box
                 boundmax = read_vec3_int4096(file_bytes, MeshOffset+28)
                 unkFactor = struct.unpack_from('<f', file_bytes, MeshOffset+40)[0]  # float? not a scale factor?
-                divFactor = struct.unpack_from('<f', file_bytes, MeshOffset+44)[0]
+                divFactor = struct.unpack_from('<f', file_bytes, MeshOffset+44)[0]  # scaling?
                 debug_print(f"  [0x{MeshOffset:02X}] MDL Identifier: {ident_str} ('{mdl_ascii}')", logf)
                 debug_print(f"    [0x{MeshOffset+4:02X}] Unknown (int8): {unknown}", logf)
                 debug_print(f"    [0x{MeshOffset+5:02X}] numMaterials (int8): {numMaterials}", logf)
@@ -286,7 +321,6 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     x_raw = struct.unpack_from('<h', file_bytes, v_off + 0)[0]
                     y_raw = struct.unpack_from('<h', file_bytes, v_off + 2)[0]
                     z_raw = struct.unpack_from('<h', file_bytes, v_off + 4)[0]
-                    # Mobile divides by division factor found in GeometryMesh struct
                     x = x_raw / divFactor
                     y = y_raw / divFactor 
                     z = z_raw / divFactor
@@ -303,7 +337,6 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     # Read UV (int16)
                     u_raw = struct.unpack_from('<h', file_bytes, v_off + 12)[0]
                     v_raw = struct.unpack_from('<h', file_bytes, v_off + 14)[0]
-                    # Mobile divides by 2048
                     u = u_raw / 2048.0
                     v = v_raw / 2048.0
 
@@ -317,6 +350,9 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     verts.append((x, y, z))
                     normals.append((nx, ny, nz))
                     uvs.append((u, v))
+                    
+
+
 
 
                 flip = False
