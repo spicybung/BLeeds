@@ -278,7 +278,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                             mesh_obj.modifiers.remove(mod)
                     # Add Edge Split modifier first (order matters for shading)
                     edge_split = mesh_obj.modifiers.new(name="EdgeSplit", type='EDGE_SPLIT')
-                    edge_split.split_angle = 1.0  # You may want to adjust this for Leeds models
+                    edge_split.split_angle = 1.0 # seems ok
                     edge_split.use_edge_angle = True
                     edge_split.use_edge_sharp = True
 

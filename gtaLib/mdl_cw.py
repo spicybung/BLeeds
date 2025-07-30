@@ -262,6 +262,65 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     # Advance level_ofs past the entire shadow block for subsequent reading
                     level_ofs += NumShadows * shadow_stride
 
+                # LIGHTS: Only read if NumLights > 0
+                light_base = level_ofs
+                if NumLights > 0:
+                    light_stride = 20  # Each light entry is 20 bytes
+                    debug_print(f"Lights ({NumLights} entries @0x{light_base:06X}):", logf)
+
+                    for light_idx in range(NumLights):
+                        l_off = light_base + light_idx * light_stride
+
+                        # Print raw bytes for this light entry
+                        debug_print(f"    Light {light_idx}: [0x{l_off:06X}] " +
+                                    file_bytes[l_off:l_off+light_stride].hex(' ').upper(), logf)
+
+                        X_raw = struct.unpack_from('<I', file_bytes, l_off + 0)[0]
+                        Y_raw = struct.unpack_from('<I', file_bytes, l_off + 4)[0]
+                        Z_raw = struct.unpack_from('<I', file_bytes, l_off + 8)[0]
+                        Size_raw = struct.unpack_from('<H', file_bytes, l_off + 12)[0]
+                        Id = struct.unpack_from('<B', file_bytes, l_off + 14)[0]
+                        R = struct.unpack_from('<B', file_bytes, l_off + 16)[0]
+                        G = struct.unpack_from('<B', file_bytes, l_off + 17)[0]
+                        B = struct.unpack_from('<B', file_bytes, l_off + 18)[0]
+
+                        # Conversion
+                        X = X_raw / 4096.0
+                        Y = Y_raw / 4096.0
+                        Z = Z_raw / 4096.0
+                        Size = Size_raw / 4096.0
+
+                        debug_print(f"      X: {X}", logf)
+                        debug_print(f"      Y: {Y}", logf)
+                        debug_print(f"      Z: {Z}", logf)
+                        debug_print(f"      Id: {Id}", logf)
+                        debug_print(f"      Color: {R} {G} {B}", logf)
+                        debug_print(f"      Size: {Size}", logf)
+                        
+                        # === Create point light in Blender ===
+                        light_data = bpy.data.lights.new(name=f"CW_Light_{light_idx}", type='POINT')
+                        light_object = bpy.data.objects.new(name=f"CW_Light_{light_idx}", object_data=light_data)
+                        bpy.context.collection.objects.link(light_object)
+
+                        # Set light location
+                        light_object.location = (X, Y, Z)
+
+                        # Normalize color to 0.0–1.0 and set
+                        light_data.color = (R / 255.0, G / 255.0, B / 255.0)
+
+                        # Assign light energy scaled by size
+                        light_data.energy = max(1.0, Size * 1000.0)  # avoid energy = 0
+
+                        # Optional: use size to set softness
+                        light_data.shadow_soft_size = Size
+
+                        # Optional: store light ID as custom property
+                        light_object["CW_LightID"] = Id
+
+                    # Advance offset after lights
+                    level_ofs += NumLights * light_stride
+
+
                 # TEXTURE IDs: Always read, but position depends on if shadows exist
                 texture_ids = []
                 if NumTextures > 0:
@@ -274,7 +333,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     level_ofs += NumTextures * 2
 
                 # Update sector offset
-                sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + (NumShadows * 20) + (NumTextures * 2)
+                sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + (NumShadows * 20) + (NumLights * 20) + (NumTextures * 2)
                 sector_ofs += sector_size
 
 
@@ -361,8 +420,34 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     verts.append((x, y, z))
                     normals.append((nx, ny, nz))
                     uvs.append((u, v))
+                 
+                # === Parse material list ===    
+                materials = []
+                material_table_offset = vertex_base + (numVertices * stride)
+                for mi in range(numMaterials):
+                    m_off = material_table_offset + mi * 12
+
+                    tex_id         = struct.unpack_from('<H', file_bytes, m_off + 0)[0]
+                    vertex_count   = struct.unpack_from('<H', file_bytes, m_off + 2)[0]
+                    render_flags   = struct.unpack_from('<B', file_bytes, m_off + 4)[0]
+                    node           = struct.unpack_from('<B', file_bytes, m_off + 5)[0]
+                    field6         = struct.unpack_from('<B', file_bytes, m_off + 6)[0]
+                    field7         = struct.unpack_from('<B', file_bytes, m_off + 7)[0]
+                    variance_flags = struct.unpack_from('<i', file_bytes, m_off + 8)[0]
+
+                    debug_print(f"    Material {mi}:", logf)
+                    debug_print(f"      Texture ID: {tex_id}", logf)
+                    debug_print(f"      Vertex Count: {vertex_count}", logf)
+                    debug_print(f"      Rendering Flags: {render_flags}", logf)
+                    debug_print(f"      Node: {node}", logf)
+                    debug_print(f"      Field6: {field6}", logf)
+                    debug_print(f"      Field7: {field7}", logf)
+                    debug_print(f"      VarianceFlags: {variance_flags}", logf)
+
+                    materials.append(tex_id)
+
                 
-                # Sort tri-strips from vertices(TODO: other 3 primitive types)
+                # === Sort tri-strips from vertices(TODO: other 3 primitive types) === 
                 flip = False
                 for i in range(len(verts) - 2):
                     if flip:
@@ -370,12 +455,32 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     else:
                         faces.append((i, i+1, i+2))
                     flip = not flip
-
+                
+                # === Create meshes === 
                 mesh = bpy.data.meshes.new(f"CW_Model_{MeshOffset:06X}")
                 mesh.from_pydata(verts, [], faces)
                 mesh.update()
                 obj = bpy.data.objects.new(mesh.name, mesh)
                 bpy.context.collection.objects.link(obj)
+                
+                # === Assign materials to the mesh via texture IDs  ===
+                if materials:
+                    debug_print(f"    Assigning materials to mesh using MDL materials...", logf)
+                    for tex_id in materials:
+                        mat_name = f"texture{tex_id}"
+                        if mat_name in bpy.data.materials:
+                            mat = bpy.data.materials[mat_name]
+                        else:
+                            mat = bpy.data.materials.new(name=mat_name)
+                            mat.use_nodes = True
+                            bsdf = mat.node_tree.nodes.get("Principled BSDF")
+                            if bsdf:
+                                bsdf.inputs['Base Color'].default_value = (1.0, 1.0, 1.0, 1.0)
+                            mat["CW_TexID"] = tex_id  # Store as custom property
+
+                        obj.data.materials.append(mat)
+                        debug_print(f"      Assigned material '{mat_name}' to mesh", logf)
+
 
         except Exception as e:
             tb_str = traceback.format_exc()
@@ -396,7 +501,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
     
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Worldblock/Model(.wbl/.mdl)")
+    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Worldblock(.wbl/.mdl)")
 
 def register():
     bpy.utils.register_class(ImportWBLPSPSectorOperator)
