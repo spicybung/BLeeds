@@ -463,7 +463,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 obj = bpy.data.objects.new(mesh.name, mesh)
                 bpy.context.collection.objects.link(obj)
                 
-                # === Assign materials to the mesh via texture IDs  ===
+                # === Assign materials to the mesh via texture IDs ===
                 if materials:
                     debug_print(f"    Assigning materials to mesh using MDL materials...", logf)
                     for tex_id in materials:
@@ -478,8 +478,23 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                                 bsdf.inputs['Base Color'].default_value = (1.0, 1.0, 1.0, 1.0)
                             mat["CW_TexID"] = tex_id  # Store as custom property
 
+                            # === Try to load image texture ===
+                            image_path = os.path.join(os.path.dirname(self.filepath), f"{mat_name}.png")
+                            if os.path.exists(image_path):
+                                debug_print(f"      Found texture image: {image_path}", logf)
+                                try:
+                                    img = bpy.data.images.load(image_path)
+                                    tex_node = mat.node_tree.nodes.new('ShaderNodeTexImage')
+                                    tex_node.image = img
+                                    mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
+                                except Exception as e:
+                                    debug_print(f"      Failed to load image {image_path}: {e}", logf)
+                            else:
+                                debug_print(f"      Texture image not found: {image_path}", logf)
+
                         obj.data.materials.append(mat)
                         debug_print(f"      Assigned material '{mat_name}' to mesh", logf)
+
 
 
         except Exception as e:
@@ -501,7 +516,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
     
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Worldblock(.wbl/.mdl)")
+    self.layout.operator(ImportWBLPSPSectorOperator.bl_idname, text="R* Leeds Chinatown Wars Worldblock/Model(.wbl/.mdl)")
 
 def register():
     bpy.utils.register_class(ImportWBLPSPSectorOperator)
