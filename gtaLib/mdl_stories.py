@@ -981,7 +981,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                             log(f"✔ 0x6C018000 split flag found at 0x{split_flag_offset:X} -- reading split section header...")
 
                                             # Read and log each split block header field (these are always in this order)
-                                            marker_bytes = f.read(4)  # already read, but you may want to re-log bytes for clarity
+                                            marker_bytes = f.read(4) 
                                             log(f"  [0x{f.tell()-4:X}] marker: {marker_bytes.hex()} (should be 00 80 01 6C)")
 
                                             zeros1_offset = f.tell()
