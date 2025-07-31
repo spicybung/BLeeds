@@ -460,6 +460,15 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 mesh = bpy.data.meshes.new(f"CW_Model_{MeshOffset:06X}")
                 mesh.from_pydata(verts, [], faces)
                 mesh.update()
+                
+                # --- Add UV map and assign UV coordinates ---
+                uv_layer = mesh.uv_layers.new(name="UVMap")
+                for face in mesh.polygons:
+                    for loop_index in face.loop_indices:
+                        vert_index = mesh.loops[loop_index].vertex_index
+                        uv = uvs[vert_index]
+                        uv_layer.data[loop_index].uv = uv
+                
                 obj = bpy.data.objects.new(mesh.name, mesh)
                 bpy.context.collection.objects.link(obj)
                 
@@ -468,29 +477,53 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     debug_print(f"    Assigning materials to mesh using MDL materials...", logf)
                     for tex_id in materials:
                         mat_name = f"texture{tex_id}"
+
+                        # Get or create material
                         if mat_name in bpy.data.materials:
                             mat = bpy.data.materials[mat_name]
+                            # Clear nodes so we can recreate them fresh
+                            mat.use_nodes = True
+                            nodes = mat.node_tree.nodes
+                            nodes.clear()
+                            debug_print(f"    Material '{mat_name}' exists, clearing nodes and reloading image.", logf)
                         else:
                             mat = bpy.data.materials.new(name=mat_name)
                             mat.use_nodes = True
-                            bsdf = mat.node_tree.nodes.get("Principled BSDF")
-                            if bsdf:
-                                bsdf.inputs['Base Color'].default_value = (1.0, 1.0, 1.0, 1.0)
-                            mat["CW_TexID"] = tex_id  # Store as custom property
+                            nodes = mat.node_tree.nodes
+                            debug_print(f"    Created new material '{mat_name}' and will load image.", logf)
 
-                            # === Try to load image texture ===
-                            image_path = os.path.join(os.path.dirname(self.filepath), f"{mat_name}.png")
-                            if os.path.exists(image_path):
-                                debug_print(f"      Found texture image: {image_path}", logf)
-                                try:
-                                    img = bpy.data.images.load(image_path)
-                                    tex_node = mat.node_tree.nodes.new('ShaderNodeTexImage')
-                                    tex_node.image = img
-                                    mat.node_tree.links.new(tex_node.outputs['Color'], bsdf.inputs['Base Color'])
-                                except Exception as e:
-                                    debug_print(f"      Failed to load image {image_path}: {e}", logf)
-                            else:
-                                debug_print(f"      Texture image not found: {image_path}", logf)
+                        # Create nodes every time
+                        tex_image_node = nodes.new('ShaderNodeTexImage')
+                        bsdf_node = nodes.new('ShaderNodeBsdfPrincipled')
+                        output_node = nodes.new('ShaderNodeOutputMaterial')
+
+                        # Setup node locations
+                        tex_image_node.location = (-400, 300)
+                        bsdf_node.location = (-100, 300)
+                        output_node.location = (200, 300)
+
+                        # Link shader nodes
+                        links = mat.node_tree.links
+                        links.new(tex_image_node.outputs['Color'], bsdf_node.inputs['Base Color'])
+                        links.new(bsdf_node.outputs['BSDF'], output_node.inputs['Surface'])
+
+                        # Try to load the image from same dir every time
+                        image_path = os.path.join(os.path.dirname(self.filepath), f"{mat_name}.png")
+                        debug_print(f"      Checking for image: {image_path}", logf)
+
+                        if os.path.exists(image_path):
+                            try:
+                                img = bpy.data.images.load(image_path, check_existing=True)
+                                tex_image_node.image = img
+                                tex_image_node.interpolation = 'Smart'
+                                debug_print(f"      Loaded texture image: {image_path}", logf)
+                            except Exception as e:
+                                debug_print(f"      Failed loading image {image_path}: {e}", logf)
+                        else:
+                            debug_print(f"      Texture image not found: {image_path}", logf)
+
+                        # Tag for later use
+                        mat["CW_TexID"] = tex_id
 
                         obj.data.materials.append(mat)
                         debug_print(f"      Assigned material '{mat_name}' to mesh", logf)
