@@ -278,7 +278,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                             mesh_obj.modifiers.remove(mod)
                     # Add Edge Split modifier first (order matters for shading)
                     edge_split = mesh_obj.modifiers.new(name="EdgeSplit", type='EDGE_SPLIT')
-                    edge_split.split_angle = 1.0  # You may want to adjust this for Leeds models
+                    edge_split.split_angle = 1.0 # seems ok
                     edge_split.use_edge_angle = True
                     edge_split.use_edge_sharp = True
 
@@ -663,10 +663,10 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 LCSCLUMPPS2 = 0x00000002     # ditto for LCS/VCS PSP
                 VCSCLUMPPS2 = 0x0000AA02
                 CLUMPPSP   = 0x00000002      
-                LCSATOMIC1 = 0x01050001      # renders first
-                LCSATOMIC2 = 0x01000001      # renders last
-                VCSATOMIC1 = 0x0004AA01      # renders first
-                VCSATOMIC2 = 0x0004AA01      # renders last
+                LCSATOMIC1 = 0x01050001      # renders first?
+                LCSATOMIC2 = 0x01000001      # renders last?
+                VCSATOMIC1 = 0x0004AA01      # renders first?
+                VCSATOMIC2 = 0x0004AA01      # renders last?
                 VCSATOMICPSP1 = 0x01F40400
                 VCSATOMICPSP2 = 0x01F40400   # this structure appears similar to VCSATOMIC1&2
                 VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN(unofficial ugly name)
@@ -981,7 +981,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                             log(f"✔ 0x6C018000 split flag found at 0x{split_flag_offset:X} -- reading split section header...")
 
                                             # Read and log each split block header field (these are always in this order)
-                                            marker_bytes = f.read(4)  # already read, but you may want to re-log bytes for clarity
+                                            marker_bytes = f.read(4) 
                                             log(f"  [0x{f.tell()-4:X}] marker: {marker_bytes.hex()} (should be 00 80 01 6C)")
 
                                             zeros1_offset = f.tell()
@@ -1784,7 +1784,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Stories Model(.MDL)")
+    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Stories Model(.mdl)")
 
 def register():
     bpy.utils.register_class(ImportMDLOperator)

@@ -653,7 +653,7 @@ class IMPORT_OT_read_mdl_header(Operator, ImportHelper):
     
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_read_mdl_header.bl_idname, text="R* Leeds Manhunt 2 Model(.MDL)")
+    self.layout.operator(IMPORT_OT_read_mdl_header.bl_idname, text="R* Leeds Manhunt 2 Model(.mdl)")
 
 def register():
     bpy.utils.register_class(IMPORT_OT_read_mdl_header)

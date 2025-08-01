@@ -34,6 +34,8 @@ from bpy_extras.io_utils import ImportHelper
 # • https://web-archive-org.translate.goog/web/20180807031320/http://www.gtamodding.ru/wiki/IMG?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto)
 # • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto - WRLD textures)
 
+# TODO: correctly parse Stories LVZ/IMG cuz it's boning me
+
 #######################################################
 def padhex(n, w=8):
     return "0x{:0{}X}".format(n, w)
