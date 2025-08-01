@@ -357,8 +357,8 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 fieldC = struct.unpack_from('<I', file_bytes, MeshOffset+12)[0]  # TODO: what do the numbers mean Mason?
                 boundmin = read_vec3_int4096(file_bytes, MeshOffset+16) # bounding box minimum
                 boundmax = read_vec3_int4096(file_bytes, MeshOffset+28) # bounding box maximum
-                unkFactor = struct.unpack_from('<f', file_bytes, MeshOffset+40)[0]  # float? not a scale factor?
-                scaleFactor = struct.unpack_from('<f', file_bytes, MeshOffset+44)[0]  # scaling?
+                uvOffset = struct.unpack_from('<f', file_bytes, MeshOffset+40)[0]  # float for offsetting uv's
+                scaleFactor = struct.unpack_from('<f', file_bytes, MeshOffset+44)[0]  # scale factor for models
                 debug_print(f"  [0x{MeshOffset:02X}] MDL Identifier: {ident_str} ('{mdl_ascii}')", logf)
                 debug_print(f"    [0x{MeshOffset+4:02X}] Unknown (int8): {unknown}", logf)
                 debug_print(f"    [0x{MeshOffset+5:02X}] numMaterials (int8): {numMaterials}", logf)
@@ -367,7 +367,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 debug_print(f"    [0x{MeshOffset+12:02X}] Field C (uint32): 0x{fieldC:08X} ({fieldC})", logf)
                 debug_print(f"    [0x{MeshOffset+16:02X}] BoundMin (3 floats): ({boundmin[0]}, {boundmin[1]}, {boundmin[2]})", logf)
                 debug_print(f"    [0x{MeshOffset+28:02X}] BoundMax (3 floats): ({boundmax[0]}, {boundmax[1]}, {boundmax[2]})", logf)
-                debug_print(f"    [0x{MeshOffset+40:02X}] unkFactor: {unkFactor}", logf)
+                debug_print(f"    [0x{MeshOffset+40:02X}] uv Offset: {uvOffset}", logf)
                 debug_print(f"    [0x{MeshOffset+44:02X}] Scale Factor: {scaleFactor}", logf)
 
                 # Read vertex buffer for this mesh
