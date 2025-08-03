@@ -280,11 +280,12 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                         Z_raw = struct.unpack_from('<I', file_bytes, l_off + 8)[0]
                         Size_raw = struct.unpack_from('<H', file_bytes, l_off + 12)[0]
                         Id = struct.unpack_from('<B', file_bytes, l_off + 14)[0]
+                        # CW: RGB only(?)
                         R = struct.unpack_from('<B', file_bytes, l_off + 16)[0]
                         G = struct.unpack_from('<B', file_bytes, l_off + 17)[0]
                         B = struct.unpack_from('<B', file_bytes, l_off + 18)[0]
 
-                        # Conversion
+                        # Light XYZ conversion
                         X = X_raw / 4096.0
                         Y = Y_raw / 4096.0
                         Z = Z_raw / 4096.0
@@ -403,8 +404,8 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     u_raw = struct.unpack_from('<h', file_bytes, v_off + 12)[0]
                     v_raw = struct.unpack_from('<h', file_bytes, v_off + 14)[0]
                     # Mobile divides by 2048
-                    u = (u_raw / 2048.0) + uvOffset
-                    v = 1.0 - (v_raw / 2048.0)
+                    u = (u_raw / 2048.0) + uvOffset # CW Mobile: divide the u by 2048, add uvOffset along x-axis
+                    v = 1.0 - (v_raw / 2048.0) # CW Mobile: flip v's on their y-axis, divide by 2048
 
                     all_verts.append((x, y, z))
                     all_normals.append((nx, ny, nz))
