@@ -35,8 +35,9 @@ from bpy_extras.io_utils import ImportHelper
 # • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)#.D0.9C.D0.BE.D0.B4.D0.B5.D0.BB.D0.B8 (*Russian*)
 # • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
 # - Mod resources/cool stuff:
-# • https://gtaforums.com/topic/781150-relctw-chinatown-wars-mobile-resource-explorer/
-# • https://web.archive.org/web/20221005045615/https://github.com/DK22Pac/ctw-gxt-tools (in case the repo goes down)
+# • https://gtaforums.com/topic/781150-relctw-chinatown-wars-mobile-resource-explorer/  (*analyzes game.pak for mobile & partial support for psp*)
+# • https://web.archive.org/web/20221005045615/https://github.com/DK22Pac/ctw-gxt-tools (*texture editor - in case the repo goes down*)
+
 
 
 # ======= DEBUG CONFIGURATION =======
@@ -150,7 +151,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
             header_transform = read_leeds_cw_transform(file_bytes, 0x00, logf)
             PosnX, PosnY, PosnZ = header_transform["Pos"]
 
-            # --- Sectors A to D: Each sector is 12 bytes, start at 0x28
+            # --- Sectors A to D: Each model has them, and each sector is 12 bytes; start at 0x28 - after world transforms
             sector_ofs = 0x28
             mesh_offsets_found = set()
             for sector_idx in range(4):
@@ -280,11 +281,12 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                         Z_raw = struct.unpack_from('<I', file_bytes, l_off + 8)[0]
                         Size_raw = struct.unpack_from('<H', file_bytes, l_off + 12)[0]
                         Id = struct.unpack_from('<B', file_bytes, l_off + 14)[0]
+                        # CW: RGB only(?)
                         R = struct.unpack_from('<B', file_bytes, l_off + 16)[0]
                         G = struct.unpack_from('<B', file_bytes, l_off + 17)[0]
                         B = struct.unpack_from('<B', file_bytes, l_off + 18)[0]
 
-                        # Conversion
+                        # Light XYZ conversion
                         X = X_raw / 4096.0
                         Y = Y_raw / 4096.0
                         Z = Z_raw / 4096.0
@@ -320,7 +322,6 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     # Advance offset after lights
                     level_ofs += NumLights * light_stride
 
-
                 # TEXTURE IDs: Always read, but position depends on if shadows exist
                 texture_ids = []
                 if NumTextures > 0:
@@ -335,7 +336,6 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 # Update sector offset
                 sector_size = 12 + (NumLevels * 16) + (NumInstances * 16) + (NumShadows * 20) + (NumLights * 20) + (NumTextures * 2)
                 sector_ofs += sector_size
-
 
             # ---- Parse MeshOffsets, read GeometryMesh struct ----
             debug_print("\n==== MESH HEADERS FROM ALL INSTANCES ====", logf)
@@ -370,6 +370,18 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 debug_print(f"    [0x{MeshOffset+40:02X}] uv Offset: {uvOffset}", logf)
                 debug_print(f"    [0x{MeshOffset+44:02X}] Scale Factor: {scaleFactor}", logf)
 
+                # Read vertex buffer for this mesh (CW: no index buffer)
+                # X, Y, Z, NX, NY, NZ, U, V - so CW vertex stride is usually always 16 bytes.
+                stride = 16
+                vertex_base = MeshOffset + 48
+
+                # --- Parse all vertices once (will use them for all parts) ---
+                all_verts = []
+                all_normals = []
+                all_uvs = []
+                for vi in range(numVertices):
+                    v_off = vertex_base + vi * stride
+                    
                 # Read vertex buffer for this mesh
                 # X, Y, Z, NX, NY, NZ, U, V - so CW vertex stride is usually always 16 bytes.
                 stride = 16
@@ -405,6 +417,23 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     # Read UV (int16)
                     u_raw = struct.unpack_from('<h', file_bytes, v_off + 12)[0]
                     v_raw = struct.unpack_from('<h', file_bytes, v_off + 14)[0]
+                    
+                    # Mobile divides by 2048
+                    u = (u_raw / 2048.0) + uvOffset # CW Mobile: divide the u by 2048, add uvOffset along x-axis
+                    v = 1.0 - (v_raw / 2048.0) # CW Mobile: flip v's on their y-axis, divide by 2048
+
+                    all_verts.append((x, y, z))
+                    all_normals.append((nx, ny, nz))
+                    all_uvs.append((u, v))
+
+                # --- Parse and split by mesh part/material group ---
+                vert_offset = 0
+                material_table_offset = vertex_base + (numVertices * stride)
+
+                # NOTE: For CW Mobile & probably PSP, "parts" are split by numMaterials, not numMeshes
+                for mi in range(numMaterials):
+                    m_off = material_table_offset + mi * 12
+
                     # Mobile divides by 2048(?)
                     u = u_raw / 2048.0
                     v = v_raw / 2048.0
@@ -427,6 +456,7 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                 for mi in range(numMaterials):
                     m_off = material_table_offset + mi * 12
 
+
                     tex_id         = struct.unpack_from('<H', file_bytes, m_off + 0)[0]
                     vertex_count   = struct.unpack_from('<H', file_bytes, m_off + 2)[0]
                     render_flags   = struct.unpack_from('<B', file_bytes, m_off + 4)[0]
@@ -435,6 +465,99 @@ class ImportWBLPSPSectorOperator(bpy.types.Operator, ImportHelper):
                     field7         = struct.unpack_from('<B', file_bytes, m_off + 7)[0]
                     variance_flags = struct.unpack_from('<i', file_bytes, m_off + 8)[0]
 
+
+                    debug_print(f"---- Mesh Part {mi}: ----", logf)
+                    debug_print(f"  Texture ID: {tex_id}", logf)
+                    debug_print(f"  Vertex Count: {vertex_count}", logf)
+                    debug_print(f"  Rendering Flags: {render_flags}", logf)
+                    debug_print(f"  Node: {node}", logf)
+                    debug_print(f"  Field6: {field6}", logf)
+                    debug_print(f"  Field7: {field7}", logf)
+                    debug_print(f"  VarianceFlags: {variance_flags}", logf)
+
+                    # Vertices and uvs just for this part
+                    part_verts = []
+                    part_normals = []
+                    part_uvs = []
+                    for i in range(vertex_count):
+                        idx = vert_offset + i
+                        part_verts.append(all_verts[idx])
+                        part_normals.append(all_normals[idx])
+                        part_uvs.append(all_uvs[idx])
+
+                    # NOTE: Faces for this mesh part: always flip the winding every triangle strip or you will break shit (RIP Hulkster brother)
+                    part_faces = []
+                    if vertex_count >= 3:
+                        flip = False
+                        for i in range(vertex_count - 2):
+                            idx0 = i
+                            idx1 = i + 1
+                            idx2 = i + 2
+                            if flip:
+                                face = (idx0, idx2, idx1)
+                            else:
+                                face = (idx0, idx1, idx2)
+                            if len(set(face)) == 3:
+                                part_faces.append(face)
+                            flip = not flip
+
+                    # --- Create mesh for this mesh part/material group ---
+                    mesh_name = f"CW_Model_{MeshOffset:06X}_part{mi}_tex{tex_id}"
+                    mesh = bpy.data.meshes.new(mesh_name)
+                    mesh.from_pydata(part_verts, [], part_faces)
+                    mesh.update()
+
+                    # UVs for this mesh part
+                    uv_layer = mesh.uv_layers.new(name="UVMap")
+                    for face in mesh.polygons:
+                        for loop_index in face.loop_indices:
+                            vert_index = mesh.loops[loop_index].vertex_index
+                            uv = part_uvs[vert_index]
+                            uv_layer.data[loop_index].uv = uv
+
+                    # --- Assign material for this part ---
+                    mat_name = f"texture{tex_id}"
+                    if mat_name in bpy.data.materials:
+                        mat = bpy.data.materials[mat_name]
+                        mat.use_nodes = True
+                        nodes = mat.node_tree.nodes
+                        nodes.clear()
+                        debug_print(f"    Material '{mat_name}' exists, clearing nodes and reloading image.", logf)
+                    else:
+                        mat = bpy.data.materials.new(name=mat_name)
+                        mat.use_nodes = True
+                        nodes = mat.node_tree.nodes
+                        debug_print(f"    Created new material '{mat_name}' and will load image.", logf)
+                    tex_image_node = nodes.new('ShaderNodeTexImage')
+                    bsdf_node = nodes.new('ShaderNodeBsdfPrincipled')
+                    output_node = nodes.new('ShaderNodeOutputMaterial')
+                    tex_image_node.location = (-400, 300)
+                    bsdf_node.location = (-100, 300)
+                    output_node.location = (200, 300)
+                    links = mat.node_tree.links
+                    links.new(tex_image_node.outputs['Color'], bsdf_node.inputs['Base Color'])
+                    links.new(bsdf_node.outputs['BSDF'], output_node.inputs['Surface'])
+                    image_path = os.path.join(os.path.dirname(self.filepath), f"{mat_name}.png")
+                    debug_print(f"      Checking for image: {image_path}", logf)
+                    if os.path.exists(image_path):
+                        try:
+                            img = bpy.data.images.load(image_path, check_existing=True)
+                            tex_image_node.image = img
+                            tex_image_node.interpolation = 'Smart'
+                            debug_print(f"      Loaded texture image: {image_path}", logf)
+                        except Exception as e:
+                            debug_print(f"      Failed loading image {image_path}: {e}", logf)
+                    else:
+                        debug_print(f"      Texture image not found: {image_path}", logf)
+                    mat["CW_TexID"] = tex_id
+                    mesh.materials.append(mat)
+
+                    # --- Create Blender object and link ---
+                    obj = bpy.data.objects.new(mesh.name, mesh)
+                    bpy.context.collection.objects.link(obj)
+
+                    vert_offset += vertex_count
+                   
                     debug_print(f"    Material {mi}:", logf)
                     debug_print(f"      Texture ID: {tex_id}", logf)
                     debug_print(f"      Vertex Count: {vertex_count}", logf)
