@@ -39,7 +39,6 @@ class CW_OT_LoadFromCustom(bpy.types.Operator):
         if obj is None:
             self.report({'ERROR'}, "No active object")
             return {'CANCELLED'}
-        # Replace this with your real loading logic
         self.report({'INFO'}, f"Loaded custom data into: {obj.name}")
         return {'FINISHED'}
 
@@ -55,7 +54,6 @@ class CW_OT_SaveToCustom(bpy.types.Operator):
         if obj is None:
             self.report({'ERROR'}, "No active object")
             return {'CANCELLED'}
-        # Replace this with your real saving logic
         self.report({'INFO'}, f"Saved custom data from: {obj.name}")
         return {'FINISHED'}
 
@@ -114,7 +112,6 @@ class CW_MT_ExportChoice(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        # These must match your operator bl_idnames
         layout.operator("export_scene.cw_wbl", text="WBL (.wbl)")
 
 class TOPBAR_MT_file_import_bleeds(bpy.types.Menu):
