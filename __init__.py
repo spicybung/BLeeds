@@ -15,37 +15,60 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import importlib
 import bpy
 
-from . import mdl_importer
-from . import mdl_parser
-from . import matrix_utils
+from bpy.utils import register_class, unregister_class
+from .gui import gui
+
 
 bl_info = {
     "name": "BLeeds",
-    "author": "spicybung",
-    "version": (1, 0, 0),
-    "blender": (3, 0, 0),
-    "location": "File > Import > MDL (.mdl)",
-    "description": "Import Leeds GTA Stories/CW & Manhunt 2 .MDL model(s).",
-    "category": "Import-Export"
+    "author": "SpicyBung",
+    "version": (0, 0, 1),
+    "blender": (2, 80, 0),
+    "category": "Import-Export",
+    "location": "File > Import/Export; Properties > Object",
+    "description": "Import/Export for Leeds Engine file formats",
 }
 
-modules = [mdl_importer, mdl_parser, matrix_utils]
+_classes = [
+    gui.IMPORT_OT_CW_mdl,
+    gui.EXPORT_OT_CW_mdl,
+    gui.IMPORT_OT_MH2_mdl,
+    gui.IMPORT_OT_CW_wbl,
+    gui.EXPORT_OT_CW_wbl,
+    gui.CW_InstanceProps,
+    gui.CW_OT_LoadFromCustom,
+    gui.CW_OT_SaveToCustom,
+    gui.CW_PT_Instance,
+    gui.CW_MT_ImportChoice,
+    gui.CW_MT_ExportChoice,
+    gui.TOPBAR_MT_file_import_bleeds
+]
 
 def register():
-    for mod in modules:
-        importlib.reload(mod)
-        if hasattr(mod, "register"):
-            mod.register()
-    bpy.types.TOPBAR_MT_file_import.append(mdl_importer.menu_func_import)
+    for cls in _classes:
+        register_class(cls)
+
+    bpy.types.Object.cw_instance = bpy.props.PointerProperty(type=gui.CW_InstanceProps)
+
+    if (2, 80, 0) > bpy.app.version:
+        bpy.types.INFO_MT_file_import.append(gui.cw_menu_import)
+    else:
+        bpy.types.TOPBAR_MT_file_import.append(gui.cw_menu_import)
 
 def unregister():
-    for mod in reversed(modules):
-        if hasattr(mod, "unregister"):
-            mod.unregister()
-    bpy.types.TOPBAR_MT_file_import.remove(mdl_importer.menu_func_import)
+    if (2, 80, 0) > bpy.app.version:
+        bpy.types.INFO_MT_file_import.remove(gui.cw_menu_import)
+        bpy.types.INFO_MT_file_export.remove(gui.cw_menu_import)
+    else:
+        bpy.types.TOPBAR_MT_file_import.remove(gui.cw_menu_import)
+
+    if hasattr(bpy.types.Object, "cw_instance"):
+        del bpy.types.Object.cw_instance
+
+    for cls in reversed(_classes):
+        unregister_class(cls)
 
 if __name__ == "__main__":
     register()
