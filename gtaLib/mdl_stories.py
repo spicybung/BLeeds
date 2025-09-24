@@ -28,146 +28,31 @@ from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for Stories .MDLs, the file format for pedestrians & props
+#   This script is for .MDLs, the format for pedestrians/props(& some buildings)
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-processed before becoming Rsl 'DFF a.k.a MDL)
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-processed before becoming Rsl DFF)
 # • https://gtamods.com/wiki/Leeds_Engine (TODO: update stub)
 # • https://gtamods.com/wiki/MDL (TODO: update stub with more documentation in own words)
-# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h (ditto)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp (ditto)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (*Russian*)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (*ditto - by Alex/AK73 & good resource to start*)
+# • https://github.com/aap/librwgta (re'd RW/Leeds Engine source by The_Hero)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (Russian)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (ditto - by Alex/AK73 & good resource to start)
 # • https://web.archive.org/web/20180714005051/https://www.gtamodding.ru/wiki/GTA_Stories_RAW_Editor (ditto)
-# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start w/out any other documentation)
+# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (English)
+# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start)
 # - Mod resources/cool stuff:
 # • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
 # • https://gtaforums.com/topic/285544-gtavcslcs-modding/page/11/
 # • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
-# • http://aap.papnet.eu/gta/RE/lcs_pipes.txt (a brief binary rundown of how bitflags work for PS2/PSP/Mobile Stories games)
 # • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
-# • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
+# • https://umdatabase.net/view.php?id=CB00495D
 # • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
 
+# NOTE: still working on Stories models, so nothing is sorted here, yet.
+
 #######################################################
-# === LCS Bone Arrays ===
-commonBoneOrder = (
-    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
-    "Bip01 L Clavicle", "L UpperArm", "L Forearm", "L Hand", "L Finger", "Bip01 R Clavicle",
-    "R UpperArm", "R Forearm", "R Hand", "R Finger", "L Thigh", "L Calf",
-    "L Foot", "L Toe0", "R Thigh", "R Calf", "R Foot", "R Toe0"
-)
-kamBoneID = (
-    0, 1, 2, 3, 4, 5, 31, 32, 33, 34, 35, 21, 22, 23, 24, 25, 41, 42, 43, 2000, 51, 52, 53, 2001
-)
-kamFrameName = (
-    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
-    "Bip01~L~Clavicle", "L~UpperArm", "L~Forearm", "L~Hand", "L~Finger", "Bip01~R~Clavicle",
-    "R~UpperArm", "R~Forearm", "R~Hand", "R~Finger", "L~Thigh", "L~Calf",
-    "L~Foot", "L~Toe0", "R~Thigh", "R~Calf", "R~Foot", "R~Toe0"
-)
-kamBoneType = (
-    0, 0, 0, 2, 0, 3, 2, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0, 1
-)
-kamBoneIndex = (
-    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"
-)
-
-commonBoneParentsLCS = {
-    "Pelvis": "Root",
-    "Spine": "Pelvis",
-    "Spine1": "Spine",
-    "Neck": "Spine1",
-    "Head": "Neck",
-    "Bip01 L Clavicle": "Spine1",
-    "L UpperArm": "Bip01 L Clavicle",
-    "L Forearm": "L UpperArm",
-    "L Hand": "L Forearm",
-    "L Finger": "L Hand",
-    "Bip01 R Clavicle": "Spine1",
-    "R UpperArm": "Bip01 R Clavicle",
-    "R Forearm": "R UpperArm",
-    "R Hand": "R Forearm",
-    "R Finger": "R Hand",
-    "L Thigh": "Pelvis",
-    "L Calf": "L Thigh",
-    "L Foot": "L Calf",
-    "L Toe0": "L Foot",
-    "R Thigh": "Pelvis",
-    "R Calf": "R Thigh",
-    "R Foot": "R Calf",
-    "R Toe0": "R Foot"
-} # o_O
-# === VCS Bone Arrays ===
-commonBoneOrderVCS = (
-    "root", "pelvis", "spine", "spine1", "neck", "head",
-    "jaw", "bip01_l_clavicle", "l_upperarm", "l_forearm", "l_hand", "l_finger",
-    "bip01_r_clavicle", "r_upperarm", "r_forearm", "r_hand", "r_finger", "l_thigh",
-    "l_calf", "l_foot", "l_toe0", "r_thigh", "r_calf", "r_foot", "r_toe0"
-)
-
-commonBoneNamesVCS = (
-    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
-    "Jaw", "Bip01 L Clavicle", "L UpperArm", "L Forearm", "L Hand", "L Finger",
-    "Bip01 R Clavicle", "R UpperArm", "R Forearm", "R Hand", "R Finger", "L Thigh",
-    "L Calf", "L Foot", "L Toe0", "R Thigh", "R Calf", "R Foot", "R Toe0"
-)
-
-kamBoneIDVCS = (
-    0, 1, 2, 3, 4, 5,
-    8, 31, 32, 33, 34, 35,
-    21, 22, 23, 24, 25, 41,
-    42, 43, 2000, 51, 52, 53,
-    2001
-)
-
-kamFrameNameVCS = (
-    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
-    "Jaw", "Bip01~L~Clavicle", "L~UpperArm", "L~Forearm", "L~Hand", "L~Finger",
-    "Bip01~R~Clavicle", "R~UpperArm", "R~Forearm", "R~Hand", "R~Finger", "L~Thigh",
-    "L~Calf", "L~Foot", "L~Toe0", "R~Thigh", "R~Calf", "R~Foot", "R~Toe0"
-)
-
-kamBoneTypeVCS = (
-    0, 0, 0, 2, 0, 2,
-    3, 2, 0, 0, 0, 1,
-    0, 0, 0, 0, 1, 2,
-    0, 0, 1, 0, 0, 0,
-    1
-)
-
-kamBoneIndexVCS = (
-    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"
-)    # for compatibility with Kams Scripts(3DSMax)
-
-commonBoneParentsVCS = {
-    "pelvis": "root",
-    "spine": "pelvis",
-    "spine1": "spine",
-    "neck": "spine1",
-    "head": "neck",
-    "jaw": "head",
-    "bip01_l_clavicle": "spine1",
-    "l_upperarm": "bip01_l_clavicle",
-    "l_forearm": "l_upperarm",
-    "l_hand": "l_forearm",
-    "l_finger": "l_hand",
-    "bip01_r_clavicle": "spine1",
-    "r_upperarm": "bip01_r_clavicle",
-    "r_forearm": "r_upperarm",
-    "r_hand": "r_forearm",
-    "r_finger": "r_hand",
-    "l_thigh": "pelvis",
-    "l_calf": "l_thigh",
-    "l_foot": "l_calf",
-    "l_toe0": "l_foot",
-    "r_thigh": "pelvis",
-    "r_calf": "r_thigh",
-    "r_foot": "r_calf",
-    "r_toe0": "r_foot"
-} # o_O
 
 # === Global variables ===
 section_type = 0
@@ -278,7 +163,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                             mesh_obj.modifiers.remove(mod)
                     # Add Edge Split modifier first (order matters for shading)
                     edge_split = mesh_obj.modifiers.new(name="EdgeSplit", type='EDGE_SPLIT')
-                    edge_split.split_angle = 1.0 # seems ok
+                    edge_split.split_angle = 1.0  # You may want to adjust this for Leeds models
                     edge_split.use_edge_angle = True
                     edge_split.use_edge_sharp = True
 
@@ -563,10 +448,10 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 if f.read(4) != b'ldm\x00':  # ModelInfo identifier for file(i.e PedModel) - where we begin to read the file(TODO: WRLD)
                     self.report({'ERROR'}, "Invalid Stories MDL header") # Not a Stories MDL?
                     return {'CANCELLED'}     # eject process if invalid
-                shrink = read_u32()          # 1 if GTAG resource image, else always 0(file not shrank). Bytes also used in Global/Master/Slave WRLDs
+                shrink = read_u32()          # 1 if GTAG resource image, else always 0(file not shrank). Also used for Master/Slave WRLD's?
                 file_len = read_u32()        # physical fiile size
                 local_numTable = read_u32()  # local reallocation table (NOTE: if local_numTable = global_numTable, than file = global/one table only)
-                global_numTable = read_u32() # global pointer reallocation table
+                global_numTable = read_u32() # global reallocation table
                 
                 # --- If PSP, skip 4 bytes after global_numTable ---
                 is_psp = (self.platform == 'PSP') # import_type = 3
@@ -642,6 +527,8 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 elif peek_type == "struct_or_flags":
                     log("This pointer appears to point to a struct or flags; treat as renderflags offset or substruct.")
                     renderflags_offset = possible_ptr
+                    if self.mdl_type == 'PROP':
+                        f.seek(-4, 1)
                     top_level_ptr = read_u32()
                 else:
                     log("Pointer after allocMem type could not be determined; treating as unknown/flags.")
@@ -663,15 +550,15 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 LCSCLUMPPS2 = 0x00000002     # ditto for LCS/VCS PSP
                 VCSCLUMPPS2 = 0x0000AA02
                 CLUMPPSP   = 0x00000002      
-                LCSATOMIC1 = 0x01050001      # renders first?
-                LCSATOMIC2 = 0x01000001      # renders last?
-                VCSATOMIC1 = 0x0004AA01      # renders first?
-                VCSATOMIC2 = 0x0004AA01      # renders last?
+                LCSATOMIC1 = 0x01050001      # renders first
+                LCSATOMIC2 = 0x01000001      # renders last
+                VCSATOMIC1 = 0x0004AA01      # renders first
+                VCSATOMIC2 = 0x0004AA01      # renders last
                 VCSATOMICPSP1 = 0x01F40400
                 VCSATOMICPSP2 = 0x01F40400   # this structure appears similar to VCSATOMIC1&2
-                VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN(unofficial ugly name)
+                VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN
                 VCSPS2FRAME2  = 0x0003AA01
-                VCSFRAMEPSP1  = 0X0380B100  
+                VCSFRAMEPSP1  = 0X0380B100    # this is similar to gtaDrawables in RAGE; are these vtables?
 
                 if top_magic in (LCSCLUMPPS2, VCSCLUMPPS2):
                     section_type = 7
@@ -981,7 +868,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                             log(f"✔ 0x6C018000 split flag found at 0x{split_flag_offset:X} -- reading split section header...")
 
                                             # Read and log each split block header field (these are always in this order)
-                                            marker_bytes = f.read(4) 
+                                            marker_bytes = f.read(4)  # already read, but you may want to re-log bytes for clarity
                                             log(f"  [0x{f.tell()-4:X}] marker: {marker_bytes.hex()} (should be 00 80 01 6C)")
 
                                             zeros1_offset = f.tell()
@@ -1322,7 +1209,6 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         # so it actually appears in the scene
                                         bpy.context.collection.objects.link(obj)
                                         
-                                        add_modifiers_to_mesh(obj, armature_obj)
 
                                         
                                         # Fill the mesh with our decoded geometry data:
@@ -1334,6 +1220,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
 
                                         ps2_index_to_bonename = {i: b.name for i, b in enumerate(armature_obj.data.bones)}
                                         assign_skinning(obj, armature_obj, skin_indices, skin_weights, ps2_index_to_bonename)
+                                        add_modifiers_to_mesh(obj, armature_obj)
                                         
                                         # Update the mesh, which tells Blender to finish calculating face normals,
                                         # topology, etc., for display and further operations
@@ -1784,15 +1671,16 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Stories Model(.mdl)")
-
+    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Model(.MDL)")
+#######################################################
 def register():
     bpy.utils.register_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-
+#######################################################
 def unregister():
     bpy.utils.unregister_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
+#######################################################
 
 if __name__ == "__main__":
     register()  
