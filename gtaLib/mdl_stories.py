@@ -28,31 +28,146 @@ from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .MDLs, the format for pedestrians/props(& some buildings)
+#   This script is for Stories .MDLs, the file format for pedestrians & props
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-processed before becoming Rsl DFF)
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-processed before becoming Rsl 'DFF a.k.a MDL)
 # • https://gtamods.com/wiki/Leeds_Engine (TODO: update stub)
 # • https://gtamods.com/wiki/MDL (TODO: update stub with more documentation in own words)
-# • https://github.com/aap/librwgta (re'd RW/Leeds Engine source by The_Hero)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (Russian)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (ditto - by Alex/AK73 & good resource to start)
+# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h (ditto)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp (ditto)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (*Russian*)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (*ditto - by Alex/AK73 & good resource to start*)
 # • https://web.archive.org/web/20180714005051/https://www.gtamodding.ru/wiki/GTA_Stories_RAW_Editor (ditto)
-# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (English)
-# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start)
+# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
+# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start w/out any other documentation)
 # - Mod resources/cool stuff:
 # • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
 # • https://gtaforums.com/topic/285544-gtavcslcs-modding/page/11/
 # • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
+# • http://aap.papnet.eu/gta/RE/lcs_pipes.txt (a brief binary rundown of how bitflags work for PS2/PSP/Mobile Stories games)
 # • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
-# • https://umdatabase.net/view.php?id=CB00495D
+# • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
 # • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
 
-# NOTE: still working on Stories models, so nothing is sorted here, yet.
-
 #######################################################
+# === LCS Bone Arrays ===
+commonBoneOrder = (
+    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
+    "Bip01 L Clavicle", "L UpperArm", "L Forearm", "L Hand", "L Finger", "Bip01 R Clavicle",
+    "R UpperArm", "R Forearm", "R Hand", "R Finger", "L Thigh", "L Calf",
+    "L Foot", "L Toe0", "R Thigh", "R Calf", "R Foot", "R Toe0"
+)
+kamBoneID = (
+    0, 1, 2, 3, 4, 5, 31, 32, 33, 34, 35, 21, 22, 23, 24, 25, 41, 42, 43, 2000, 51, 52, 53, 2001
+)
+kamFrameName = (
+    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
+    "Bip01~L~Clavicle", "L~UpperArm", "L~Forearm", "L~Hand", "L~Finger", "Bip01~R~Clavicle",
+    "R~UpperArm", "R~Forearm", "R~Hand", "R~Finger", "L~Thigh", "L~Calf",
+    "L~Foot", "L~Toe0", "R~Thigh", "R~Calf", "R~Foot", "R~Toe0"
+)
+kamBoneType = (
+    0, 0, 0, 2, 0, 3, 2, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0, 1
+)
+kamBoneIndex = (
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"
+)
+
+commonBoneParentsLCS = {
+    "Pelvis": "Root",
+    "Spine": "Pelvis",
+    "Spine1": "Spine",
+    "Neck": "Spine1",
+    "Head": "Neck",
+    "Bip01 L Clavicle": "Spine1",
+    "L UpperArm": "Bip01 L Clavicle",
+    "L Forearm": "L UpperArm",
+    "L Hand": "L Forearm",
+    "L Finger": "L Hand",
+    "Bip01 R Clavicle": "Spine1",
+    "R UpperArm": "Bip01 R Clavicle",
+    "R Forearm": "R UpperArm",
+    "R Hand": "R Forearm",
+    "R Finger": "R Hand",
+    "L Thigh": "Pelvis",
+    "L Calf": "L Thigh",
+    "L Foot": "L Calf",
+    "L Toe0": "L Foot",
+    "R Thigh": "Pelvis",
+    "R Calf": "R Thigh",
+    "R Foot": "R Calf",
+    "R Toe0": "R Foot"
+} # o_O
+# === VCS Bone Arrays ===
+commonBoneOrderVCS = (
+    "root", "pelvis", "spine", "spine1", "neck", "head",
+    "jaw", "bip01_l_clavicle", "l_upperarm", "l_forearm", "l_hand", "l_finger",
+    "bip01_r_clavicle", "r_upperarm", "r_forearm", "r_hand", "r_finger", "l_thigh",
+    "l_calf", "l_foot", "l_toe0", "r_thigh", "r_calf", "r_foot", "r_toe0"
+)
+
+commonBoneNamesVCS = (
+    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
+    "Jaw", "Bip01 L Clavicle", "L UpperArm", "L Forearm", "L Hand", "L Finger",
+    "Bip01 R Clavicle", "R UpperArm", "R Forearm", "R Hand", "R Finger", "L Thigh",
+    "L Calf", "L Foot", "L Toe0", "R Thigh", "R Calf", "R Foot", "R Toe0"
+)
+
+kamBoneIDVCS = (
+    0, 1, 2, 3, 4, 5,
+    8, 31, 32, 33, 34, 35,
+    21, 22, 23, 24, 25, 41,
+    42, 43, 2000, 51, 52, 53,
+    2001
+)
+
+kamFrameNameVCS = (
+    "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
+    "Jaw", "Bip01~L~Clavicle", "L~UpperArm", "L~Forearm", "L~Hand", "L~Finger",
+    "Bip01~R~Clavicle", "R~UpperArm", "R~Forearm", "R~Hand", "R~Finger", "L~Thigh",
+    "L~Calf", "L~Foot", "L~Toe0", "R~Thigh", "R~Calf", "R~Foot", "R~Toe0"
+)
+
+kamBoneTypeVCS = (
+    0, 0, 0, 2, 0, 2,
+    3, 2, 0, 0, 0, 1,
+    0, 0, 0, 0, 1, 2,
+    0, 0, 1, 0, 0, 0,
+    1
+)
+
+kamBoneIndexVCS = (
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"
+)    # for compatibility with Kams Scripts(3DSMax)
+
+commonBoneParentsVCS = {
+    "pelvis": "root",
+    "spine": "pelvis",
+    "spine1": "spine",
+    "neck": "spine1",
+    "head": "neck",
+    "jaw": "head",
+    "bip01_l_clavicle": "spine1",
+    "l_upperarm": "bip01_l_clavicle",
+    "l_forearm": "l_upperarm",
+    "l_hand": "l_forearm",
+    "l_finger": "l_hand",
+    "bip01_r_clavicle": "spine1",
+    "r_upperarm": "bip01_r_clavicle",
+    "r_forearm": "r_upperarm",
+    "r_hand": "r_forearm",
+    "r_finger": "r_hand",
+    "l_thigh": "pelvis",
+    "l_calf": "l_thigh",
+    "l_foot": "l_calf",
+    "l_toe0": "l_foot",
+    "r_thigh": "pelvis",
+    "r_calf": "r_thigh",
+    "r_foot": "r_calf",
+    "r_toe0": "r_foot"
+} # o_O
 
 # === Global variables ===
 section_type = 0
@@ -163,7 +278,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                             mesh_obj.modifiers.remove(mod)
                     # Add Edge Split modifier first (order matters for shading)
                     edge_split = mesh_obj.modifiers.new(name="EdgeSplit", type='EDGE_SPLIT')
-                    edge_split.split_angle = 1.0  # You may want to adjust this for Leeds models
+                    edge_split.split_angle = 1.0 # seems ok
                     edge_split.use_edge_angle = True
                     edge_split.use_edge_sharp = True
 
@@ -404,6 +519,99 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                     )) 
                     return mat, matrix_offset, (row1, row2, row3, row4_scaled) # Read 3x4 Matrix transposed as 4x4
                 
+                def assign_weights_for_strip_into_big_object(
+                    big_obj, arm_obj,
+                    strip_skin_idx, strip_skin_wts,
+                    index_to_bonename, vbase,
+                    normalize=True, per_vertex_replace=True, eps=1e-8
+                ):
+                    assert big_obj.type == 'MESH'
+                    assert arm_obj and arm_obj.type == 'ARMATURE'
+                    assert len(strip_skin_idx) == len(strip_skin_wts)
+
+                    # Ensure Armature modifier exists and points to armature
+                    arm_mod = next((m for m in big_obj.modifiers if m.type == 'ARMATURE'), None)
+                    if arm_mod is None:
+                        arm_mod = big_obj.modifiers.new("Armature", 'ARMATURE')
+                    arm_mod.object = arm_obj
+
+                    # Ensure groups exist lazily
+                    def ensure_group(name: str):
+                        vg = big_obj.vertex_groups.get(name)
+                        return vg if vg else big_obj.vertex_groups.new(name=name)
+
+                    for local_v, (inds, wts) in enumerate(zip(strip_skin_idx, strip_skin_wts)):
+                        vidx = vbase + local_v
+                        if vidx >= len(big_obj.data.vertices):
+                            raise RuntimeError(f"Strip write OOB: vidx={vidx}, total={len(big_obj.data.vertices)}")
+
+                        if per_vertex_replace:
+                            for vg in big_obj.vertex_groups:
+                                try: vg.remove([vidx])
+                                except RuntimeError: pass
+
+                        if normalize:
+                            s = sum(max(0.0, float(w)) for w in wts)
+                            wts = [(float(w)/s if s > 0.0 else 0.0) for w in wts]
+                        else:
+                            wts = [float(w) if (w is not None and w > 0.0) else 0.0 for w in wts]
+
+                        for bi, w in zip(inds, wts):
+                            if w <= eps:
+                                continue
+                            bone_name = index_to_bonename.get(int(bi))
+                            if not bone_name:
+                                # Log in your style if you want to debug missing palette entries:
+                                # print(f"[WARN] vertex {vidx}: no bone for file index {bi}")
+                                continue
+                            vg = ensure_group(bone_name)
+                            vg.add([vidx], w, 'REPLACE')
+
+
+                def build_index_to_bonename(armature_obj, log=print):
+                    # Canonical palettes from the script (LCS and VCS)
+                    lcs_palette = list(commonBoneOrder) if 'commonBoneOrder' in globals() else []
+                    vcs_palette = list(commonBoneNamesVCS) if 'commonBoneNamesVCS' in globals() else []
+
+                    def canon(s):
+                        return s.lower().replace("~", "_").replace(" ", "_")
+
+                    arma_names = [b.name for b in armature_obj.data.bones]
+                    arma_set = {canon(n) for n in arma_names}
+
+                    def score(palette):
+                        return sum(1 for n in palette if canon(n) in arma_set)
+
+                    # Pick the palette that matches your armature best
+                    candidates = []
+                    if lcs_palette: candidates.append(("LCS", lcs_palette, score(lcs_palette)))
+                    if vcs_palette: candidates.append(("VCS", vcs_palette, score(vcs_palette)))
+                    candidates.sort(key=lambda x: x[2], reverse=True)
+
+                    chosen = None
+                    if candidates and candidates[0][2] > 0:
+                        chosen = candidates[0][1]
+                        log(f"✔ Bone palette: {candidates[0][0]} (matched {candidates[0][2]} names)")
+                    else:
+                        # Fallback: stable, explicit order (not random Blender enumerate)
+                        chosen = sorted(arma_names, key=lambda s: canon(s))
+                        log("⚠ No canonical palette matched; using name-sorted armature order as palette")
+
+                    # Map file index -> existing armature name (prefer exact name if present; otherwise best canon match)
+                    index_to_bonename = {}
+                    canon_to_real = {canon(n): n for n in arma_names}
+                    for i, palette_name in enumerate(chosen):
+                        c = canon(palette_name)
+                        real = canon_to_real.get(c)
+                        if real:
+                            index_to_bonename[i] = real
+                        else:
+                            # If the palette bone isn't present (helpers filtered etc.), leave hole
+                            index_to_bonename[i] = None
+
+                    return index_to_bonename
+
+
                 #######################################################
                 def read_i8():
                     return struct.unpack('<b', f.read(1))[0]    # Reads a signed 8-bit integer
@@ -448,10 +656,10 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 if f.read(4) != b'ldm\x00':  # ModelInfo identifier for file(i.e PedModel) - where we begin to read the file(TODO: WRLD)
                     self.report({'ERROR'}, "Invalid Stories MDL header") # Not a Stories MDL?
                     return {'CANCELLED'}     # eject process if invalid
-                shrink = read_u32()          # 1 if GTAG resource image, else always 0(file not shrank). Also used for Master/Slave WRLD's?
+                shrink = read_u32()          # 1 if GTAG resource image, else always 0(file not shrank). Bytes also used in Global/Master/Slave WRLDs
                 file_len = read_u32()        # physical fiile size
                 local_numTable = read_u32()  # local reallocation table (NOTE: if local_numTable = global_numTable, than file = global/one table only)
-                global_numTable = read_u32() # global reallocation table
+                global_numTable = read_u32() # global pointer reallocation table
                 
                 # --- If PSP, skip 4 bytes after global_numTable ---
                 is_psp = (self.platform == 'PSP') # import_type = 3
@@ -527,8 +735,6 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 elif peek_type == "struct_or_flags":
                     log("This pointer appears to point to a struct or flags; treat as renderflags offset or substruct.")
                     renderflags_offset = possible_ptr
-                    if self.mdl_type == 'PROP':
-                        f.seek(-4, 1)
                     top_level_ptr = read_u32()
                 else:
                     log("Pointer after allocMem type could not be determined; treating as unknown/flags.")
@@ -550,15 +756,15 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                 LCSCLUMPPS2 = 0x00000002     # ditto for LCS/VCS PSP
                 VCSCLUMPPS2 = 0x0000AA02
                 CLUMPPSP   = 0x00000002      
-                LCSATOMIC1 = 0x01050001      # renders first
-                LCSATOMIC2 = 0x01000001      # renders last
-                VCSATOMIC1 = 0x0004AA01      # renders first
-                VCSATOMIC2 = 0x0004AA01      # renders last
+                LCSATOMIC1 = 0x01050001      # renders first?
+                LCSATOMIC2 = 0x01000001      # renders last?
+                VCSATOMIC1 = 0x0004AA01      # renders first?
+                VCSATOMIC2 = 0x0004AA01      # renders last?
                 VCSATOMICPSP1 = 0x01F40400
                 VCSATOMICPSP2 = 0x01F40400   # this structure appears similar to VCSATOMIC1&2
-                VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN
+                VCSPS2FRAME1  = 0x0180AA00    # (?) or something else, like VCSSKIN(unofficial ugly name)
                 VCSPS2FRAME2  = 0x0003AA01
-                VCSFRAMEPSP1  = 0X0380B100    # this is similar to gtaDrawables in RAGE; are these vtables?
+                VCSFRAMEPSP1  = 0X0380B100  
 
                 if top_magic in (LCSCLUMPPS2, VCSCLUMPPS2):
                     section_type = 7
@@ -827,6 +1033,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                     # Prepare empty lists to accumulate the vertices and faces for this part
                                     part_verts = []
                                     part_faces = []
+                                    strips_meta = []
 
                                     # vert_base is always zero for each part; it would be used if vertex indices were global
                                     vert_base = 0
@@ -868,7 +1075,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                             log(f"✔ 0x6C018000 split flag found at 0x{split_flag_offset:X} -- reading split section header...")
 
                                             # Read and log each split block header field (these are always in this order)
-                                            marker_bytes = f.read(4)  # already read, but you may want to re-log bytes for clarity
+                                            marker_bytes = f.read(4) 
                                             log(f"  [0x{f.tell()-4:X}] marker: {marker_bytes.hex()} (should be 00 80 01 6C)")
 
                                             zeros1_offset = f.tell()
@@ -1041,17 +1248,6 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         
                                         part_verts.extend(verts)
                                         
-                                        # After the for-loop reading all vertices in the strip
-                                        # For vertex/attribute data, there is two technical sectors(404040, 505050...)
-                                        tech_sectors = []
-                                        for i in range(3):
-                                            sector_bytes = f.read(4)    # necessary stuff for Leeds Engine rendering
-                                            tech_sectors.append(sector_bytes)
-                                            as_int = int.from_bytes(sector_bytes, byteorder='little', signed=False)
-                                            log(f"    Attribute Technical Sector {i}: {sector_bytes.hex()} (int: {as_int})")
-
-                                        log(f"  Technical Sectors after vertices: {[s.hex() for s in tech_sectors]}")
-                                        
                                         # Now create faces for this strip:
                                         for i in range(2, curStripVertCount):
                                             if (i % 2) == 0:
@@ -1158,18 +1354,18 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                                 elif b3 == 0x6C:
                                                     log(f"      🦴 Reading {section_count} skin weights")
                                                     for i in range(section_count):
-                                                        bone1 = struct.unpack('<B', f.read(1))[0] // 4
+                                                        bone1 = struct.unpack('<H', f.read(2))[0] // 4
                                                         f.read(1)
-                                                        w1 = struct.unpack('<H', f.read(2))[0] / 4096.0
-                                                        bone2 = struct.unpack('<B', f.read(1))[0] // 4
+                                                        w1 = struct.unpack('<B', f.read(1))[0] / 128.0
+                                                        bone2 = struct.unpack('<H', f.read(2))[0] // 4
                                                         f.read(1)
-                                                        w2 = struct.unpack('<H', f.read(2))[0] / 4096.0
-                                                        bone3 = struct.unpack('<B', f.read(1))[0] // 4
+                                                        w2 = struct.unpack('<B', f.read(1))[0] / 128.0
+                                                        bone3 = struct.unpack('<H', f.read(2))[0] // 4
                                                         f.read(1)
-                                                        w3 = struct.unpack('<H', f.read(2))[0] / 4096.0
-                                                        bone4 = struct.unpack('<B', f.read(1))[0] // 4
+                                                        w3 = struct.unpack('<B', f.read(1))[0] / 128.0
+                                                        bone4 = struct.unpack('<H', f.read(2))[0] // 4
                                                         f.read(1)
-                                                        w4 = struct.unpack('<H', f.read(2))[0] / 4096.0
+                                                        w4 = struct.unpack('<B', f.read(1))[0] / 128.0
                                                         log(f"         B1={bone1} W1={w1:.4f} ... B4={bone4} W4={w4:.4f}")
 
                                                         # ✅ NEW: build the per-vertex lists ---------------------------
@@ -1181,8 +1377,31 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
 
                                                         skin_indices.append(indices)
                                                         skin_weights.append(weights)
+
+                                                        
                                                 continue  # After reading this split subsection, see if there's another
-                                
+
+                                        # === After UVs and attribute subsections, once skin_indices/skin_weights are populated ===
+                                        if len(skin_indices) != curStripVertCount or len(skin_weights) != curStripVertCount:
+                                            log(f"[WARN] strip verts={curStripVertCount}, skin_idx={len(skin_indices)}, skin_wts={len(skin_weights)} — padding zeros to match")
+                                            # pad if file omits some weights for this strip
+                                            while len(skin_indices) < curStripVertCount:
+                                                skin_indices.append([0, 0, 0, 0])
+                                                skin_weights.append([0.0, 0.0, 0.0, 0.0])
+                                            skin_indices = skin_indices[:curStripVertCount]
+                                            skin_weights = skin_weights[:curStripVertCount]
+
+                                        # Record where this strip was appended into the *part* mesh’s vertex list
+                                        strips_meta.append(
+                                            (base_idx, curStripVertCount, list(skin_indices), list(skin_weights))
+                                        )
+
+                                        # Reset per-strip skin buffers so next strip starts fresh
+                                        skin_indices.clear()
+                                        skin_weights.clear()
+                                        
+
+                                    
                                     root_empty = bpy.data.objects.get("MDL_Root")
                                     if root_empty is None:
                                         root_empty = bpy.data.objects.new("MDL_Root", None)
@@ -1193,7 +1412,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                             bpy.context.collection.objects.link(root_empty)
                                     # Fix root
                                     root_empty.location = (0, 0, 0)
- 
+
                                     # If we have any vertices collected for this part,
                                     # proceed to create a Blender mesh object for it
                                     if part_verts:
@@ -1209,6 +1428,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         # so it actually appears in the scene
                                         bpy.context.collection.objects.link(obj)
                                         
+                                        add_modifiers_to_mesh(obj, armature_obj)
 
                                         
                                         # Fill the mesh with our decoded geometry data:
@@ -1218,9 +1438,15 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         # - 'part_faces' contains all the (v0, v1, v2) triangle indices
                                         mesh.from_pydata(part_verts, [], part_faces)
 
-                                        ps2_index_to_bonename = {i: b.name for i, b in enumerate(armature_obj.data.bones)}
-                                        assign_skinning(obj, armature_obj, skin_indices, skin_weights, ps2_index_to_bonename)
-                                        add_modifiers_to_mesh(obj, armature_obj)
+                                        # Build a file-palette-based mapping: fileIndex -> boneName
+                                        index_to_bonename = build_index_to_bonename(armature_obj, log)
+
+                                        # Assign weights *per strip* using vbase + local_i
+                                        for vbase, count, s_idx, s_wts in strips_meta:
+                                            assign_weights_for_strip_into_big_object(
+                                                obj, armature_obj, s_idx, s_wts, index_to_bonename, vbase,
+                                                normalize=True, per_vertex_replace=True
+                                            )
                                         
                                         # Update the mesh, which tells Blender to finish calculating face normals,
                                         # topology, etc., for display and further operations
@@ -1228,10 +1454,10 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         
                                         # Log a success message, reporting the mesh and the number of vertices imported
                                         log(f"✔ Imported mesh part {part_index} with {len(part_verts)} verts")
-                                                                             
+                                                                                
                                         offset_z = 0.88 # hackish but needed a way to have meshes + armature together for now
                                         imported_meshes = [obj for obj in bpy.context.collection.objects if obj.name.startswith("ImportedMDL_Part")]
-                                                       
+                                                        
                                         # === PARENT ARMATURE TO MDL_ROOT(male/female base) ===
                                         armature_obj.parent = root_empty
                                         print(f"✔ Parented armature '{armature_obj.name}' to '{root_empty.name}'.")
@@ -1518,6 +1744,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                 mesh_colors = []
                                 mesh_normals = []
                                 mesh_weights = []
+                                mesh_indices = []
 
                                 # For PSP, the triangle strips are typically indexed implicitly, not with explicit index buffers.
                                 # We'll read vertices in order, build triangle strips according to mesh['numTriangles'].
@@ -1552,22 +1779,43 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                     v = {}
                                     local_o = 0
 
-                                    # === Weights(Skin) ===
+                                    # === Weights (PSP) ===
+                                    # Format assumption: each vertex stores 'nwght' weight bytes.
+                                    # The corresponding bone indices are implicit: bonemap[0..nwght-1] (NO per-vertex index bytes).
                                     if wghtfmt:
-                                        w = []
-                                        for j in range(nwght):
-                                            w.append(vertex_data[local_o])
-                                            local_o += 1
-                                        v['w'] = [w[j]/128.0 for j in range(min(4, nwght))]
-                                        v['i'] = [mesh['bonemap'][j] for j in range(min(4, nwght))]
-                                        for j in range(len(v['w']), 4):
-                                            v['w'].append(0.0)
-                                            v['i'].append(0)
-                                            for j in range(4, nwght):
-                                                if w[j] != 0:
-                                                    log(f"Warning: nonzero unused weight byte (w[{j}] = {w[j]}) in vertex; ignored")
-                                        mesh_weights.append(v['w'])
+                                        # 1) Read the 'nwght' weights for this vertex
+                                        weights_raw = [vertex_data[local_o + j] for j in range(nwght)]
+                                        local_o += nwght  # advance stream
 
+                                        # 2) Take the first K (K <= 4) weights in declared order; pad to 4
+                                        K = min(4, nwght)
+                                        w4 = [weights_raw[j] / 128.0 for j in range(K)]
+                                        if K < 4:
+                                            w4.extend([0.0] * (4 - K))
+
+                                        # 3) Derive the matching bone indices from THIS MESH'S bonemap (implicit 0..K-1)
+                                        palette = mesh.get('bonemap') or []
+                                        # Guard against short palettes
+                                        idx4 = []
+                                        for j in range(K):
+                                            idx4.append(palette[j] if j < len(palette) else 0)
+                                        if K < 4:
+                                            idx4.extend([0] * (4 - K))
+
+                                        # 4) (Optional but recommended) Renormalize to keep sum=1 when we truncate/pad
+                                        s = sum(w4)
+                                        if s > 0.0:
+                                            w4 = [w / s for w in w4]
+
+                                        # 5) Warn when there are >4 non-zero extra weights we must ignore
+                                        if nwght > 4 and any(x != 0 for x in weights_raw[4:]):
+                                            log(f"PSP: vertex had {nwght} weights; extra bytes beyond 4 were non-zero and ignored: {weights_raw[4:]}")
+
+                                        # 6) Store into your per-vertex collections
+                                        v['w'] = w4
+                                        v['i'] = idx4
+                                        mesh_weights.append(w4)
+                                        mesh_indices.append(idx4)   # <-- you need this!
                                     # === UVs ===
                                     if uvfmt == 1:
                                         v['u'] = vertex_data[local_o]/128.0 * mesh['uvScale'][0]
@@ -1671,16 +1919,15 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Model(.MDL)")
-#######################################################
+    self.layout.operator(ImportMDLOperator.bl_idname, text="R* Leeds Stories Model(.mdl)")
+
 def register():
     bpy.utils.register_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-#######################################################
+
 def unregister():
     bpy.utils.unregister_class(ImportMDLOperator)
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-#######################################################
 
 if __name__ == "__main__":
     register()  
