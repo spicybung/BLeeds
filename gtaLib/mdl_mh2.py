@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
 # Author: SpicyBung
 # Years: 2025 - 
 
@@ -50,7 +50,7 @@ class read_mh2:
         self.armature_obj = None
         self.bone_map = {}          # offset -> dict(name, parent_offset, matrix)
         self.object_infos = []      # list[(info_offset, object_data_offset)]
-
+    #######################################################
     def run(self) -> bool:
         with open(self.path, "rb") as f:
             self.file = f
@@ -63,7 +63,6 @@ class read_mh2:
         return True
 
     #######################################################
-
     def _read_header(self):
         f = self.file
         data = f.read(0x28)
@@ -104,7 +103,7 @@ class read_mh2:
         if coll.name not in {c.name for c in self.context.scene.collection.children}:
             self.context.scene.collection.children.link(coll)
         self.collection = coll
-
+    #######################################################
     def _read_entry(self):
         f = self.file
         # 7 ints (28 bytes)
@@ -113,12 +112,12 @@ class read_mh2:
         self.bone_trans_idx_offs= entry[2]
         self.first_objinfo_offs = entry[4]
         self.last_objinfo_offs  = entry[5]
-
+    #######################################################
     def _read_bones(self):
         if not self.root_bone_offset:
             return
         self._read_bone_block(self.root_bone_offset)
-
+    #######################################################
     def _build_armature(self):
         arm = bpy.data.armatures.new(f"{self.stem}_Armature")
         arm_obj = bpy.data.objects.new(arm.name, arm)
@@ -142,7 +141,7 @@ class read_mh2:
 
         bpy.ops.object.mode_set(mode="OBJECT")
         self.armature_obj = arm_obj
-
+    #######################################################
     def _read_object_infos(self):
         f = self.file
         cur = self.first_objinfo_offs or self.last_objinfo_offs
@@ -160,13 +159,12 @@ class read_mh2:
             cur = next_off if next_off != 0 and next_off != cur else 0
 
         self.object_infos = infos
-
+    #######################################################
     def _read_objects_and_make_meshes(self):
         for idx, (_, obj_off) in enumerate(self.object_infos):
             self._read_object(idx, obj_off)
 
     #######################################################
-
     def _read_bone_block(self, offset: int):
         f = self.file
         f.seek(offset)
@@ -203,7 +201,6 @@ class read_mh2:
             self._read_bone_block(sibling_offset)
 
     #######################################################
-
     def _read_object(self, idx: int, obj_off: int):
         f = self.file
         f.seek(obj_off)
@@ -255,7 +252,6 @@ class read_mh2:
         self._make_mesh(f"{self.stem}_{idx}", [tuple(v) for v in verts], faces, uvs, mats)
 
     #######################################################
-
     def _read_c_string_at(self, offset: int) -> str:
         f = self.file
         cur = f.tell()
@@ -268,10 +264,10 @@ class read_mh2:
             s += b
         f.seek(cur)
         return s.decode("ascii", errors="replace")
-
+    #######################################################
     def _y_up_to_z_up(self, M: Matrix) -> Matrix:
         return M @ Matrix.Rotation(-3.14159265 / 2, 4, "X")
-
+    #######################################################
     def _read_vertices_by_type(self, vtype: int, count: int):
         f = self.file
         verts = []
@@ -314,7 +310,7 @@ class read_mh2:
                 raise ValueError(f"Unknown VertexElementType: 0x{vtype:X}")
 
         return verts, uvs
-
+    #######################################################
     def _make_mesh(self, name, verts, faces, uvs, materials):
         me = bpy.data.meshes.new(name)
         me.from_pydata(verts, [], faces)
@@ -337,7 +333,5 @@ class read_mh2:
         self.collection.objects.link(obj)
         return obj
 #######################################################
-
-# Public entry point used by the GUI operator
 def import_mh2(path: str, context, collection_name: str | None = None) -> bool:
     return read_mh2(path, context, collection_name).run()

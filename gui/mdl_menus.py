@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
 # Author: SpicyBung
 # Years: 2025 - 
 
@@ -99,7 +99,6 @@ class CW_MT_ImportChoice(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
-        # These must match your operator bl_idnames
         layout.operator("import_scene.cw_wbl", text="CW WBL (.wbl)")
         layout.operator("import_scene.cw_mdl", text="CW MDL (.mdl)")
         layout.operator("import_scene.mh2_mdl", text="MH2 MDL (.mdl)")
@@ -121,10 +120,10 @@ class TOPBAR_MT_file_import_bleeds(bpy.types.Menu):
     def draw(self, context):
         layout = self.layout
         layout.operator("import_scene.cw_wbl",
-                        text="R* Leeds CW Worldblock (.wbl)",
+                        text="R* Leeds: Chinatown Wars Worldblock (.wbl)",
                         icon='MESH_GRID')
         layout.operator("import_scene.mh2_mdl",
-                text="R* Leeds MH2 Model (.mdl)",
+                text="R* Leeds: Manhunt 2 Model (.mdl)",
                 icon='MESH_GRID')
 
 def _menu_import_append(self, context):

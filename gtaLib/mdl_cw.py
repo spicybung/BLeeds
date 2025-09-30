@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
 # Author: SpicyBung
 # Years: 2025 - 
 
@@ -24,7 +24,6 @@ from typing import List, Tuple, Dict
 
 from bpy.props import BoolProperty, StringProperty
 
-
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 #   This script is for reading/writing .mdl/.wbls - formats for models in GTA:CW Mobile/PSP #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
@@ -41,15 +40,16 @@ from bpy.props import BoolProperty, StringProperty
 
 #######################################################
 class read_chinatown:
+
     DEBUG_MODE: bool = True
 
-    # --- debug ---
+    #######################################################
     @staticmethod
     def get_debug_logfile(path: str) -> str:
         b = os.path.basename(path)
         s, _ = os.path.splitext(b)
         return os.path.join(os.path.dirname(path), f"{s}_debuglog.txt")
-
+    #######################################################
     @classmethod
     def dprint(cls, s: str, logf=None, do_print: bool = True):
         if cls.DEBUG_MODE and do_print:
@@ -59,28 +59,39 @@ class read_chinatown:
                     logf.write(s + "\n"); logf.flush()
                 except Exception:
                     pass
-
-    # --- bin read ---
+    #######################################################
     @staticmethod
-    def r_u8(d, o):  return struct.unpack_from("<B", d, o)[0]
+    def r_u8(d, o):  
+        return struct.unpack_from("<B", d, o)[0]
+    #######################################################
     @staticmethod
-    def r_i8(d, o):  return struct.unpack_from("<b", d, o)[0]
+    def r_i8(d, o):  
+        return struct.unpack_from("<b", d, o)[0]
+    #######################################################
     @staticmethod
-    def r_u16(d, o): return struct.unpack_from("<H", d, o)[0]
+    def r_u16(d, o): 
+        return struct.unpack_from("<H", d, o)[0]
+    #######################################################
     @staticmethod
-    def r_i16(d, o): return struct.unpack_from("<h", d, o)[0]
+    def r_i16(d, o): 
+        return struct.unpack_from("<h", d, o)[0]
+    #######################################################
     @staticmethod
-    def r_u32(d, o): return struct.unpack_from("<I", d, o)[0]
+    def r_u32(d, o): 
+        return struct.unpack_from("<I", d, o)[0]
+    #######################################################
     @staticmethod
-    def r_i32(d, o): return struct.unpack_from("<i", d, o)[0]
+    def r_i32(d, o): 
+        return struct.unpack_from("<i", d, o)[0]
+    #######################################################
     @staticmethod
-    def r_f32(d, o): return struct.unpack_from("<f", d, o)[0]
-
-    # --- transforms/vectors (read) ---
+    def r_f32(d, o): 
+        return struct.unpack_from("<f", d, o)[0]
+    #######################################################
     @classmethod
     def read_vec3_int4096(cls, d, off):
         return (cls.r_i32(d, off)/4096.0, cls.r_i32(d, off+4)/4096.0, cls.r_i32(d, off+8)/4096.0)
-
+    #######################################################
     @classmethod
     def read_leeds_cw_transform(cls, d, off, logf=None):
         RightX = cls.r_i16(d, off)/4096.0
@@ -100,14 +111,16 @@ class read_chinatown:
         cls.dprint(f"      PosnX {PosnX:.6f} PosnY {PosnY:.6f} PosnZ {PosnZ:.6f}", logf)
         return {"Right": (RightX,RightY,RightZ), "Top": (TopX,TopY,TopZ), "At": (AtX,AtY,AtZ), "Pos": (PosnX,PosnY,PosnZ), "Padding": Padding}
 
-    # --- materials ---
+    #######################################################
     class MaterialBank:
+
         def __init__(self, tex_dir: str, logf=None):
             self.dir = tex_dir
             self.logf = logf
             self.slots: List[Tuple[str, bpy.types.Material]] = []
             self.index_by_texid: Dict[int, int] = {}
 
+        #######################################################
         def get_slot(self, tex_id: int) -> int:
             RC = read_chinatown
             if tex_id in self.index_by_texid:
@@ -142,12 +155,12 @@ class read_chinatown:
             self.slots.append((name, mat))
             self.index_by_texid[tex_id] = idx
             return idx
-
+        #######################################################
         def append_all_to_mesh(self, mesh: bpy.types.Mesh):
             for _, m in self.slots:
                 mesh.materials.append(m)
 
-    # --- wbl traversal ---
+    #######################################################
     @classmethod
     def collect_mesh_offsets_and_lights(cls, b: bytes, logf=None):
         offs = set()
@@ -186,7 +199,7 @@ class read_chinatown:
             p += 2 * nTex
             s_ofs = p
         return offs, lights
-
+    #######################################################
     @classmethod
     def create_lights(cls, lights, coll: bpy.types.Collection):
         for si, i, (X,Y,Z), Size, Id, (R,G,B) in lights:
@@ -201,7 +214,7 @@ class read_chinatown:
             ldata.shadow_soft_size = Size
             obj["CW_LightID"] = Id
 
-    # --- geom helpers ---
+    #######################################################
     @staticmethod
     def tri_strip_to_tris(n: int):
         if n < 3: return []
@@ -212,36 +225,50 @@ class read_chinatown:
             flip = not flip
         return f
 
-    # --- register hooks ---
+    #######################################################
     @classmethod
-    def register(cls): pass
+    def register(cls): 
+        pass
+    #######################################################
     @classmethod
-    def unregister(cls): pass
+    def unregister(cls): 
+        pass
 
 
-# ============================== write_chinatown =============================
+#######################################################
 class write_chinatown:
     dprint = read_chinatown.dprint
     get_debug_logfile = read_chinatown.get_debug_logfile
     DEBUG_MODE = read_chinatown.DEBUG_MODE
 
-    # --- bin write ---
+    #######################################################
     @staticmethod
-    def w_u8(buf: io.BytesIO, v: int):  buf.write(struct.pack("<B", v & 0xFF))
+    def w_u8(buf: io.BytesIO, v: int):  
+        buf.write(struct.pack("<B", v & 0xFF))
+    #######################################################
     @staticmethod
-    def w_i8(buf: io.BytesIO, v: int):  buf.write(struct.pack("<b", v))
+    def w_i8(buf: io.BytesIO, v: int):  
+        buf.write(struct.pack("<b", v))
     @staticmethod
-    def w_u16(buf: io.BytesIO, v: int): buf.write(struct.pack("<H", v & 0xFFFF))
+    def w_u16(buf: io.BytesIO, v: int): 
+        buf.write(struct.pack("<H", v & 0xFFFF))
+    #######################################################
     @staticmethod
-    def w_i16(buf: io.BytesIO, v: int): buf.write(struct.pack("<h", v))
+    def w_i16(buf: io.BytesIO, v: int): 
+        buf.write(struct.pack("<h", v))
+    #######################################################
     @staticmethod
-    def w_u32(buf: io.BytesIO, v: int): buf.write(struct.pack("<I", v & 0xFFFFFFFF))
+    def w_u32(buf: io.BytesIO, v: int): 
+        buf.write(struct.pack("<I", v & 0xFFFFFFFF))
+    #######################################################
     @staticmethod
-    def w_i32(buf: io.BytesIO, v: int): buf.write(struct.pack("<i", v))
+    def w_i32(buf: io.BytesIO, v: int): 
+        buf.write(struct.pack("<i", v))
+    #######################################################
     @staticmethod
-    def w_f32(buf: io.BytesIO, v: float): buf.write(struct.pack("<f", float(v)))
-
-    # --- transform (write) ---
+    def w_f32(buf: io.BytesIO, v: float): 
+        buf.write(struct.pack("<f", float(v)))
+    #######################################################
     @classmethod
     def write_leeds_cw_transform(cls, buf: io.BytesIO, t: Dict):
         i16 = lambda x: int(round(float(x)*4096.0))
@@ -257,12 +284,12 @@ class write_chinatown:
         cls.w_i16(buf, Pad)
         cls.w_i32(buf, i32(PX)); cls.w_i32(buf, i32(PY)); cls.w_i32(buf, i32(PZ))
 
-    # --- core writers ---
+    #######################################################
     @classmethod
     def write_file(cls, path: str, data: bytes):
         with open(path, "wb") as f:
             f.write(data)
-
+    #######################################################
     @classmethod
     def write_mdl_bytes(
         cls,
@@ -309,7 +336,7 @@ class write_chinatown:
             cls.w_u8(buf, int(p.get("field7",0)))
             cls.w_i32(buf, int(p.get("variance_flags",0)))
         return buf.getvalue()
-
+    #######################################################
     @classmethod
     def write_wbl_bytes(
         cls,
@@ -381,7 +408,7 @@ class write_chinatown:
             struct.pack_into("<I", data, pos, mo)
         return bytes(data)
 
-    # --- round-trip extraction ---
+    #######################################################
     @staticmethod
     def extract_mesh_to_mdl_payload(
         obj: bpy.types.Object,
@@ -424,8 +451,11 @@ class write_chinatown:
         bpy.data.meshes.remove(m)
         return verts, uvs, parts, scaleFactor, translationFactor
 
-    # --- register hooks ---
+    #######################################################
     @classmethod
-    def register(cls): pass
+    def register(cls): 
+        pass
+    #######################################################
     @classmethod
-    def unregister(cls): pass
+    def unregister(cls): 
+        pass
