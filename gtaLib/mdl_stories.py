@@ -29,7 +29,7 @@ from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for Stories .MDLs, the file format for pedestrians & props
+#   This script is for Stories .MDLs, the file format for pedestrians & props       #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
@@ -51,6 +51,7 @@ from bpy_extras.io_utils import ImportHelper
 # • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
 # • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
 # • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
+
 
 #######################################################
 # === LCS Bone Arrays ===
@@ -245,7 +246,6 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
         ],
         default='PS2'
     )
-
 
     mdl_type: EnumProperty(
         name="MDL Type",
@@ -567,7 +567,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
 
                         R = Matrix.Rotation(-3.14159265 / 2, 4, 'X')
                         
-                        # Theres a global matrix here that acts as an identity in LCS but not VCS; dont think we need this in Blender
+                        # There's a global matrix here that acts as an identity in LCS but not VCS; dont think we need this in Blender
                         mat_global = read_global_matrix(f, frame_ptr + 0x50, verbose=True, name=f"Root or special: 0x{frame_ptr:X} '{bone_name}'")
 
                         bone_name_lc = bone_name.lower()
@@ -1483,7 +1483,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         padByte2 = struct.unpack('<B', f.read(1))[0]
                                         log(f"    ⬛ curStripTVertCount: {curStripTVertCount} (pad2={padByte2}) at 0x{f.tell():X}")
                                         
-                                        UV_SCALE = 4096.0  # or maybe 2048 in some models - 4096 seems standard for LCS/VCS
+                                        UV_SCALE = 32767.0 #  PS2 divides by 32767
                                         
                                         uvs = []
                                         for i in range(curStripTVertCount):
@@ -1592,19 +1592,19 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         # === After UVs and attribute subsections, once skin_indices/skin_weights are populated ===
                                         if len(skin_indices) != curStripVertCount or len(skin_weights) != curStripVertCount:
                                             log(f"[WARN] strip verts={curStripVertCount}, skin_idx={len(skin_indices)}, skin_wts={len(skin_weights)} — padding zeros to match")
-                                            # pad if file omits some weights for this strip
+                                            # pad if file omits some weights for this strip, which we want to avoid or diagnose
                                             while len(skin_indices) < curStripVertCount:
                                                 skin_indices.append([0, 0, 0, 0])
                                                 skin_weights.append([0.0, 0.0, 0.0, 0.0])
                                             skin_indices = skin_indices[:curStripVertCount]
                                             skin_weights = skin_weights[:curStripVertCount]
 
-                                        # Record where this strip was appended into the *part* mesh’s vertex list
+                                        # Record where this strip was appended into the part mesh’s vertex list
                                         strips_meta.append(
                                             (base_idx, curStripVertCount, list(skin_indices), list(skin_weights))
                                         )
 
-                                        # Reset per-strip skin buffers so next strip starts fresh
+                                        # reset, start new strip
                                         skin_indices.clear()
                                         skin_weights.clear()
                                     
@@ -2074,8 +2074,9 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                         mesh_faces.append((v0, v1, v2))
                                         
                                 # Create Blender mesh object for this mesh/strip
-                                # This is also the point I realized The_Hero and LCS Team updated
+                                # This is also the point I read that The_Hero and LCS Team updated
                                 # Alex(AK73)'s 3DSMax MDL Importer from 1.0.0 to 3.0.0 10+ years ago lol
+                                # ... yet it's nowhere to be found
                                 mesh_verts, mesh_faces = (mesh_verts, mesh_faces)
                                 mesh_data = bpy.data.meshes.new(f"PSP_Mesh_{mesh_index}")
                                 mesh_obj = bpy.data.objects.new(f"PSP_Mesh_{mesh_index}", mesh_data)

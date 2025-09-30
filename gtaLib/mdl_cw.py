@@ -24,9 +24,9 @@ from typing import List, Tuple, Dict
 
 from bpy.props import BoolProperty, StringProperty
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for reading/writing .mdl/.wbls - formats for models in GTA:CW Mobile/PSP #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   This script is for .MDL/.WBLs - file formats for models in GTA:CW Mobile/PSP    #
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   # 
 # - Script resources:
 # • https://gtamods.com/wiki/Leeds_Engine (some assets point to CW being made in Unity? ports maybe?)
 # • https://gtamods.com/wiki/MDL (TODO: update stub to include Chinatown Wars documentation)
@@ -35,7 +35,6 @@ from bpy.props import BoolProperty, StringProperty
 # - Mod resources/cool stuff:
 # • https://gtaforums.com/topic/781150-relctw-chinatown-wars-mobile-resource-explorer/  (*analyzes game.pak for mobile & partial support for psp*)
 # • https://web.archive.org/web/20221005045615/https://github.com/DK22Pac/ctw-gxt-tools (*texture editor - in case the repo goes down*)
-
 
 
 #######################################################
