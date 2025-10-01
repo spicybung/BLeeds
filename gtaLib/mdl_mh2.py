@@ -55,16 +55,16 @@ class read_mh2:
     def run(self) -> bool:
         with open(self.path, "rb") as f:
             self.file = f
-            self._read_header()
-            self._read_entry()
-            self._read_bones()
-            self._build_armature()
-            self._read_object_infos()
-            self._read_objects_and_make_meshes()
+            self.read_header()
+            self.read_entry()
+            self.read_bones()
+            self.build_armature()
+            self.read_object_infos()
+            self.prepare_meshes()
         return True
 
     #######################################################
-    def _read_header(self):
+    def read_header(self):
         f = self.file
         data = f.read(0x28)
         header = struct.unpack("<4sIIIIIIIii", data)
@@ -105,7 +105,7 @@ class read_mh2:
             self.context.scene.collection.children.link(coll)
         self.collection = coll
     #######################################################
-    def _read_entry(self):
+    def read_entry(self):
         f = self.file
         # 7 ints (28 bytes)
         entry = struct.unpack("<7i", f.read(0x1C))
@@ -114,12 +114,12 @@ class read_mh2:
         self.first_objinfo_offs = entry[4]
         self.last_objinfo_offs  = entry[5]
     #######################################################
-    def _read_bones(self):
+    def read_bones(self):
         if not self.root_bone_offset:
             return
-        self._read_bone_block(self.root_bone_offset)
+        self.read_bone_block(self.root_bone_offset)
     #######################################################
-    def _build_armature(self):
+    def build_armature(self):
         arm = bpy.data.armatures.new(f"{self.stem}_Armature")
         arm_obj = bpy.data.objects.new(arm.name, arm)
         self.collection.objects.link(arm_obj)
@@ -143,7 +143,7 @@ class read_mh2:
         bpy.ops.object.mode_set(mode="OBJECT")
         self.armature_obj = arm_obj
     #######################################################
-    def _read_object_infos(self):
+    def read_object_infos(self):
         f = self.file
         cur = self.first_objinfo_offs or self.last_objinfo_offs
         seen = set()
@@ -161,12 +161,12 @@ class read_mh2:
 
         self.object_infos = infos
     #######################################################
-    def _read_objects_and_make_meshes(self):
+    def prepare_meshes(self):
         for idx, (_, obj_off) in enumerate(self.object_infos):
-            self._read_object(idx, obj_off)
+            self.read_object(idx, obj_off)
 
     #######################################################
-    def _read_bone_block(self, offset: int):
+    def read_bone_block(self, offset: int):
         f = self.file
         f.seek(offset)
         blk = f.read(192)
@@ -188,7 +188,7 @@ class read_mh2:
             (raw[2], raw[6],  raw[10], raw[14]),
             (raw[3], raw[7],  raw[11], raw[15]),
         ))
-        M = self._y_up_to_z_up(M)
+        M = self.y_up_to_z_up(M)
 
         self.bone_map[offset] = {
             "name": name,
@@ -197,12 +197,12 @@ class read_mh2:
         }
 
         if subbone_offset:
-            self._read_bone_block(subbone_offset)
+            self.read_bone_block(subbone_offset)
         if sibling_offset:
-            self._read_bone_block(sibling_offset)
+            self.read_bone_block(sibling_offset)
 
     #######################################################
-    def _read_object(self, idx: int, obj_off: int):
+    def read_object(self, idx: int, obj_off: int):
         f = self.file
         f.seek(obj_off)
         head = f.read(180)
@@ -235,7 +235,7 @@ class read_mh2:
         # vertices
         vtx_off = obj_off + 180 + (numMaterialIDs * 32) + ((numFaceIndex // 3) * 6)
         f.seek(vtx_off + 36)
-        verts, uvs = self._read_vertices_by_type(vertex_element_type, num_vertices)
+        verts, uvs = self.read_vertex_stride(vertex_element_type, num_vertices)
 
         # materials
         mats = []
@@ -247,13 +247,13 @@ class read_mh2:
                     break
                 tex_off, loaded = struct.unpack("<IB", row[:5])
                 color = struct.unpack("4B", row[5:9])
-                tex_name = self._read_c_string_at(tex_off) if tex_off else ""
+                tex_name = self.read_c_string(tex_off) if tex_off else ""
                 mats.append({"tex_name": tex_name, "color": color, "loaded": loaded})
 
-        self._make_mesh(f"{self.stem}_{idx}", [tuple(v) for v in verts], faces, uvs, mats)
+        self.make_mesh(f"{self.stem}_{idx}", [tuple(v) for v in verts], faces, uvs, mats)
 
     #######################################################
-    def _read_c_string_at(self, offset: int) -> str:
+    def read_c_string(self, offset: int) -> str:
         f = self.file
         cur = f.tell()
         f.seek(offset)
@@ -266,10 +266,10 @@ class read_mh2:
         f.seek(cur)
         return s.decode("ascii", errors="replace")
     #######################################################
-    def _y_up_to_z_up(self, M: Matrix) -> Matrix:
+    def y_up_to_z_up(self, M: Matrix) -> Matrix:
         return M @ Matrix.Rotation(-3.14159265 / 2, 4, "X")
     #######################################################
-    def _read_vertices_by_type(self, vtype: int, count: int):
+    def read_vertex_stride(self, vtype: int, count: int):
         f = self.file
         verts = []
         uvs = None
@@ -312,7 +312,7 @@ class read_mh2:
 
         return verts, uvs
     #######################################################
-    def _make_mesh(self, name, verts, faces, uvs, materials):
+    def make_mesh(self, name, verts, faces, uvs, materials):
         me = bpy.data.meshes.new(name)
         me.from_pydata(verts, [], faces)
         me.update()
