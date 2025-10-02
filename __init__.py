@@ -1,5 +1,5 @@
 # BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: SpicyBung
+# Author: spicybung
 # Years: 2025 - 
 
 # This program is free software: you can redistribute it and/or modify
@@ -23,7 +23,7 @@ from .gui import gui
 
 bl_info = {
     "name": "BLeeds",
-    "author": "SpicyBung",
+    "author": "spicybung",
     "version": (0, 0, 1),
     "blender": (2, 80, 0),
     "category": "Import-Export",

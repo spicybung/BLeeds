@@ -1,5 +1,5 @@
 # BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: SpicyBung
+# Author: spicybung
 # Years: 2025 - 
 
 # This program is free software: you can redistribute it and/or modify
