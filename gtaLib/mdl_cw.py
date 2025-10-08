@@ -25,7 +25,7 @@ from typing import List, Tuple, Dict
 from bpy.props import BoolProperty, StringProperty
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .MDL/.WBLs - file formats for models in GTA:CW Mobile/PSP    #
+#   This script is for Chinatown Wars .MDL/.WBLs - file formats for models/blocks   #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   # 
 # - Script resources:
 # • https://gtamods.com/wiki/Leeds_Engine (some assets point to CW being made in Unity? ports maybe?)

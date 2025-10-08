@@ -29,7 +29,7 @@ from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for Stories .MDLs, the file format for pedestrians & props       #
+#   This script is for Stories .MDLs, the file format for actors & props            #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
@@ -44,6 +44,7 @@ from bpy_extras.io_utils import ImportHelper
 # • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
 # • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start w/out any other documentation)
 # - Mod resources/cool stuff:
+# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (GTA3xx .img: .mdls, textures, animations)
 # • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
 # • https://gtaforums.com/topic/285544-gtavcslcs-modding/page/11/
 # • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
@@ -696,7 +697,7 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                     """Reads 3 float32s from the file and returns a Vector."""
                     return Vector(struct.unpack('<3f', f.read(12))) 
                 #######################################################
-                def read_local_matrix(f, scale_factor=1.0, xScale=1.0, yScale=0.25, zScale=1.0, TranslationFactor=None):
+                def read_local_matrix(f):
                     """Reads a 3x4 matrix and logs the starting offset before reading."""
                     matrix_offset = f.tell()  
                     
@@ -712,7 +713,8 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                     row4 = read_point3(f) # position
                     f.read(4)
 
-                    scaleFactor = 100 # always >100, never lower!
+                    scale_factor = 1.0
+                    # scaleFactor = 100 # always >100, never lower!
                     # multiply matrix translation row by scale factor
                     x = row4.x * scale_factor
                     y = row4.y * scale_factor
@@ -1155,9 +1157,9 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
 
                     current_frame_ptr = frame_ptr
                     
-                    prev_link = read_u32() # prev atomic ptr somehow?
+                    prev_link = read_u32() # prev atomic ptr
                     
-                    prev_link2 = read_u32() # prev atomic ptr again somehow?
+                    prev_link2 = read_u32() # prev atomic ptr again
                     
                     padAAAA = read_u32()       # AAAAAAAA (necessary for Leeds Engine rendering)
 
@@ -1383,7 +1385,6 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                     strips_meta = []
                                     part_vcols = []
                                     part_loop_colors = []
-
 
                                     # vert_base is always zero for each part; it would be used if vertex indices were global
                                     vert_base = 0
@@ -1896,7 +1897,8 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                             obj.parent = root_empty
                                     else:
                                         log(f"✗ No vertices found to import in part {part_index}!")
-                                        
+                            
+                            # Going off on our own here now, using librwgta as a ref...
                             # === PSP geometry struct logic ===
                         elif self.platform == 'PSP':
                             log(f" Attempting PSP Stories MDL read...")

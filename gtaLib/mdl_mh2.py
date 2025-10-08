@@ -26,14 +26,14 @@ from bpy.props import StringProperty
 from bpy_extras.io_utils import ImportHelper
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for Manhunt2 .MDLs, the file format for actors & props           #
+#   This script is for Manhunt 2 .MDLs - the file format for actors & props         #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/Leeds_Engine
 # • https://manhuntgame.fandom.com/wiki/MDL (specifications about Manhunt 2 MDLs)
 # • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (MH2 textures)
 # - Mod resources/cool stuff:
-# • 
+# • https://www.dixmor-hospital.com/mhs/index.php (editing MH1/MH2)
 
 
 #######################################################
