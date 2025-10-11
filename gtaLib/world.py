@@ -33,5 +33,8 @@ from bpy_extras.io_utils import ImportHelper
 # • https://web-archive-org.translate.goog/web/20180810183857/http://gtamodding.ru/wiki/LVZ?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (English)
 # • https://web-archive-org.translate.goog/web/20180807031320/http://www.gtamodding.ru/wiki/IMG?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto)
 # • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto - WRLD textures)
+# - Mod resources/cool stuff:
+# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335
+
 
 # TODO: correctly parse Stories LVZ/IMG cuz it's boning me

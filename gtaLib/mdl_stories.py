@@ -46,12 +46,14 @@ from bpy_extras.io_utils import ImportHelper
 # - Mod resources/cool stuff:
 # • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (GTA3xx .img: .mdls, textures, animations)
 # • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
-# • https://gtaforums.com/topic/285544-gtavcslcs-modding/page/11/
+# • https://gtaforums.com/topic/285544-gtavcslcs-modding/
 # • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
 # • http://aap.papnet.eu/gta/RE/lcs_pipes.txt (a brief binary rundown of how bitflags work for PS2/PSP/Mobile Stories games)
 # • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
 # • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
 # • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
+# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .WRLD's, .BSP's, etc)
+# • https://www.gamedeveloper.com/programming/opinion-why-on-earth-would-we-write-our-own-game-engine- (Renderwares fate)
 
 
 #######################################################
@@ -2287,13 +2289,18 @@ class ImportMDLOperator(bpy.types.Operator, ImportHelper):
                                 # This is also the point I read that The_Hero and LCS Team updated
                                 # Alex(AK73)'s 3DSMax MDL Importer from 1.0.0 to 3.0.0 10+ years ago lol
                                 # ... yet it's nowhere to be found
+
                                 mesh_verts, mesh_faces = (mesh_verts, mesh_faces)
                                 mesh_data = bpy.data.meshes.new(f"PSP_Mesh_{mesh_index}")
-                                mesh_obj = bpy.data.objects.new(f"PSP_Mesh_{mesh_index}", mesh)
+                                mesh_obj = bpy.data.objects.new(f"PSP_Mesh_{mesh_index}", mesh_data)
                                 bpy.context.collection.objects.link(mesh_obj)
+
                                                        
                                 mesh_data.from_pydata(mesh_verts, [], mesh_faces)
                                 mesh_data.update()
+                                
+                                M_world = frame_mats_world.get(frame_ptr)
+                                mesh_obj.matrix_world = M_world
                                 
                                 log(f"✔ Built Blender mesh: PSP_Mesh_{mesh_index}, verts={len(mesh_verts)}, faces={len(mesh_faces)}")
                                 # TODO: handle UVs, colors, normals, weights here by creating layers and assigning them
