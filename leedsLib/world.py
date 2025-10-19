@@ -83,7 +83,7 @@ def hx16(v):
     return f"0x{v:04X}"
 
 #######################################################
-# Debug logger that mirrors to console and file
+# Debug logger 
 #######################################################
 class DebugLog:
     """
@@ -96,7 +96,6 @@ class DebugLog:
     def __init__(self, requested_path: Path):
         self.lines = []
         self.log_path = self._resolve_log_path(requested_path)
-        # Header banner
         now = datetime.datetime.now()
         self.log(f"===== LVZ+IMG Import Session =====")
         self.log(f"Time: {now.isoformat(sep=' ', timespec='seconds')}")
@@ -270,7 +269,7 @@ def count_headers_in_groups(lvz_bytes, group_entries):
     return results
 
 #######################################################
-# Resource Address Table after groups
+# Resource Address Table 
 #######################################################
 def parse_resource_address_table(buf, start_off, group_count_u16, max_pairs_cap=10_000_000):
     expected_pairs = int(group_count_u16)
@@ -422,7 +421,7 @@ def print_group_slave_headers(lvz_bytes, groups_info, log):
             ptr += 32
 
 #######################################################
-# NEW: Collect all (group, member, IMG continuation) from LVZ pass
+# Collect all
 #######################################################
 def collect_slave_continuations(lvz_bytes, groups_info):
     continuations = []  # list of dicts
@@ -447,7 +446,7 @@ def collect_slave_continuations(lvz_bytes, groups_info):
     return continuations
 
 #######################################################
-# NEW: Parse IMG Slave WRLD header (48 bytes base; optional 0x4C field)
+# Parse IMG Slave WRLD header 
 #######################################################
 def parse_img_slave_header(img_bytes, off):
     """
@@ -475,7 +474,7 @@ def parse_img_slave_header(img_bytes, off):
     triggered_count = read_u16_le(img_bytes, off + 0x28)
     flag_2A         = read_u16_le(img_bytes, off + 0x2A)
 
-    # Optional 0x4C field if available
+    # 0x4C field 
     triggered_table_addr = None
     if off + 0x50 <= len(img_bytes):
         triggered_table_addr = read_u32_le(img_bytes, off + 0x4C)
@@ -506,7 +505,7 @@ def print_img_slave_header(h, log):
         log(f"      0x4C triggered_table_addr  : (not present in 48-byte header)")
 
 #######################################################
-# NEW: Drive the IMG crawl (called after the summary)
+# Drive the IMG crawl 
 #######################################################
 def crawl_img_slave_headers(img_path: Path, lvz_bytes: bytes, groups_info, log):
     log("\n===== IMG Slave WRLD headers (by LVZ group/member) =====")
@@ -625,7 +624,6 @@ class LeedsImportLVZGroups(Operator, ImportHelper):
         lvz_path = Path(self.filepath)
         img_path = lvz_path.with_suffix(".img")
 
-        # Prepare log path "<lvz_stem>_import_log" with no extension
         desired_log_name = f"{lvz_path.stem}_import_log"
         desired_log_path = lvz_path.with_name(desired_log_name)
 
@@ -657,7 +655,6 @@ class LeedsImportLVZGroups(Operator, ImportHelper):
             log.log(f"Decompressed/Raw size in memory: {len(data)}")
             log.log("")
 
-            # Parse all sections with error handling
             try:
                 hdr = parse_wrld_header(data)
                 dir_info = parse_group_directory_and_tech(data, start_off=0x24)
@@ -682,11 +679,9 @@ class LeedsImportLVZGroups(Operator, ImportHelper):
                 self.report({'ERROR'}, f"parse error: {e}")
                 return {'CANCELLED'}
 
-            # Print LVZ+RAT report
             print_wrld_report(str(lvz_path), str(img_path), hdr, dir_info, groups_info, rtab, log)
             log.log(f"\n[summary] resource address table bytes (count): {dir_info['count_u16']}")
 
-            # NEW: After summary, follow into IMG for each Slave WRLD continuation
             crawl_img_slave_headers(img_path, data_global_bytes_cache, groups_info, log)
 
             self.report({'INFO'}, "LVZ groups + per-group headers + resource address table + IMG headers parsed. See console and log.")
