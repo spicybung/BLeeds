@@ -277,7 +277,7 @@ def parse_index_buffer_as_u16_tris(f, ibuf_abs, next_abs, file_size, log):
         faces.append((a, b, c))
     return faces
 #######################################################
-def parse_sector_and_optionally_build_mesh(f, base, file_size, sector_index, build_meshes, name_mode, put_in_collection, report_lines, created_objects, log):
+def parse_sector(f, base, file_size, sector_index,  report_lines, created_objects, log):
     info = read_sector_common(f, base, file_size)
 
     cx, cy, cz, cr = info["sphere"]
@@ -303,10 +303,6 @@ def parse_sector_and_optionally_build_mesh(f, base, file_size, sector_index, bui
     report_lines.append(f"  vbuf_rel={hex32(info['vbuf_rel'])} → abs {hex32(vbuf_abs) if vbuf_abs else '0x00000000'}")
     report_lines.append(f"  ibuf_rel={hex32(info['ibuf_rel'])} → abs {hex32(ibuf_abs) if ibuf_abs else '0x00000000'}")
 
-    # If not building meshes, we are done for this sector
-    if not build_meshes:
-        return next_abs
-
     aabb_min = (minx, miny, minz)
     aabb_max = (maxx, maxy, maxz)
 
@@ -320,40 +316,6 @@ def parse_sector_and_optionally_build_mesh(f, base, file_size, sector_index, bui
         report_lines.append("⚠ No mesh built (empty verts or faces).")
         return next_abs
 
-    # Create mesh in Blender
-    if name_mode == 'ID':
-        obj_name = f"COL2_Sector_{sector_index:04d}"
-    else:
-        obj_name = f"COL2_{hex32(base)}"
-
-    mesh = bpy.data.meshes.new(obj_name)
-    mesh.from_pydata(verts, [], faces)
-    mesh.validate(verbose=False)
-    mesh.update()
-
-    obj = bpy.data.objects.new(obj_name, mesh)
-    bpy.context.collection.objects.link(obj)
-
-    if put_in_collection:
-        coll_name = "COL2_Sectors"
-        coll = bpy.data.collections.get(coll_name)
-        if coll is None:
-            coll = bpy.data.collections.new(coll_name)
-            bpy.context.scene.collection.children.link(coll)
-        if obj.name in bpy.context.collection.objects:
-            bpy.context.collection.objects.unlink(obj)
-        if obj.name not in coll.objects:
-            coll.objects.link(obj)
-
-    mat = bpy.data.materials.get("COL2_Sector")
-    if mat is None:
-        mat = bpy.data.materials.new("COL2_Sector")
-        mat.diffuse_color = (0.8, 0.9, 1.0, 1.0)
-    if len(obj.data.materials) == 0:
-        obj.data.materials.append(mat)
-
-    created_objects.append(obj)
-    report_lines.append(f"✔ Built mesh object '{obj_name}' with {len(verts)} verts, {len(faces)} faces.")
     return next_abs
 #######################################################
 class ImportCOL2Operator(Operator, ImportHelper):
@@ -365,30 +327,6 @@ class ImportCOL2Operator(Operator, ImportHelper):
     filename_ext = ".col2"
     filter_glob: StringProperty(default="*.col2;*.COL2", options={'HIDDEN'})
 
-    build_meshes: BoolProperty(
-        name="Build Collision Meshes",
-        description="Create Blender mesh objects for each parsed sector",
-        default=True
-    )
-    name_mode: bpy.props.EnumProperty(
-        name="Object Naming",
-        description="Choose how created objects are named",
-        items=[
-            ('ID', "Sequential IDs", "COL2_Sector_0000, 0001, ..."),
-            ('ADDR', "By Address", "COL2_0x00ABCDEF, ..."),
-        ],
-        default='ID'
-    )
-    per_sector_collection: BoolProperty(
-        name="Put In 'COL2_Sectors' Collection",
-        description="Link created objects into a dedicated collection",
-        default=True
-    )
-    max_sectors: IntProperty(
-        name="Max Sectors (0 = no cap)",
-        description="Safety limit to stop after N sectors",
-        default=0, min=0, soft_max=100000
-    )
     #######################################################
     def execute(self, context):
         path = self.filepath
@@ -434,22 +372,18 @@ class ImportCOL2Operator(Operator, ImportHelper):
                         continue
 
                     sector_counter += 1
-                    next_abs = parse_sector_and_optionally_build_mesh(
+                    next_abs = parse_sector(
                         f2,
                         base=roff,
                         file_size=file_size,
                         sector_index=sector_counter,
-                        build_meshes=self.build_meshes,
-                        name_mode=self.name_mode,
-                        put_in_collection=self.per_sector_collection,
+
                         report_lines=report_lines,
                         created_objects=created_objects,
                         log=lambda m: report_lines.append(m)
                     )
 
-                    if self.max_sectors and sector_counter >= self.max_sectors:
-                        report_lines.append(f"Hit max_sectors={self.max_sectors}; stopping.")
-                        break
+
 
             print("\n".join(report_lines))
 

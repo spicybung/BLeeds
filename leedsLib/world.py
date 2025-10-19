@@ -18,9 +18,12 @@
 import bpy
 import struct
 import zlib
+import datetime
+import os
+import sys
+import traceback
 
 from pathlib import Path
-
 from bpy_extras.io_utils import ImportHelper
 from bpy.props import StringProperty
 from bpy.types import Operator
@@ -33,10 +36,10 @@ from bpy.types import Operator
 # • https://gtamods.com/wiki/IMG_archive
 # • https://web.archive.org/web/20180402031926/http://gtamodding.ru/wiki/IMG
 # • https://web.archive.org/web/20180406213309/http://gtamodding.ru/wiki/LVZ
-# • https://web.archive.org/web/20180729202923/http://gtamodding.ru/wiki/WRLD (Russian - not the best resource but info is scarce)
-# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (Russian - WRLD textures)
+# • https://web.archive.org/web/20180729202923/http://gtamodding.ru/wiki/WRLD (*Russian*)
+# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (*Russian* - WRLD textures)
 # • https://github.com/aap/librwgta/blob/master/tools/storiesview/worldstream.cpp
-# • https://web-archive-org.translate.goog/web/20180810183857/http://gtamodding.ru/wiki/LVZ?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (English)
+# • https://web-archive-org.translate.goog/web/20180810183857/http://gtamodding.ru/wiki/LVZ?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
 # • https://web-archive-org.translate.goog/web/20180807031320/http://www.gtamodding.ru/wiki/IMG?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto)
 # • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto - WRLD textures)
 # - Mod resources/cool stuff:
@@ -47,22 +50,21 @@ from bpy.types import Operator
 
 
 #######################################################
-# Helpers
+# Little helpers
 #######################################################
 def read_u32_le(buf, off):
     return struct.unpack_from("<I", buf, off)[0]
-#######################################################
+
 def read_u16_le(buf, off):
     return struct.unpack_from("<H", buf, off)[0]
-#######################################################
+
 def read_fourcc(buf, off):
     return buf[off:off+4].decode("ascii", errors="ignore")
-#######################################################
+
 def looks_like_zlib(buf):
     return len(buf) >= 2 and buf[0] == 0x78 and buf[1] in (0x01, 0x9C, 0xDA)
-#######################################################
-def ensure_wrld_bytes(raw_bytes):
 
+def ensure_wrld_bytes(raw_bytes):
     if len(raw_bytes) >= 4 and raw_bytes[:4] == b"DLRW":
         return raw_bytes
     if looks_like_zlib(raw_bytes):
@@ -74,11 +76,86 @@ def ensure_wrld_bytes(raw_bytes):
             pass
     return raw_bytes
 
+def hx32(v):
+    return f"0x{v:08X}"
+
+def hx16(v):
+    return f"0x{v:04X}"
+
 #######################################################
-# WRLD header parsing
+# Debug logger that mirrors to console and file
+#######################################################
+class DebugLog:
+    """
+    Simple log sink:
+      - Collects lines in memory
+      - Prints to console immediately
+      - Writes the entire session to a file at the end
+    The file name is "<lvz_stem>_import_log" (no extension).
+    """
+    def __init__(self, requested_path: Path):
+        self.lines = []
+        self.log_path = self._resolve_log_path(requested_path)
+        # Header banner
+        now = datetime.datetime.now()
+        self.log(f"===== LVZ+IMG Import Session =====")
+        self.log(f"Time: {now.isoformat(sep=' ', timespec='seconds')}")
+        self.log(f"Log file: {self.log_path}")
+        self.log("")
+
+    def _resolve_log_path(self, requested_path: Path) -> Path:
+        """
+        Try to place the log next to the LVZ as "<stem>_import_log".
+        If not writable, fall back to Blender temp dir, then home dir.
+        """
+        candidate = requested_path
+        try:
+            with open(candidate, "w", encoding="utf-8") as _:
+                pass
+            return candidate
+        except Exception:
+            pass
+
+        tempdir = getattr(bpy.app, "tempdir", None) or ""
+        if tempdir:
+            try:
+                p = Path(tempdir) / requested_path.name
+                with open(p, "w", encoding="utf-8") as _:
+                    pass
+                return p
+            except Exception:
+                pass
+
+        try:
+            home = Path.home()
+            p = home / requested_path.name
+            with open(p, "w", encoding="utf-8") as _:
+                pass
+            return p
+        except Exception:
+            return Path(os.getcwd()) / requested_path.name
+
+    def log(self, s: str):
+        self.lines.append(s)
+        print(s)
+
+    def __call__(self, s: str):
+        self.log(s)
+
+    def write_out(self):
+        try:
+            with open(self.log_path, "w", encoding="utf-8") as f:
+                for line in self.lines:
+                    f.write(line)
+                    if not line.endswith("\n"):
+                        f.write("\n")
+        except Exception as e:
+            print(f"[WARN] Failed to write log to {self.log_path}: {e}")
+
+#######################################################
+# WRLD master header (top of LVZ)
 #######################################################
 def parse_wrld_header(buf):
-
     if len(buf) < 0x24:
         raise ValueError("buffer too small for WRLD header")
     return {
@@ -94,236 +171,445 @@ def parse_wrld_header(buf):
     }
 
 #######################################################
-# Slave WRLD groups directory + technical sector
+# Directory + technical mirror
 #######################################################
-def parse_slave_group_directory(buf, start_off=0x24, safety_pairs=4096):
-    
+def parse_group_directory_and_tech(buf, start_off=0x24, safety_pairs=65535):
     off = start_off
     dir_begin = off
     entries = []
 
     for _ in range(safety_pairs):
         if off + 4 > len(buf):
-            raise ValueError("unexpected end while peeking directory dword")
-
+            raise ValueError("unexpected end while peeking directory")
         peek = read_u32_le(buf, off)
 
-        # zero dword → likely end of address list in some builds
         if peek == 0:
             off += 4
             break
 
-        # If upper 16 bits are zero, treat this as start of u16 count/reserved.
         if (peek & 0xFFFF0000) == 0:
             break
 
         if off + 8 > len(buf):
-            raise ValueError("unexpected end while reading a directory pair")
-
+            raise ValueError("truncated pair in directory")
         addr = peek
         x_shift = read_u32_le(buf, off + 4)
         entries.append((addr, x_shift))
         off += 8
 
-    # Read the u16 count + u16 reserved
     if off + 4 > len(buf):
-        raise ValueError("missing u16 count + u16 reserved after directory")
-
+        raise ValueError("missing u16 group_count + u16 reserved")
     count_off = off
-    count_u16 = read_u16_le(buf, off)
-    reserved_off = off + 2
-    reserved_u16 = read_u16_le(buf, reserved_off)
+    group_count = read_u16_le(buf, off)
+    reserved = read_u16_le(buf, off + 2)
     off += 4
 
-    # Technical mirror block length equals bytes used by (directory + count/reserved)
-    dir_and_count_len = off - dir_begin
-    tech_len = dir_and_count_len
-
+    dir_plus_count_len = off - dir_begin
+    tech_len = dir_plus_count_len
     pad_start = off
-    actual_len = min(tech_len, len(buf) - off)
-    padding_bytes = buf[pad_start:pad_start + actual_len]
-    off += actual_len
+    pad_end = min(off + tech_len, len(buf))
+    padding_bytes = buf[pad_start:pad_end]
+    off = pad_end
 
     return {
         "entries": entries,
-        "count_u16": count_u16,
+        "count_u16": group_count,
+        "reserved_u16": reserved,
         "count_off": count_off,
-        "reserved_u16": reserved_u16,
-        "reserved_off": reserved_off,
-        "pad_start": pad_start,
-        "padding_bytes": padding_bytes,
-        "next_block_offset": off,
-        "start_offset": start_off,
         "dir_bytes": (count_off - dir_begin),
-        "dir_plus_count_bytes": dir_and_count_len,
-        "tech_block_bytes": actual_len,
+        "dir_plus_count_bytes": dir_plus_count_len,
+        "pad_start": pad_start,
+        "pad_bytes": padding_bytes,
+        "next_offset": off,
     }
 
 #######################################################
-# Post-technical
+# Count 32-byte Slave WRLD headers per group (LVZ-only)
 #######################################################
-def parse_post_padding_block(buf, off):
+def count_headers_in_groups(lvz_bytes, group_entries):
+    groups = sorted(group_entries, key=lambda t: t[0])
+    addrs = [g[0] for g in groups]
 
-    need = off + 8 * 4
-    if need > len(buf):
-        raise ValueError("not enough bytes for post-padding 8 dwords")
-    vals = [read_u32_le(buf, off + i * 4) for i in range(8)]
-    offs = [off + i * 4 for i in range(8)]
-    return {
-        "base_off": off,
-        "time_rows": vals[0],   "time_rows_off": offs[0],
-        "time_addr": vals[1],   "time_addr_off": offs[1],
-        "fx_rows":   vals[2],   "fx_rows_off":   offs[2],
-        "fx_addr":   vals[3],   "fx_addr_off":   offs[3],
-        "int_rows":  vals[4],   "int_rows_off":  offs[4],
-        "int_addr":  vals[5],   "int_addr_off":  offs[5],
-        "radar_rows":vals[6],   "radar_rows_off":offs[6],
-        "radar_addr":vals[7],   "radar_addr_off":offs[7],
-    }
+    results = []
+    for i, (addr, xshift) in enumerate(groups):
+        start = max(0, min(addr, len(lvz_bytes)))
+        if i + 1 < len(groups):
+            end_limit = max(start, min(addrs[i+1], len(lvz_bytes)))
+            last = False
+        else:
+            end_limit = len(lvz_bytes)
+            last = True
 
-#######################################################
-# Resource ID table
-#######################################################
-def parse_resource_id_table(buf, table_off, group_count_u16, max_pairs=None):
+        ptr = start
+        members = 0
 
-    pair_count = int(group_count_u16) * 2
-    if max_pairs is not None:
-        pair_count = min(pair_count, max_pairs)
+        if not last:
+            while ptr + 32 <= end_limit:
+                if lvz_bytes[ptr:ptr+4] != b"DLRW":
+                    break
+                members += 1
+                ptr += 32
+            window_end = end_limit
+        else:
+            while ptr + 32 <= len(lvz_bytes) and lvz_bytes[ptr:ptr+4] == b"DLRW":
+                members += 1
+                ptr += 32
+            window_end = ptr
 
-    out = []
-    off = table_off
-    need = off + pair_count * 8
-    if need > len(buf):
-        raise ValueError(
-            f"resource table overruns file: need up to 0x{need:X}, size 0x{len(buf):X}"
-        )
-
-    for i in range(pair_count):
-        idv  = read_u32_le(buf, off + 0)
-        aux  = read_u32_le(buf, off + 4)
-        out.append({
-            "index": i,
-            "off_id": off + 0,
-            "id": idv,
-            "off_aux": off + 4,
-            "aux": aux,
-            "empty": (idv == 0),
+        group_bytes = members * 32
+        trailing = max(0, window_end - start - group_bytes)
+        results.append({
+            "addr": addr,
+            "xshift": xshift,
+            "members": members,
+            "total_bytes": group_bytes,
+            "window_start": start,
+            "window_end": window_end,
+            "trailing_bytes": trailing,
         })
+    return results
+
+#######################################################
+# Resource Address Table after groups
+#######################################################
+def parse_resource_address_table(buf, start_off, group_count_u16, max_pairs_cap=10_000_000):
+    expected_pairs = int(group_count_u16)
+    expected_pairs = min(expected_pairs, max_pairs_cap)
+
+    pairs = []
+    off = start_off
+    for _ in range(expected_pairs):
+        if off + 8 > len(buf):
+            break
+        rid = read_u32_le(buf, off)
+        filler = read_u32_le(buf, off + 4)
+        pairs.append((rid, filler))
         off += 8
 
-    return out
+    nonzero = [rid for (rid, filler) in pairs if rid != 0]
+    bytes_consumed = len(pairs) * 8
+    return {
+        "pairs": pairs,
+        "nonzero_ids": nonzero,
+        "bytes_consumed": bytes_consumed,
+        "start_off": start_off,
+        "expected_pairs": expected_pairs,
+        "actual_pairs": len(pairs),
+        "end_off": start_off + bytes_consumed
+    }
 
 #######################################################
-# Printing helpers
+# LVZ: Read a single 32-byte Slave WRLD header
 #######################################################
-def hx(v): 
-    return f"0x{v:08X}"
+def parse_slave_wrld_header(buf, off):
+    if off + 32 > len(buf):
+        raise ValueError(f"not enough bytes to read 32-byte WRLD header at {hx32(off)}")
+
+    fourcc = read_fourcc(buf, off + 0x00)
+    wrld_type = read_u32_le(buf, off + 0x04)
+    size      = read_u32_le(buf, off + 0x08)
+    glob0     = read_u32_le(buf, off + 0x0C)
+    glob1     = read_u32_le(buf, off + 0x10)
+    globcnt   = read_u32_le(buf, off + 0x14)
+    cont_img  = read_u32_le(buf, off + 0x18)
+    reserved  = read_u32_le(buf, off + 0x1C)
+
+    return {
+        "offset": off,
+        "fourcc": fourcc,
+        "type": wrld_type,
+        "size": size,
+        "global_addr_0": glob0,
+        "global_addr_1": glob1,
+        "global_count": globcnt,
+        "slave_continuation": cont_img,
+        "reserved": reserved
+    }
+
+def print_single_slave_header(h, log):
+    log(f"    @ {hx32(h['offset'])}")
+    log(f"      0x00 fourCC                 : {h['fourcc']!r}")
+    log(f"      0x04 type                   : {hx32(h['type'])} ({'Master' if h['type']==1 else 'Slave' if h['type']==0 else 'Unknown'})")
+    log(f"      0x08 size                   : {hx32(h['size'])} ({h['size']})")
+    log(f"      0x0C global section addr    : {hx32(h['global_addr_0'])}")
+    log(f"      0x10 global section addr    : {hx32(h['global_addr_1'])} (repeat)")
+    log(f"      0x14 global offsets count   : {hx32(h['global_count'])} ({h['global_count']})")
+    log(f"      0x18 slave continuation IMG : {hx32(h['slave_continuation'])}")
+    log(f"      0x1C reserved               : {hx32(h['reserved'])}")
+
 #######################################################
-def hxb(b): 
-    return " ".join(f"{x:02X}" for x in b)
+# Pretty printing blocks and tables (mirrored to log)
 #######################################################
-def print_block_as_dwords(block_name, start_off, data_bytes, start_index=0):
+def print_block_as_dwords(block_name, start_off, data_bytes, log, start_index=0):
     n = len(data_bytes)
-    print(f"\n{block_name}")
-    print(f"  bytes: {n} (start @ {hx(start_off)})")
+    log(f"\n{block_name}")
+    log(f"  bytes: {n} (start @ {hx32(start_off)})")
     if n == 0:
-        print("  (empty)")
+        log("  (empty)")
         return
 
     word_count = n // 4
     if word_count:
-        print("  index |        dword")
+        log("  index |        dword")
         for i in range(word_count):
             s = i * 4
             word = int.from_bytes(data_bytes[s:s+4], "little", signed=False)
-            print(f"  {start_index + i:5d} | {hx(word)}")
+            log(f"  {start_index + i:5d} | {hx32(word)}")
 
     tail = n % 4
     if tail:
         tb = data_bytes[-tail:]
         idx = start_index + word_count
-        print(f"  {idx:5d} | tail bytes ({tail}): {hxb(tb)}")
+        hex_tail = " ".join(f"{x:02X}" for x in tb)
+        log(f"  {idx:5d} | tail bytes ({tail}): {hex_tail}")
+
+def print_groups_table(groups_info, log):
+    log("\nSlave WRLD groups (walked BEFORE resource ID table)")
+    log(f"  entries: {len(groups_info)}\n")
+    log("  idx |  LVZ group addr | X shift     | members | total bytes | trailing")
+    for i, g in enumerate(groups_info):
+        log(f"  {i:3d} | {hx32(g['addr'])}      | {hx32(g['xshift'])} | {g['members']:7d} | {g['total_bytes']:11d} | {g['trailing_bytes']:8d}")
+
+def print_resource_addr_table(rtab, log):
+    log("\nResource Address Table (parsed AFTER groups)")
+    log(f"  start @ {hx32(rtab['start_off'])}")
+    log(f"  expected pairs (count*2): {rtab['expected_pairs']}")
+    log(f"  actual pairs read       : {rtab['actual_pairs']}")
+    log(f"  bytes consumed          : {rtab['bytes_consumed']}")
+    log(f"  end @ {hx32(rtab['end_off'])}")
+    nz = len(rtab['nonzero_ids'])
+    log(f"  non-zero resource IDs   : {nz}")
+
+    if rtab['actual_pairs']:
+        log("\n  idx |     res_id | filler (should be 0)")
+        for i, (rid, fil) in enumerate(rtab["pairs"]):
+            log(f"  {i:4d} | {hx32(rid)} | {hx32(fil)}")
+
 #######################################################
-def print_post_block(block):
-    print("\nPost-technical tables (8 dwords right after technical block)")
-    print(f"  start @ {hx(block['base_off'])}")
-    def line(name, val, off_note, note=""):
-        print(f"  {name:<28} @ {hx(off_note)} : {hx(val)} ({val}){note}")
-    line("timeobjects rows", block["time_rows"], block["time_rows_off"], "  (1 row = 4 bytes)")
-    line("timeobjects addr", block["time_addr"], block["time_addr_off"])
-    line("2dfx rows",        block["fx_rows"],   block["fx_rows_off"],   "  (1 row = 48 bytes)")
-    line("2dfx addr",        block["fx_addr"],   block["fx_addr_off"])
-    line("interiors count",  block["int_rows"],  block["int_rows_off"],  "  (1 row = 6 bytes)")
-    line("interiors table",  block["int_addr"],  block["int_addr_off"])
-    line("radar tex count",  block["radar_rows"],block["radar_rows_off"],"  (LCS only)")
-    line("radar starts addr",block["radar_addr"],block["radar_addr_off"],"  (LCS only)")
+# Walk and print each group's Slave WRLD 32-byte headers (LVZ)
 #######################################################
-def print_resource_table(entries, title="Resource Identity Table (group_count * 2 pairs)"):
-    nz = sum(1 for e in entries if not e["empty"])
-    print(f"\n{title}")
-    print(f"  entries parsed : {len(entries)}")
-    print(f"  non-empty IDs  : {nz}")
-    if not entries:
+def print_group_slave_headers(lvz_bytes, groups_info, log):
+    log("\nPer-group Slave WRLD 32-byte headers (LVZ-only)")
+    if not groups_info:
+        log("  (no groups)")
         return
-    print("\n  index |   off(id)  |        id |  off(aux)  |       aux | note")
-    for e in entries:
-        note = "EMPTY" if e["empty"] else ""
-        print(f"  {e['index']:5d} | {hx(e['off_id'])} | {hx(e['id'])} | {hx(e['off_aux'])} | {hx(e['aux'])} | {note}")
-#######################################################
-def print_wrld_report(lvz_path_str, img_path_str, hdr, dir_info=None, post_block=None, res_entries=None):
-    print(f"\n===== Leeds LVZ/IMG Inspector =====")
-    print(f"Selected LVZ/BIN: {lvz_path_str}")
-    print(f"Associated IMG:   {img_path_str}\n")
 
-    print("WRLD Master Header (global)")
-    print(f"  0x00 fourCC                : {hdr['fourcc']!r}")
-    print(f"  0x04 shrink                : {hx(hdr['shrink'])} ({hdr['shrink']})")
-    print(f"  0x08 file size             : {hx(hdr['file_size'])} ({hdr['file_size']})")
-    print(f"  0x0C global section addr   : {hx(hdr['global_addr_0'])}")
-    print(f"  0x10 global section addr   : {hx(hdr['global_addr_1'])} (repeat)")
-    print(f"  0x14 global offsets count  : {hx(hdr['global_count'])} ({hdr['global_count']})")
-    print(f"  0x18 slave continuation IMG: {hx(hdr['slave_continuation'])}")
-    print(f"  0x1C reserved              : {hx(hdr['reserved'])}")
-    print()
-    print("Resource Identity Table pointer")
-    print(f"  0x20 resource id table     : {hx(hdr['resource_id_table'])}")
+    for gi, g in enumerate(groups_info):
+        addr = g["addr"]
+        members = g["members"]
+        log(f"\nGroup {gi} @ {hx32(addr)}  (members: {members})")
+        if members == 0:
+            log("  (no headers detected in this group window)")
+            continue
 
-    if dir_info is not None:
-        print("\nSlave WRLD Groups Directory (LVZ-local addresses)")
-        print(f"  directory start @ {hx(dir_info['start_offset'])}")
-        print(f"  entries: {len(dir_info['entries'])}")
-        if dir_info['entries']:
-            print("\n  index | LVZ offset | X shift")
-            for i, (addr, xshift) in enumerate(dir_info['entries']):
-                print(f"  {i:5d} | {hx(addr)} | {hx(xshift)}")
+        ptr = addr
+        for mi in range(members):
+            if ptr + 32 > len(lvz_bytes):
+                log(f"  member {mi}: stop (would overrun EOF at {hx32(ptr)})")
+                break
+            if lvz_bytes[ptr:ptr+4] != b"DLRW":
+                log(f"  member {mi}: stop (fourCC not 'DLRW' at {hx32(ptr)})")
+                break
 
-        print("\nGroup count (u16) and reserved")
-        print(f"  count    @ {hx(dir_info['count_off'])} : {dir_info['count_u16']} (0x{dir_info['count_u16']:04X})")
-        print(f"  reserved @ {hx(dir_info['reserved_off'])} : {dir_info['reserved_u16']} (0x{dir_info['reserved_u16']:04X})")
+            try:
+                h = parse_slave_wrld_header(lvz_bytes, ptr)
+            except Exception as e:
+                log(f"  member {mi}: parse error at {hx32(ptr)}: {e}")
+                break
 
-        print(f"\nDirectory/tech sizing")
-        print(f"  directory bytes            : {dir_info['dir_bytes']}")
-        print(f"  dir + count bytes          : {dir_info['dir_plus_count_bytes']}")
-        print(f"  technical block bytes      : {dir_info['tech_block_bytes']} (mirrored)")
-
-        print_block_as_dwords(
-            "Technical mirror block (same length as directory+count)",
-            dir_info['pad_start'],
-            dir_info['padding_bytes'],
-            start_index=len(dir_info['entries'])
-        )
-
-    if post_block is not None:
-        print_post_block(post_block)
-
-    if res_entries is not None:
-        print_resource_table(res_entries)
+            log(f"  member {mi}:")
+            print_single_slave_header(h, log)
+            ptr += 32
 
 #######################################################
-class LeedsImportWRLD(Operator, ImportHelper):
-    """R* Leeds WRLD LVZ/BIN inspector (header, groups, technical block, tables, resource IDs)"""
-    bl_idname = "import_scene.leeds_wrld_lvz"
-    bl_label = "R* Leeds: WRLD LVZ/BIN (.lvz/.bin)"
+# NEW: Collect all (group, member, IMG continuation) from LVZ pass
+#######################################################
+def collect_slave_continuations(lvz_bytes, groups_info):
+    continuations = []  # list of dicts
+    for gi, g in enumerate(groups_info):
+        addr = g["addr"]
+        members = g["members"]
+        ptr = addr
+        for mi in range(members):
+            if ptr + 32 > len(lvz_bytes):
+                break
+            if lvz_bytes[ptr:ptr+4] != b"DLRW":
+                break
+            h = parse_slave_wrld_header(lvz_bytes, ptr)
+            cont = h["slave_continuation"]
+            continuations.append({
+                "group_index": gi,
+                "member_index": mi,
+                "lvz_header_offset": ptr,
+                "img_cont_offset": cont
+            })
+            ptr += 32
+    return continuations
+
+#######################################################
+# NEW: Parse IMG Slave WRLD header (48 bytes base; optional 0x4C field)
+#######################################################
+def parse_img_slave_header(img_bytes, off):
+    """
+    Base layout (48 bytes):
+      0x00 u32  res_id_table_addr
+      0x04 u16  res_count
+      0x06 u16  unk_06 (often 0x12)
+      0x08 [8]*u32 ipl_addrs
+      0x28 u16  triggered_count
+      0x2A u16  flag_2A (often 0x12)
+    Optional:
+      0x4C u32  triggered_table_addr (print when present)
+    """
+    need = off + 0x30  # 48 bytes minimum
+    if need > len(img_bytes):
+        raise ValueError(f"IMG EOF before 48-byte Slave WRLD header at {hx32(off)}")
+
+    res_id_table = read_u32_le(img_bytes, off + 0x00)
+    res_count    = read_u16_le(img_bytes, off + 0x04)
+    unk_06       = read_u16_le(img_bytes, off + 0x06)
+    ipl_addrs = []
+    ipl_base = off + 0x08
+    for i in range(8):
+        ipl_addrs.append(read_u32_le(img_bytes, ipl_base + 4*i))
+    triggered_count = read_u16_le(img_bytes, off + 0x28)
+    flag_2A         = read_u16_le(img_bytes, off + 0x2A)
+
+    # Optional 0x4C field if available
+    triggered_table_addr = None
+    if off + 0x50 <= len(img_bytes):
+        triggered_table_addr = read_u32_le(img_bytes, off + 0x4C)
+
+    return {
+        "offset": off,
+        "res_id_table_addr": res_id_table,
+        "res_count": res_count,
+        "unk_06": unk_06,
+        "ipl_addrs": ipl_addrs,
+        "triggered_count": triggered_count,
+        "flag_2A": flag_2A,
+        "triggered_table_addr": triggered_table_addr
+    }
+
+def print_img_slave_header(h, log):
+    log(f"    @ {hx32(h['offset'])}")
+    log(f"      0x00 res_id_table_addr     : {hx32(h['res_id_table_addr'])}")
+    log(f"      0x04 res_count             : {hx16(h['res_count'])} ({h['res_count']})")
+    log(f"      0x06 unk_06                : {hx16(h['unk_06'])}")
+    for i, a in enumerate(h["ipl_addrs"]):
+        log(f"      0x08+{i*4:02X} IPL[{i}] addr        : {hx32(a)}")
+    log(f"      0x28 triggered_count       : {hx16(h['triggered_count'])} ({h['triggered_count']})")
+    log(f"      0x2A flag_2A               : {hx16(h['flag_2A'])}")
+    if h["triggered_table_addr"] is not None:
+        log(f"      0x4C triggered_table_addr  : {hx32(h['triggered_table_addr'])}")
+    else:
+        log(f"      0x4C triggered_table_addr  : (not present in 48-byte header)")
+
+#######################################################
+# NEW: Drive the IMG crawl (called after the summary)
+#######################################################
+def crawl_img_slave_headers(img_path: Path, lvz_bytes: bytes, groups_info, log):
+    log("\n===== IMG Slave WRLD headers (by LVZ group/member) =====")
+    if not img_path.exists():
+        log(f"[WARN] IMG file not found: {img_path}")
+        return
+
+    try:
+        img_bytes = img_path.read_bytes()
+        log(f"Read IMG bytes: {len(img_bytes)}")
+    except Exception as e:
+        log(f"[ERROR] failed to read IMG: {e}")
+        return
+
+    conts = collect_slave_continuations(lvz_bytes, groups_info)
+    if not conts:
+        log("No Slave WRLD continuations collected from LVZ.")
+        return
+
+    last_group = -1
+    for entry in conts:
+        gi = entry["group_index"]
+        mi = entry["member_index"]
+        img_off = entry["img_cont_offset"]
+
+        if gi != last_group:
+            log(f"\nGroup {gi} (from LVZ) — IMG continuations:")
+            last_group = gi
+
+        if img_off == 0:
+            log(f"  member {mi}: IMG continuation is 0x00000000 (none)")
+            continue
+        if img_off >= len(img_bytes):
+            log(f"  member {mi}: IMG continuation {hx32(img_off)} beyond IMG EOF ({len(img_bytes)} bytes)")
+            continue
+
+        log(f"  member {mi}: IMG header @ {hx32(img_off)}")
+        try:
+            h = parse_img_slave_header(img_bytes, img_off)
+        except Exception as e:
+            log(f"    parse error at {hx32(img_off)}: {e}")
+            continue
+
+        print_img_slave_header(h, log)
+
+#######################################################
+def print_wrld_report(lvz_path_str, img_path_str, hdr, dir_info, groups_info, rtab, log):
+    log(f"\n===== Leeds LVZ/IMG Inspector =====")
+    log(f"Selected LVZ/BIN: {lvz_path_str}")
+    log(f"Associated IMG:   {img_path_str}\n")
+
+    log("WRLD Master Header (global)")
+    log(f"  0x00 fourCC                : {hdr['fourcc']!r}")
+    log(f"  0x04 shrink                : {hx32(hdr['shrink'])} ({hdr['shrink']})")
+    log(f"  0x08 file size             : {hx32(hdr['file_size'])} ({hdr['file_size']})")
+    log(f"  0x0C global section addr   : {hx32(hdr['global_addr_0'])}")
+    log(f"  0x10 global section addr   : {hx32(hdr['global_addr_1'])} (repeat)")
+    log(f"  0x14 global offsets count  : {hx32(hdr['global_count'])} ({hdr['global_count']})")
+    log(f"  0x18 slave continuation IMG: {hx32(hdr['slave_continuation'])}")
+    log(f"  0x1C reserved              : {hx32(hdr['reserved'])}")
+    log("")
+    log("Resource Identity Table pointer")
+    log(f"  0x20 resource id table     : {hx32(hdr['resource_id_table'])}")
+
+    log("\nSlave WRLD groups directory (LVZ-local addresses)")
+    log(f"  directory start @ {hx32(0x24)}")
+    log(f"  entries: {len(dir_info['entries'])}")
+    if dir_info['entries']:
+        log("\n  index | LVZ offset | X shift")
+        for i, (addr, xshift) in enumerate(dir_info['entries']):
+            log(f"  {i:5d} | {hx32(addr)} | {hx32(xshift)}")
+
+    log("\nGroup count (u16) and reserved")
+    log(f"  count    @ {hx32(dir_info['count_off'])} : {dir_info['count_u16']} ({hx16(dir_info['count_u16'])})")
+    log(f"  reserved @ {hx32(dir_info['count_off']+2)} : {dir_info['reserved_u16']} ({hx16(dir_info['reserved_u16'])})")
+
+    log(f"\nDirectory/technical sizing")
+    log(f"  directory bytes            : {dir_info['dir_bytes']}")
+    log(f"  dir + count bytes          : {dir_info['dir_plus_count_bytes']}")
+    log(f"  technical block bytes      : {len(dir_info['pad_bytes'])} (mirrored)")
+
+    print_block_as_dwords(
+        "Technical mirror block (same length as directory+count)",
+        dir_info['pad_start'],
+        dir_info['pad_bytes'],
+        log,
+        start_index=len(dir_info['entries'])
+    )
+
+    print_groups_table(groups_info, log)
+
+    print_group_slave_headers(lvz_bytes=data_global_bytes_cache, groups_info=groups_info, log=log)
+
+    print_resource_addr_table(rtab, log)
+
+#######################################################
+# Operator
+#######################################################
+data_global_bytes_cache = b""
+
+class LeedsImportLVZGroups(Operator, ImportHelper):
+    bl_idname = "import_scene.leeds_lvz_groups"
+    bl_label = "R* Leeds: LVZ groups (.lvz/.bin)"
     bl_options = {'REGISTER', 'UNDO'}
 
     filename_ext = ".lvz"
@@ -332,49 +618,95 @@ class LeedsImportWRLD(Operator, ImportHelper):
         default="*.lvz;*.LVZ;*.bin;*.BIN",
         options={'HIDDEN'},
     )
-    #######################################################
+
     def execute(self, context):
+        global data_global_bytes_cache
+
         lvz_path = Path(self.filepath)
-        img_path = lvz_path.with_suffix(".img")  # Associated IMG: same folder + stem
+        img_path = lvz_path.with_suffix(".img")
+
+        # Prepare log path "<lvz_stem>_import_log" with no extension
+        desired_log_name = f"{lvz_path.stem}_import_log"
+        desired_log_path = lvz_path.with_name(desired_log_name)
+
+        log = DebugLog(desired_log_path)
+        log.log(f"LVZ path: {lvz_path}")
+        log.log(f"IMG path: {img_path}")
+        log.log("")
 
         try:
-            raw = lvz_path.read_bytes()
-        except Exception as e:
-            self.report({'ERROR'}, f"failed to read file: {e}")
-            return {'CANCELLED'}
+            try:
+                raw = lvz_path.read_bytes()
+                log.log(f"Read LVZ bytes: {len(raw)}")
+            except Exception as e:
+                log.log(f"[ERROR] failed to read LVZ: {e}")
+                log.write_out()
+                self.report({'ERROR'}, f"failed to read file: {e}")
+                return {'CANCELLED'}
 
-        data = ensure_wrld_bytes(raw)
-        if data[:4] != b"DLRW":
-            self.report({'ERROR'}, "DLRW not found (not a WRLD header after optional zlib).")
-            return {'CANCELLED'}
+            data = ensure_wrld_bytes(raw)
+            if data[:4] != b"DLRW":
+                msg = "DLRW not found (not a WRLD header after optional zlib)."
+                log.log(f"[ERROR] {msg}")
+                log.write_out()
+                self.report({'ERROR'}, msg)
+                return {'CANCELLED'}
 
-        try:
-            hdr = parse_wrld_header(data)
-            dir_info = parse_slave_group_directory(data, start_off=0x24)
-            post_block = parse_post_padding_block(data, dir_info["next_block_offset"])
-            res_entries = parse_resource_id_table(
-                data,
-                hdr["resource_id_table"],
-                dir_info["count_u16"]
-            )
-        except Exception as e:
-            self.report({'ERROR'}, f"parse error: {e}")
-            return {'CANCELLED'}
+            data_global_bytes_cache = data
+            log.log("Confirmed WRLD magic 'DLRW' at 0x00")
+            log.log(f"Decompressed/Raw size in memory: {len(data)}")
+            log.log("")
 
-        print_wrld_report(str(lvz_path), str(img_path), hdr, dir_info, post_block, res_entries)
-        self.report({'INFO'}, "LVZ parsed. See console for details.")
+            # Parse all sections with error handling
+            try:
+                hdr = parse_wrld_header(data)
+                dir_info = parse_group_directory_and_tech(data, start_off=0x24)
+                groups_info = count_headers_in_groups(data, dir_info["entries"])
+
+                res_tab_off = hdr["resource_id_table"]
+                if res_tab_off >= len(data):
+                    raise ValueError(f"resource address table offset {hx32(res_tab_off)} beyond EOF ({len(data)} bytes)")
+
+                rtab = parse_resource_address_table(
+                    data,
+                    start_off=res_tab_off,
+                    group_count_u16=dir_info["count_u16"]
+                )
+            except Exception as e:
+                log.log(f"[ERROR] parse error: {e}")
+                log.log("Traceback:")
+                tb = traceback.format_exc()
+                for line in tb.rstrip().splitlines():
+                    log.log(line)
+                log.write_out()
+                self.report({'ERROR'}, f"parse error: {e}")
+                return {'CANCELLED'}
+
+            # Print LVZ+RAT report
+            print_wrld_report(str(lvz_path), str(img_path), hdr, dir_info, groups_info, rtab, log)
+            log.log(f"\n[summary] resource address table bytes (count): {dir_info['count_u16']}")
+
+            # NEW: After summary, follow into IMG for each Slave WRLD continuation
+            crawl_img_slave_headers(img_path, data_global_bytes_cache, groups_info, log)
+
+            self.report({'INFO'}, "LVZ groups + per-group headers + resource address table + IMG headers parsed. See console and log.")
+
+        finally:
+            log.write_out()
+
         return {'FINISHED'}
+
 #######################################################
 def menu_func_import(self, context):
-    self.layout.operator(LeedsImportWRLD.bl_idname, text=LeedsImportWRLD.bl_label)
+    self.layout.operator(LeedsImportLVZGroups.bl_idname, text=LeedsImportLVZGroups.bl_label)
 
 def register():
-    bpy.utils.register_class(LeedsImportWRLD)
+    bpy.utils.register_class(LeedsImportLVZGroups)
     bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
 
 def unregister():
     bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-    bpy.utils.unregister_class(LeedsImportWRLD)
+    bpy.utils.unregister_class(LeedsImportLVZGroups)
 
 if __name__ == "__main__":
     register()
