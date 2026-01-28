@@ -26,4 +26,4 @@ The following is a list of features that are supported by the addon
 1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest master branch
 2. Import the downloaded .zip file by selecting it from *(User) Preferences/Addons/Install from File*
 3. Set the addon "BLeeds" to enabled
-4. Import dff from Import tab or an IPL/IFP from the panel in *Scene Settings*
+4. Import files from Import tab, export files from the Export tab
