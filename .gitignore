@@ -1,2 +1,11 @@
 __pycache__
+<<<<<<< HEAD
 backups
+=======
+!LCS
+!VCS
+!CW
+backups
+docs
+tests
+>>>>>>> 245194e (Update .gitignore)
