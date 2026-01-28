@@ -4,7 +4,7 @@ BLeeds is an IO for Blender, with scripts designed around the Leeds Engine file 
 
 ## Supported Features
 
-The following is a list of features that are supported by the addon
+The following is a list of file formats that are currently supported by the addon
 
 #### File Types
 
