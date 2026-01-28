@@ -15,165 +15,171 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import os
-import struct
-import bpy
+from ..ops import mdl_importer
 
+import bpy
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import (
+    IntProperty,
 
-from ..gtaLib.mdl_cw import read_chinatown as RC, write_chinatown as WC
-from ..gtaLib.mdl_mh2 import import_mh2
+    StringProperty,
+    BoolProperty,
+    EnumProperty,
+)
 
 
-class IMPORT_OT_MH2_mdl(bpy.types.Operator, ImportHelper):
-    """Import Rockstar Leeds Manhunt 2 MDL"""
-    bl_idname = "import_scene.mh2_mdl"
-    bl_label = "Import an Manhunt 2 Model (.mdl)"
-    bl_options = {'UNDO'}
+class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
+    """Import a Rockstar Leeds Stories MDL"""
+    bl_idname = "import_scene.bleeds_stories_mdl"
+    bl_label = "Import SimpleModel"
+    bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".mdl"
-    filter_glob: StringProperty(default="*.mdl", options={'HIDDEN'})
+    filter_glob: StringProperty(
+        default="*.mdl",
+        options={"HIDDEN"},
+        maxlen=255,
+    )
 
-    group_into_collection: BoolProperty(
-        name="Group into Collection",
+    platform: EnumProperty(
+        name="Platform",
+        description="Platform this Stories MDL was built for",
+        items=(
+            ("PS2", "PS2", "PlayStation 2 (Liberty City Stories / Vice City Stories)"),
+            ("PSP", "PSP", "PlayStation Portable (Liberty City Stories / Vice City Stories)"),
+        ),
+        default="PS2",
+    )
+
+    mdl_type: EnumProperty(
+        name="Model Type",
+        description="Whether this MDL is a ped/actor or a prop",
+        items=(
+            ("SIM", "SimpleModel", "Simple / prop model without bones"),
+            ("PED", "PedModel / Actor", "Pedestrian / actor model with bones"),
+            ("CUT", "CutsceneModel / Actor", "Cutscene / actor model with bones"),
+            ("VEH", "VehicleModel", "Vehicle model"),
+        ),
+        default="SIM",
+    )
+
+    create_armature: BoolProperty(
+        name="Create Armature (if present)",
+        description="If enabled and the MDL has frame data, create an Armature object and parent meshes to it",
         default=True,
-        description="Put imported objects into a new collection"
+    )
+
+    link_to_scene: BoolProperty(
+        name="Link Collection To Scene",
+        description="Link the created collection to the active scene",
+        default=True,
+    )
+
+    collection_name: StringProperty(
+        name="Collection Name",
+        description="Collection to place imported objects in (blank = file name)",
+        default="",
+        maxlen=1024,
     )
 
     def execute(self, context):
-        ok = import_mh2(self.filepath, context,
-                        collection_name=None if self.group_into_collection else None)
-        return {'FINISHED'} if ok else {'CANCELLED'}
+        filepath = self.filepath
+        collection_name = self.collection_name
 
-#######################################################
-class IMPORT_OT_CW_mdl(Operator, ImportHelper):
-    bl_idname = "import_scene.cw_mdl"
-    bl_label = "Import CW MDL (.mdl)"
-    filename_ext = ".mdl"
-    filter_glob: StringProperty(default="*.mdl", options={'HIDDEN'})
-
-    def execute(self, context):
         try:
-            with open(self.filepath, "rb") as f:
-                b = f.read()
-
-            if len(b) < 48:
-                raise RuntimeError("MDL too small")
-
-            numMaterials = struct.unpack_from('<b', b, 5)[0]
-            numVertices  = struct.unpack_from('<h', b, 6)[0]
-            translationFactor     = struct.unpack_from('<f', b, 40)[0]
-            scaleFactor  = struct.unpack_from('<f', b, 44)[0]
-            stride = 16
-            vbase = 48
-
-            basename = os.path.basename(self.filepath)
-            stem, _  = os.path.splitext(basename)
-            coll_name = f"mdl{basename}"
-            coll = bpy.data.collections.get(coll_name)
-            if not coll:
-                coll = bpy.data.collections.new(coll_name)
-                if coll.name not in {c.name for c in bpy.context.scene.collection.children}:
-                    bpy.context.scene.collection.children.link(coll)
-
-            mat_bank = RC.MaterialBank(os.path.dirname(self.filepath), None)
-
-            all_verts, all_uvs = [], []
-            for vi in range(numVertices):
-                off = vbase + vi*stride
-                x_raw = struct.unpack_from('<h', b, off+0)[0]
-                y_raw = struct.unpack_from('<h', b, off+2)[0]
-                z_raw = struct.unpack_from('<h', b, off+4)[0]
-                u_raw = struct.unpack_from('<h', b, off+12)[0]
-                v_raw = struct.unpack_from('<h', b, off+14)[0]
-                all_verts.append((x_raw/scaleFactor, y_raw/scaleFactor, z_raw/scaleFactor))
-                all_uvs.append((u_raw/2048.0, 1.0 - (v_raw/2048.0)))
-
-            verts, uvs, faces, f_mats = [], [], [], []
-            vert_offset = 0
-            mtab = vbase + numVertices*stride
-
-            for mi in range(numMaterials):
-                m_off        = mtab + mi*12
-                tex_id       = struct.unpack_from('<H', b, m_off+0)[0]
-                vertex_count = struct.unpack_from('<H', b, m_off+2)[0]
-
-                base = len(verts)
-                for i in range(vertex_count):
-                    idx = vert_offset + i
-                    verts.append(all_verts[idx]); uvs.append(all_uvs[idx])
-
-                local = RC.tri_strip_to_tris(vertex_count)
-                mslot = mat_bank.get_slot(tex_id)
-                for (a,b,c) in local:
-                    faces.append((base+a, base+b, base+c)); f_mats.append(mslot)
-
-                vert_offset += vertex_count
-
-            name = f"CW_MDL_{stem}"
-            mesh = bpy.data.meshes.new(name)
-            mesh.from_pydata(verts, [], faces)
-            mesh.update()
-
-            uv_layer = mesh.uv_layers.new(name="UVMap")
-            for pi, poly in enumerate(mesh.polygons):
-                poly.material_index = f_mats[pi]
-                for li in poly.loop_indices:
-                    v_idx = mesh.loops[li].vertex_index
-                    uv_layer.data[li].uv = uvs[v_idx]
-
-            mat_bank.append_all_to_mesh(mesh)
-            obj = bpy.data.objects.new(mesh.name, mesh)
-            coll.objects.link(obj)
-
-            self.report({'INFO'}, "MDL import finished")
-            return {'FINISHED'}
-        except Exception as e:
-            self.report({'ERROR'}, str(e))
-            return {'CANCELLED'}
-#######################################################
-class EXPORT_OT_CW_mdl(Operator, ExportHelper):
-    bl_idname = "export_scene.cw_mdl"
-    bl_label = "Export CW MDL (.mdl)"
-    filename_ext = ".mdl"
-    filter_glob: StringProperty(default="*.mdl", options={'HIDDEN'})
-
-    def execute(self, context):
-        try:
-            obj = context.active_object
-            if not obj or obj.type != 'MESH':
-                raise RuntimeError("select a mesh object")
-            verts, uvs, parts, sf, uvo = WC.extract_mesh_to_mdl_payload(obj)
-            blob = WC.write_mdl_bytes(
-                vertices_worldspace=verts,
-                uvs=uvs,
-                parts=parts,
-                scaleFactor=sf,
-                translationFactor=uvo,
-                base_transform_pos=(0,0,0)
+            created_objects = mdl_importer.import_stories_mdl(
+                context=context,
+                filepath=filepath,
+                platform=self.platform,
+                mdl_type=self.mdl_type,
+                collection_name=collection_name,
+                create_armature=self.create_armature,
+                link_to_scene=self.link_to_scene,
             )
-            WC.write_file(self.filepath, blob)
-            self.report({'INFO'}, f"Exported MDL: {self.filepath}")
-            return {'FINISHED'}
-        except Exception as e:
-            self.report({'ERROR'}, str(e))
-            return {'CANCELLED'}
-        
 
-#######################################################
-def register():
+            if created_objects:
+                for obj in created_objects:
+                    obj.select_set(True)
+                if created_objects[0] is not None:
+                    context.view_layer.objects.active = created_objects[0]
 
-    bpy.utils.register_class(IMPORT_OT_CW_mdl)
-    bpy.utils.register_class(EXPORT_OT_CW_mdl)
-    bpy.utils.register_class(IMPORT_OT_MH2_mdl)
+            self.report({"INFO"}, f"Imported Stories MDL: {filepath}")
+            return {"FINISHED"}
 
-def unregister():
-    bpy.utils.unregister_class(IMPORT_OT_CW_mdl)
-    bpy.utils.unregister_class(EXPORT_OT_CW_mdl)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Failed to import Stories MDL: {exc}")
+            return {"CANCELLED"}
 
-    bpy.utils.unregister_class(IMPORT_OT_MH2_mdl)
 
-if __name__ == "__main__":
-    register()
+class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
+    bl_idname = "export_scene.bleeds_stories_mdl"
+    bl_label = "Export R* Leeds Stories MDL"
+    bl_options = {"UNDO"}
+
+    filename_ext = ".mdl"
+    filter_glob: StringProperty(
+        default="*.mdl",
+        options={"HIDDEN"},
+        maxlen=255,
+    )
+
+    mdl_type: EnumProperty(
+        name="Type",
+        description="Export type (PROP uses Atomic root; PED uses Clump+Atomic)",
+        items=(
+            ("SIM", "SIM", "Prop / SimpleModel"),
+            ("PED", "PED", "Ped / Clump"),
+        ),
+        default="SIM",
+    )
+
+    max_batch_verts: IntProperty(
+        name="Max Batch Verts",
+        description=(
+            "Maximum vertices per VIF segment.  When set to 0, the exporter "
+            "automatically chooses an appropriate size based on the mesh."
+        ),
+        default=0,
+        min=0,
+        max=255,
+        options={"HIDDEN"},
+    )
+
+    rounding_mode: EnumProperty(
+        name="Rounding",
+        description="How to quantize float -> int16 for position encoding.",
+        items=(
+            ("ROUND", "Round", "round()"),
+            ("TRUNC", "Trunc", "int()"),
+            ("FLOOR", "Floor", "math.floor()"),
+            ("CEIL", "Ceil", "math.ceil()"),
+        ),
+        default="ROUND",
+    )
+
+    use_normals: BoolProperty(
+        name="Export Normals",
+        description="Include the normals stream in the PS2 DMA payload if exists",
+        default=False,
+    )
+
+    def execute(self, context):
+        from ..ops import mdl_exporter
+
+        try:
+            mdl_exporter.export_stories_mdl_ps2(
+                context=context,
+                filepath=self.filepath,
+                mdl_type=self.mdl_type,
+                max_batch_verts=self.max_batch_verts,
+                rounding_mode=self.rounding_mode,
+                use_normals=self.use_normals,
+            )
+        except Exception as exc:
+            self.report({"ERROR"}, f"Export Stories MDL failed: {exc}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Exported Stories MDL: {self.filepath}")
+        return {"FINISHED"}
+

@@ -15,22 +15,24 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import bpy
 import struct
-import zlib
-import datetime
-import os
-import sys
-import traceback
+import math
 
-from pathlib import Path
-from bpy_extras.io_utils import ImportHelper
-from bpy.props import StringProperty
-from bpy.types import Operator
+from dataclasses import dataclass
+
+import numpy as np
+
+import bpy
+from mathutils import Matrix
+
+from pathlib import Path 
+
+import zlib
+from typing import List, Tuple, Dict, Optional
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .IMG & .LVZ - file formats for Stories/MH2 worlds            #
-#   TODO: .BSP worlds maybe?                                                        #
+#   This script is for .wrld's - the file format for GTA Stories world sectors      #
+#   TODO: .BSP worlds maybe?                                                        # 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/IMG_archive
@@ -50,658 +52,838 @@ from bpy.types import Operator
 
 
 #######################################################
-# Little helpers
-#######################################################
-def read_u32_le(buf, off):
-    return struct.unpack_from("<I", buf, off)[0]
-
-def read_u16_le(buf, off):
-    return struct.unpack_from("<H", buf, off)[0]
-
-def read_fourcc(buf, off):
-    return buf[off:off+4].decode("ascii", errors="ignore")
-
-def looks_like_zlib(buf):
-    return len(buf) >= 2 and buf[0] == 0x78 and buf[1] in (0x01, 0x9C, 0xDA)
-
-def ensure_wrld_bytes(raw_bytes):
-    if len(raw_bytes) >= 4 and raw_bytes[:4] == b"DLRW":
-        return raw_bytes
-    if looks_like_zlib(raw_bytes):
-        try:
-            data = zlib.decompress(raw_bytes)
-            if len(data) >= 4 and data[:4] == b"DLRW":
-                return data
-        except zlib.error:
-            pass
-    return raw_bytes
-
-def hx32(v):
-    return f"0x{v:08X}"
-
-def hx16(v):
-    return f"0x{v:04X}"
-
-#######################################################
-# Debug logger 
-#######################################################
-class DebugLog:
-    """
-    Simple log sink:
-      - Collects lines in memory
-      - Prints to console immediately
-      - Writes the entire session to a file at the end
-    The file name is "<lvz_stem>_import_log" (no extension).
-    """
-    def __init__(self, requested_path: Path):
-        self.lines = []
-        self.log_path = self._resolve_log_path(requested_path)
-        now = datetime.datetime.now()
-        self.log(f"===== LVZ+IMG Import Session =====")
-        self.log(f"Time: {now.isoformat(sep=' ', timespec='seconds')}")
-        self.log(f"Log file: {self.log_path}")
-        self.log("")
-
-    def _resolve_log_path(self, requested_path: Path) -> Path:
-        """
-        Try to place the log next to the LVZ as "<stem>_import_log".
-        If not writable, fall back to Blender temp dir, then home dir.
-        """
-        candidate = requested_path
-        try:
-            with open(candidate, "w", encoding="utf-8") as _:
-                pass
-            return candidate
-        except Exception:
-            pass
-
-        tempdir = getattr(bpy.app, "tempdir", None) or ""
-        if tempdir:
-            try:
-                p = Path(tempdir) / requested_path.name
-                with open(p, "w", encoding="utf-8") as _:
-                    pass
-                return p
-            except Exception:
-                pass
-
-        try:
-            home = Path.home()
-            p = home / requested_path.name
-            with open(p, "w", encoding="utf-8") as _:
-                pass
-            return p
-        except Exception:
-            return Path(os.getcwd()) / requested_path.name
-
-    def log(self, s: str):
-        self.lines.append(s)
-        print(s)
-
-    def __call__(self, s: str):
-        self.log(s)
-
-    def write_out(self):
-        try:
-            with open(self.log_path, "w", encoding="utf-8") as f:
-                for line in self.lines:
-                    f.write(line)
-                    if not line.endswith("\n"):
-                        f.write("\n")
-        except Exception as e:
-            print(f"[WARN] Failed to write log to {self.log_path}: {e}")
-
-#######################################################
-# WRLD master header (top of LVZ)
-#######################################################
-def parse_wrld_header(buf):
-    if len(buf) < 0x24:
-        raise ValueError("buffer too small for WRLD header")
-    return {
-        "fourcc":             read_fourcc(buf, 0x00),
-        "shrink":             read_u32_le(buf, 0x04),
-        "file_size":          read_u32_le(buf, 0x08),
-        "global_addr_0":      read_u32_le(buf, 0x0C),
-        "global_addr_1":      read_u32_le(buf, 0x10),
-        "global_count":       read_u32_le(buf, 0x14),
-        "slave_continuation": read_u32_le(buf, 0x18),
-        "reserved":           read_u32_le(buf, 0x1C),
-        "resource_id_table":  read_u32_le(buf, 0x20),
-    }
-
-#######################################################
-# Directory + technical mirror
-#######################################################
-def parse_group_directory_and_tech(buf, start_off=0x24, safety_pairs=65535):
-    off = start_off
-    dir_begin = off
-    entries = []
-
-    for _ in range(safety_pairs):
-        if off + 4 > len(buf):
-            raise ValueError("unexpected end while peeking directory")
-        peek = read_u32_le(buf, off)
-
-        if peek == 0:
-            off += 4
-            break
-
-        if (peek & 0xFFFF0000) == 0:
-            break
-
-        if off + 8 > len(buf):
-            raise ValueError("truncated pair in directory")
-        addr = peek
-        x_shift = read_u32_le(buf, off + 4)
-        entries.append((addr, x_shift))
-        off += 8
-
-    if off + 4 > len(buf):
-        raise ValueError("missing u16 group_count + u16 reserved")
-    count_off = off
-    group_count = read_u16_le(buf, off)
-    reserved = read_u16_le(buf, off + 2)
-    off += 4
-
-    dir_plus_count_len = off - dir_begin
-    tech_len = dir_plus_count_len
-    pad_start = off
-    pad_end = min(off + tech_len, len(buf))
-    padding_bytes = buf[pad_start:pad_end]
-    off = pad_end
-
-    return {
-        "entries": entries,
-        "count_u16": group_count,
-        "reserved_u16": reserved,
-        "count_off": count_off,
-        "dir_bytes": (count_off - dir_begin),
-        "dir_plus_count_bytes": dir_plus_count_len,
-        "pad_start": pad_start,
-        "pad_bytes": padding_bytes,
-        "next_offset": off,
-    }
-
-#######################################################
-# Count 32-byte Slave WRLD headers per group (LVZ-only)
-#######################################################
-def count_headers_in_groups(lvz_bytes, group_entries):
-    groups = sorted(group_entries, key=lambda t: t[0])
-    addrs = [g[0] for g in groups]
-
-    results = []
-    for i, (addr, xshift) in enumerate(groups):
-        start = max(0, min(addr, len(lvz_bytes)))
-        if i + 1 < len(groups):
-            end_limit = max(start, min(addrs[i+1], len(lvz_bytes)))
-            last = False
-        else:
-            end_limit = len(lvz_bytes)
-            last = True
-
-        ptr = start
-        members = 0
-
-        if not last:
-            while ptr + 32 <= end_limit:
-                if lvz_bytes[ptr:ptr+4] != b"DLRW":
-                    break
-                members += 1
-                ptr += 32
-            window_end = end_limit
-        else:
-            while ptr + 32 <= len(lvz_bytes) and lvz_bytes[ptr:ptr+4] == b"DLRW":
-                members += 1
-                ptr += 32
-            window_end = ptr
-
-        group_bytes = members * 32
-        trailing = max(0, window_end - start - group_bytes)
-        results.append({
-            "addr": addr,
-            "xshift": xshift,
-            "members": members,
-            "total_bytes": group_bytes,
-            "window_start": start,
-            "window_end": window_end,
-            "trailing_bytes": trailing,
-        })
-    return results
-
-#######################################################
-# Resource Address Table 
-#######################################################
-def parse_resource_address_table(buf, start_off, group_count_u16, max_pairs_cap=10_000_000):
-    expected_pairs = int(group_count_u16)
-    expected_pairs = min(expected_pairs, max_pairs_cap)
-
-    pairs = []
-    off = start_off
-    for _ in range(expected_pairs):
-        if off + 8 > len(buf):
-            break
-        rid = read_u32_le(buf, off)
-        filler = read_u32_le(buf, off + 4)
-        pairs.append((rid, filler))
-        off += 8
-
-    nonzero = [rid for (rid, filler) in pairs if rid != 0]
-    bytes_consumed = len(pairs) * 8
-    return {
-        "pairs": pairs,
-        "nonzero_ids": nonzero,
-        "bytes_consumed": bytes_consumed,
-        "start_off": start_off,
-        "expected_pairs": expected_pairs,
-        "actual_pairs": len(pairs),
-        "end_off": start_off + bytes_consumed
-    }
-
-#######################################################
-# LVZ: Read a single 32-byte Slave WRLD header
-#######################################################
-def parse_slave_wrld_header(buf, off):
-    if off + 32 > len(buf):
-        raise ValueError(f"not enough bytes to read 32-byte WRLD header at {hx32(off)}")
-
-    fourcc = read_fourcc(buf, off + 0x00)
-    wrld_type = read_u32_le(buf, off + 0x04)
-    size      = read_u32_le(buf, off + 0x08)
-    glob0     = read_u32_le(buf, off + 0x0C)
-    glob1     = read_u32_le(buf, off + 0x10)
-    globcnt   = read_u32_le(buf, off + 0x14)
-    cont_img  = read_u32_le(buf, off + 0x18)
-    reserved  = read_u32_le(buf, off + 0x1C)
-
-    return {
-        "offset": off,
-        "fourcc": fourcc,
-        "type": wrld_type,
-        "size": size,
-        "global_addr_0": glob0,
-        "global_addr_1": glob1,
-        "global_count": globcnt,
-        "slave_continuation": cont_img,
-        "reserved": reserved
-    }
-
-def print_single_slave_header(h, log):
-    log(f"    @ {hx32(h['offset'])}")
-    log(f"      0x00 fourCC                 : {h['fourcc']!r}")
-    log(f"      0x04 type                   : {hx32(h['type'])} ({'Master' if h['type']==1 else 'Slave' if h['type']==0 else 'Unknown'})")
-    log(f"      0x08 size                   : {hx32(h['size'])} ({h['size']})")
-    log(f"      0x0C global section addr    : {hx32(h['global_addr_0'])}")
-    log(f"      0x10 global section addr    : {hx32(h['global_addr_1'])} (repeat)")
-    log(f"      0x14 global offsets count   : {hx32(h['global_count'])} ({h['global_count']})")
-    log(f"      0x18 slave continuation IMG : {hx32(h['slave_continuation'])}")
-    log(f"      0x1C reserved               : {hx32(h['reserved'])}")
-
-#######################################################
-# Pretty printing blocks and tables (mirrored to log)
-#######################################################
-def print_block_as_dwords(block_name, start_off, data_bytes, log, start_index=0):
-    n = len(data_bytes)
-    log(f"\n{block_name}")
-    log(f"  bytes: {n} (start @ {hx32(start_off)})")
-    if n == 0:
-        log("  (empty)")
-        return
-
-    word_count = n // 4
-    if word_count:
-        log("  index |        dword")
-        for i in range(word_count):
-            s = i * 4
-            word = int.from_bytes(data_bytes[s:s+4], "little", signed=False)
-            log(f"  {start_index + i:5d} | {hx32(word)}")
-
-    tail = n % 4
-    if tail:
-        tb = data_bytes[-tail:]
-        idx = start_index + word_count
-        hex_tail = " ".join(f"{x:02X}" for x in tb)
-        log(f"  {idx:5d} | tail bytes ({tail}): {hex_tail}")
-
-def print_groups_table(groups_info, log):
-    log("\nSlave WRLD groups (walked BEFORE resource ID table)")
-    log(f"  entries: {len(groups_info)}\n")
-    log("  idx |  LVZ group addr | X shift     | members | total bytes | trailing")
-    for i, g in enumerate(groups_info):
-        log(f"  {i:3d} | {hx32(g['addr'])}      | {hx32(g['xshift'])} | {g['members']:7d} | {g['total_bytes']:11d} | {g['trailing_bytes']:8d}")
-
-def print_resource_addr_table(rtab, log):
-    log("\nResource Address Table (parsed AFTER groups)")
-    log(f"  start @ {hx32(rtab['start_off'])}")
-    log(f"  expected pairs (count*2): {rtab['expected_pairs']}")
-    log(f"  actual pairs read       : {rtab['actual_pairs']}")
-    log(f"  bytes consumed          : {rtab['bytes_consumed']}")
-    log(f"  end @ {hx32(rtab['end_off'])}")
-    nz = len(rtab['nonzero_ids'])
-    log(f"  non-zero resource IDs   : {nz}")
-
-    if rtab['actual_pairs']:
-        log("\n  idx |     res_id | filler (should be 0)")
-        for i, (rid, fil) in enumerate(rtab["pairs"]):
-            log(f"  {i:4d} | {hx32(rid)} | {hx32(fil)}")
-
-#######################################################
-# Walk and print each group's Slave WRLD 32-byte headers (LVZ)
-#######################################################
-def print_group_slave_headers(lvz_bytes, groups_info, log):
-    log("\nPer-group Slave WRLD 32-byte headers (LVZ-only)")
-    if not groups_info:
-        log("  (no groups)")
-        return
-
-    for gi, g in enumerate(groups_info):
-        addr = g["addr"]
-        members = g["members"]
-        log(f"\nGroup {gi} @ {hx32(addr)}  (members: {members})")
-        if members == 0:
-            log("  (no headers detected in this group window)")
-            continue
-
-        ptr = addr
-        for mi in range(members):
-            if ptr + 32 > len(lvz_bytes):
-                log(f"  member {mi}: stop (would overrun EOF at {hx32(ptr)})")
-                break
-            if lvz_bytes[ptr:ptr+4] != b"DLRW":
-                log(f"  member {mi}: stop (fourCC not 'DLRW' at {hx32(ptr)})")
-                break
-
-            try:
-                h = parse_slave_wrld_header(lvz_bytes, ptr)
-            except Exception as e:
-                log(f"  member {mi}: parse error at {hx32(ptr)}: {e}")
-                break
-
-            log(f"  member {mi}:")
-            print_single_slave_header(h, log)
-            ptr += 32
-
-#######################################################
-# Collect all
-#######################################################
-def collect_slave_continuations(lvz_bytes, groups_info):
-    continuations = []  # list of dicts
-    for gi, g in enumerate(groups_info):
-        addr = g["addr"]
-        members = g["members"]
-        ptr = addr
-        for mi in range(members):
-            if ptr + 32 > len(lvz_bytes):
-                break
-            if lvz_bytes[ptr:ptr+4] != b"DLRW":
-                break
-            h = parse_slave_wrld_header(lvz_bytes, ptr)
-            cont = h["slave_continuation"]
-            continuations.append({
-                "group_index": gi,
-                "member_index": mi,
-                "lvz_header_offset": ptr,
-                "img_cont_offset": cont
-            })
-            ptr += 32
-    return continuations
-
-#######################################################
-# Parse IMG Slave WRLD header 
-#######################################################
-def parse_img_slave_header(img_bytes, off):
-    """
-    Base layout (48 bytes):
-      0x00 u32  res_id_table_addr
-      0x04 u16  res_count
-      0x06 u16  unk_06 (often 0x12)
-      0x08 [8]*u32 ipl_addrs
-      0x28 u16  triggered_count
-      0x2A u16  flag_2A (often 0x12)
-    Optional:
-      0x4C u32  triggered_table_addr (print when present)
-    """
-    need = off + 0x30  # 48 bytes minimum
-    if need > len(img_bytes):
-        raise ValueError(f"IMG EOF before 48-byte Slave WRLD header at {hx32(off)}")
-
-    res_id_table = read_u32_le(img_bytes, off + 0x00)
-    res_count    = read_u16_le(img_bytes, off + 0x04)
-    unk_06       = read_u16_le(img_bytes, off + 0x06)
-    ipl_addrs = []
-    ipl_base = off + 0x08
-    for i in range(8):
-        ipl_addrs.append(read_u32_le(img_bytes, ipl_base + 4*i))
-    triggered_count = read_u16_le(img_bytes, off + 0x28)
-    flag_2A         = read_u16_le(img_bytes, off + 0x2A)
-
-    # 0x4C field 
-    triggered_table_addr = None
-    if off + 0x50 <= len(img_bytes):
-        triggered_table_addr = read_u32_le(img_bytes, off + 0x4C)
-
-    return {
-        "offset": off,
-        "res_id_table_addr": res_id_table,
-        "res_count": res_count,
-        "unk_06": unk_06,
-        "ipl_addrs": ipl_addrs,
-        "triggered_count": triggered_count,
-        "flag_2A": flag_2A,
-        "triggered_table_addr": triggered_table_addr
-    }
-
-def print_img_slave_header(h, log):
-    log(f"    @ {hx32(h['offset'])}")
-    log(f"      0x00 res_id_table_addr     : {hx32(h['res_id_table_addr'])}")
-    log(f"      0x04 res_count             : {hx16(h['res_count'])} ({h['res_count']})")
-    log(f"      0x06 unk_06                : {hx16(h['unk_06'])}")
-    for i, a in enumerate(h["ipl_addrs"]):
-        log(f"      0x08+{i*4:02X} IPL[{i}] addr        : {hx32(a)}")
-    log(f"      0x28 triggered_count       : {hx16(h['triggered_count'])} ({h['triggered_count']})")
-    log(f"      0x2A flag_2A               : {hx16(h['flag_2A'])}")
-    if h["triggered_table_addr"] is not None:
-        log(f"      0x4C triggered_table_addr  : {hx32(h['triggered_table_addr'])}")
-    else:
-        log(f"      0x4C triggered_table_addr  : (not present in 48-byte header)")
-
-#######################################################
-# Drive the IMG crawl 
-#######################################################
-def crawl_img_slave_headers(img_path: Path, lvz_bytes: bytes, groups_info, log):
-    log("\n===== IMG Slave WRLD headers (by LVZ group/member) =====")
-    if not img_path.exists():
-        log(f"[WARN] IMG file not found: {img_path}")
-        return
+def dbg(msg: str) -> None:
 
     try:
-        img_bytes = img_path.read_bytes()
-        log(f"Read IMG bytes: {len(img_bytes)}")
-    except Exception as e:
-        log(f"[ERROR] failed to read IMG: {e}")
-        return
+        print(msg)
+    except Exception:
+        pass
 
-    conts = collect_slave_continuations(lvz_bytes, groups_info)
-    if not conts:
-        log("No Slave WRLD continuations collected from LVZ.")
-        return
 
-    last_group = -1
-    for entry in conts:
-        gi = entry["group_index"]
-        mi = entry["member_index"]
-        img_off = entry["img_cont_offset"]
+def safe_decompress(data: bytes) -> bytes:
 
-        if gi != last_group:
-            log(f"\nGroup {gi} (from LVZ) — IMG continuations:")
-            last_group = gi
-
-        if img_off == 0:
-            log(f"  member {mi}: IMG continuation is 0x00000000 (none)")
-            continue
-        if img_off >= len(img_bytes):
-            log(f"  member {mi}: IMG continuation {hx32(img_off)} beyond IMG EOF ({len(img_bytes)} bytes)")
-            continue
-
-        log(f"  member {mi}: IMG header @ {hx32(img_off)}")
+    if not data:
+        return data
+    if len(data) >= 2 and data[0] == 0x78 and data[1] in (0x01, 0x9C, 0xDA):
         try:
-            h = parse_img_slave_header(img_bytes, img_off)
-        except Exception as e:
-            log(f"    parse error at {hx32(img_off)}: {e}")
+            return zlib.decompress(data)
+        except Exception:
+            pass
+    for wbits in (16 + zlib.MAX_WBITS, -zlib.MAX_WBITS):
+        try:
+            return zlib.decompress(data, wbits)
+        except Exception:
             continue
+    return data
 
-        print_img_slave_header(h, log)
+@dataclass
+class MDLMaterial:
+    texture_id: int
+    tri_strip_size: int
+    backface_cull: bool
+    u_scale: float
+    v_scale: float
+    flags2: int
+    bbox6_i16: Tuple[int, int, int, int, int, int]
 
-#######################################################
-def print_wrld_report(lvz_path_str, img_path_str, hdr, dir_info, groups_info, rtab, log):
-    log(f"\n===== Leeds LVZ/IMG Inspector =====")
-    log(f"Selected LVZ/BIN: {lvz_path_str}")
-    log(f"Associated IMG:   {img_path_str}\n")
+@dataclass
+class MDLMaterialList:
+    count: int
+    size_bytes: int
+    materials: List[MDLMaterial]
+    bytes_read: int
+    aa_tail: bytes
+    next_off: int
 
-    log("WRLD Master Header (global)")
-    log(f"  0x00 fourCC                : {hdr['fourcc']!r}")
-    log(f"  0x04 shrink                : {hx32(hdr['shrink'])} ({hdr['shrink']})")
-    log(f"  0x08 file size             : {hx32(hdr['file_size'])} ({hdr['file_size']})")
-    log(f"  0x0C global section addr   : {hx32(hdr['global_addr_0'])}")
-    log(f"  0x10 global section addr   : {hx32(hdr['global_addr_1'])} (repeat)")
-    log(f"  0x14 global offsets count  : {hx32(hdr['global_count'])} ({hdr['global_count']})")
-    log(f"  0x18 slave continuation IMG: {hx32(hdr['slave_continuation'])}")
-    log(f"  0x1C reserved              : {hx32(hdr['reserved'])}")
-    log("")
-    log("Resource Identity Table pointer")
-    log(f"  0x20 resource id table     : {hx32(hdr['resource_id_table'])}")
+@dataclass
+class TriStrip:
+    count: int
+    verts: List[Tuple[float, float, float]]
+    uvs: List[Tuple[float, float]]
+    cols_raw_u16: List[int]
+    cols_rgba4444: List[Tuple[int, int, int, int]]
+    material_res_index: int = -1
+    u_scale: float = 1.0
+    v_scale: float = 1.0
 
-    log("\nSlave WRLD groups directory (LVZ-local addresses)")
-    log(f"  directory start @ {hx32(0x24)}")
-    log(f"  entries: {len(dir_info['entries'])}")
-    if dir_info['entries']:
-        log("\n  index | LVZ offset | X shift")
-        for i, (addr, xshift) in enumerate(dir_info['entries']):
-            log(f"  {i:5d} | {hx32(addr)} | {hx32(xshift)}")
+@dataclass
+class MDLStripGroup:
+    strips: List[TriStrip]
+    bytes_read: int
+    start_off: int
+    end_off: int
 
-    log("\nGroup count (u16) and reserved")
-    log(f"  count    @ {hx32(dir_info['count_off'])} : {dir_info['count_u16']} ({hx16(dir_info['count_u16'])})")
-    log(f"  reserved @ {hx32(dir_info['count_off']+2)} : {dir_info['reserved_u16']} ({hx16(dir_info['reserved_u16'])})")
+class MDLParser:
 
-    log(f"\nDirectory/technical sizing")
-    log(f"  directory bytes            : {dir_info['dir_bytes']}")
-    log(f"  dir + count bytes          : {dir_info['dir_plus_count_bytes']}")
-    log(f"  technical block bytes      : {len(dir_info['pad_bytes'])} (mirrored)")
+    # VIF
+    UNPACK = 0x6C018000
+    STMASK = 0x20000000
+    STROW  = 0x30000000
+    MSCAL  = 0x14000006
 
-    print_block_as_dwords(
-        "Technical mirror block (same length as directory+count)",
-        dir_info['pad_start'],
-        dir_info['pad_bytes'],
-        log,
-        start_index=len(dir_info['entries'])
+    def __init__(self, mdl_bytes: bytes, stem: str, use_swizzle: bool = True, debug_print: bool = True):
+        self.decomp = safe_decompress(mdl_bytes)
+        self.stem = stem
+        self.use_swizzle = use_swizzle
+        self.debug_print = debug_print
+        self.material_by_res_index: Dict[int, bpy.types.Material] = {}
+
+    def read_vec3_i16_norm(self, buf: bytes, off: int) -> Tuple[float, float, float]:
+        x = read_i16(buf, off + 0)
+        y = read_i16(buf, off + 2)
+        z = read_i16(buf, off + 4)
+        return (x / 32767.5, y / 32767.5, z / 32767.5)
+
+    def read_uv_u8_div128(self, buf: bytes, off: int) -> Tuple[float, float]:
+        u = buf[off + 0]
+        v = buf[off + 1]
+        return (u / 128.0, v / 128.0)
+
+    def decode_rgba4444(self, v16: int) -> Tuple[int, int, int, int]:
+        r = ((v16 >> 12) & 0xF) * 17
+        g = ((v16 >> 8) & 0xF) * 17
+        b = ((v16 >> 4) & 0xF) * 17
+        a = (v16 & 0xF) * 17
+        return (r, g, b, a)
+
+    def find_unpack_near(self, buf: bytes, off: int, window: int = 8) -> int:
+        n = len(buf)
+        start = max(0, off - window)
+        end = min(n, off + window + 4)
+        for p in range(start, end):
+            if (p & 3) == 0 and p + 4 <= n and read_u32(buf, p) == self.UNPACK:
+                return p
+        raise ValueError(f"UNPACK header not found near 0x{off:08X}")
+
+    def scan_aa_tail(self, off: int) -> Tuple[bytes, int]:
+        lvz = self.decomp
+        n = len(lvz)
+        i = off
+        while i < n and lvz[i] == 0xAA:
+            i += 1
+        return (lvz[off:i], i)
+
+    def parse_mdl_material_list(self, base: int) -> MDLMaterialList:
+        lvz = self.decomp
+        n = len(lvz)
+        if base + 4 > n:
+            raise ValueError("MDL material list header out of range.")
+        count = read_u16(lvz, base + 0)
+        size_bytes = read_u16(lvz, base + 2)
+        off = base + 4
+        materials: List[MDLMaterial] = []
+        limit = min(n, base + 4 + size_bytes)
+        for mi in range(count):
+            need = off + 22
+            if need > n:
+                break
+            if off >= limit:
+                break
+            texture_id = read_u16(lvz, off + 0)
+            tri_raw    = read_u16(lvz, off + 2)
+            u_half     = read_u16(lvz, off + 4)
+            v_half     = read_u16(lvz, off + 6)
+            flags2     = read_u16(lvz, off + 8)
+            b0 = read_i16(lvz, off + 10)
+            b1 = read_i16(lvz, off + 12)
+            b2 = read_i16(lvz, off + 14)
+            b3 = read_i16(lvz, off + 16)
+            b4 = read_i16(lvz, off + 18)
+            b5 = read_i16(lvz, off + 20)
+            tri_strip_size = (tri_raw & 0x7FFF)
+            backface_cull  = (tri_raw & 0x8000) != 0
+            u_scale = half_to_float(u_half)
+            v_scale = half_to_float(v_half)
+            materials.append(MDLMaterial(
+                texture_id=texture_id,
+                tri_strip_size=tri_strip_size,
+                backface_cull=backface_cull,
+                u_scale=u_scale,
+                v_scale=v_scale,
+                flags2=flags2,
+                bbox6_i16=(b0, b1, b2, b3, b4, b5),
+            ))
+            off += 22
+
+        aa_tail, new_off = self.scan_aa_tail(off)
+        next_guess = (new_off & ~3)
+        return MDLMaterialList(
+            count=count,
+            size_bytes=size_bytes,
+            materials=materials,
+            bytes_read=off - base,
+            aa_tail=aa_tail,
+            next_off=next_guess,
+        )
+
+    def parse_one_batch(self, buf: bytes, pos: int) -> Tuple[TriStrip, int]:
+
+        n = len(buf)
+
+        pos = self.find_unpack_near(buf, (pos & ~3))
+        if pos + 20 > n:
+            raise ValueError("VIF batch header truncated.")
+
+        nvert_all = read_u32(buf, pos + 16) & 0x7FFF
+        if nvert_all == 0:
+            raise ValueError("Zero‑length VIF batch.")
+        w = pos + 20
+        if read_u32(buf, w) != self.STMASK:
+            raise ValueError(f"Expected STMASK before positions at 0x{w:08X}")
+        w += 8
+        if read_u32(buf, w) != self.STROW:
+            raise ValueError(f"Expected STROW before positions at 0x{w:08X}")
+        w += 20
+        header_pos = read_u32(buf, w)
+
+        if (header_pos & 0xFF004000) != 0x79000000:
+            raise ValueError(f"Unexpected positions header 0x{header_pos:08X} at 0x{w:08X}")
+        w += 4
+        need_bytes_pos = nvert_all * 6
+        if w + need_bytes_pos > n:
+            raise ValueError("Position payload truncated.")
+        verts: List[Tuple[float, float, float]] = []
+
+        for i in range(nvert_all):
+            off = w + i * 6
+            verts.append(self.read_vec3_i16_norm(buf, off))
+        w += need_bytes_pos
+        w = (w + 3) & ~3
+        if read_u32(buf, w) != self.STMASK:
+            raise ValueError(f"Expected STMASK before texcoords at 0x{w:08X}")
+        w += 8
+        if read_u32(buf, w) != self.STROW:
+            raise ValueError(f"Expected STROW before texcoords at 0x{w:08X}")
+        w += 20
+        h_uv = read_u32(buf, w)
+        if (h_uv & 0xFF004000) != 0x76004000:
+            raise ValueError(f"Unexpected UV header 0x{h_uv:08X} at 0x{w:08X}")
+        w += 4
+        need_bytes_uv = nvert_all * 2
+        if w + need_bytes_uv > n:
+            raise ValueError("UV payload truncated.")
+        uvs: List[Tuple[float, float]] = []
+        for i in range(nvert_all):
+            off = w + i * 2
+            uvs.append(self.read_uv_u8_div128(buf, off))
+        w += need_bytes_uv
+        w = (w + 3) & ~3
+        h_col = read_u32(buf, w)
+        if (h_col & 0xFF004000) != 0x6F000000:
+            raise ValueError(f"Unexpected colour header 0x{h_col:08X} at 0x{w:08X}")
+        w += 4
+        need_bytes_col = nvert_all * 2
+        if w + need_bytes_col > n:
+            raise ValueError("Colour payload truncated.")
+        cols_raw_u16: List[int] = []
+        cols_rgba4444: List[Tuple[int, int, int, int]] = []
+        for i in range(nvert_all):
+            c16 = read_u16(buf, w + i * 2)
+            cols_raw_u16.append(c16)
+            cols_rgba4444.append(self.decode_rgba4444(c16))
+        w += need_bytes_col
+        w = (w + 3) & ~3
+        if read_u32(buf, w) != self.MSCAL:
+            if w + 4 <= n and read_u32(buf, w + 4) == self.MSCAL:
+                w += 4
+            else:
+                raise ValueError(f"MSCAL 0x14000006 missing around 0x{w:08X}")
+        w += 4
+        while w + 4 <= n and read_u32(buf, w) == 0:
+            w += 4
+        strip = TriStrip(
+            count=nvert_all,
+            verts=verts,
+            uvs=uvs,
+            cols_raw_u16=cols_raw_u16,
+            cols_rgba4444=cols_rgba4444,
+        )
+        return strip, w
+
+    def parse_mdl_stream_after_list(self, start_off: int, max_groups: int = 4096) -> Tuple[List[MDLStripGroup], int]:
+
+        buf = self.decomp
+        groups: List[MDLStripGroup] = []
+        n = len(buf)
+        try:
+            off = self.find_unpack_near(buf, start_off)
+        except Exception:
+            return groups, start_off
+        for _ in range(max_groups):
+            if off >= n:
+                break
+            try:
+                strip, next_off = self.parse_one_batch(buf, off)
+            except Exception:
+                break
+            groups.append(MDLStripGroup(strips=[strip], bytes_read=(next_off - off), start_off=off, end_off=next_off))
+            try:
+                off = self.find_unpack_near(buf, next_off)
+            except Exception:
+                off = next_off
+                break
+        return groups, off
+
+    def assign_materials_by_strip_bytes(self, mlist: MDLMaterialList, groups: List[MDLStripGroup]) -> None:
+
+        if not mlist.materials or not groups:
+            return
+        flat: List[Tuple[TriStrip, int, int]] = []
+        gstart = min(g.start_off for g in groups)
+        for g in groups:
+            for s in g.strips:
+                rel_start = g.start_off - gstart
+                rel_end = g.end_off - gstart
+                flat.append((s, rel_start, rel_end))
+        flat.sort(key=lambda item: item[1])
+        m_idx = 0
+        m = mlist.materials[m_idx]
+        m_window = m.tri_strip_size
+        acc_len = 0
+        for s, rel_start, rel_end in flat:
+            batch_len = rel_end - rel_start
+            if batch_len <= 0:
+                continue
+            while m_idx < len(mlist.materials) and acc_len >= m_window and m_window > 0:
+                m_idx += 1
+                if m_idx < len(mlist.materials):
+                    m = mlist.materials[m_idx]
+                    m_window = m.tri_strip_size
+                    acc_len = 0
+            if m_idx >= len(mlist.materials):
+                break
+            s.material_res_index = m.texture_id
+            s.u_scale = m.u_scale if m.u_scale != 0.0 else 1.0
+            s.v_scale = m.v_scale if m.v_scale != 0.0 else 1.0
+            if s.uvs:
+                s.uvs = [(u * s.u_scale, v * s.v_scale) for (u, v) in s.uvs]
+            acc_len += batch_len
+
+    def triangulate_strip_indices(self, local_count: int) -> List[Tuple[int, int, int]]:
+
+        tris: List[Tuple[int, int, int]] = []
+        for i in range(local_count - 2):
+            if i & 1:
+                tris.append((i + 1, i, i + 2))
+            else:
+                tris.append((i, i + 1, i + 2))
+        return tris
+
+    def build_mesh_from_groups(self, res_index: int, groups: List[MDLStripGroup]) -> Tuple[Optional[bpy.types.Object], List[Tuple[int, int, int]]]:
+
+        if not groups:
+            return None, []
+        vertices: List[Tuple[float, float, float]] = []
+        uvs_list: List[Tuple[float, float]] = []
+        faces: List[Tuple[int, int, int]] = []
+        face_ranges: List[Tuple[int, int, int]] = []
+        for g in groups:
+            for s in g.strips:
+                k = min(len(s.verts), len(s.uvs), s.count)
+                if k < 3:
+                    continue
+                base = len(vertices)
+                vertices.extend(s.verts[:k])
+                uvs_list.extend(s.uvs[:k])
+                tri_list = self.triangulate_strip_indices(k)
+                poly_start = len(faces)
+                for a, b, c in tri_list:
+                    faces.append((base + a, base + b, base + c))
+                poly_count = len(tri_list)
+                face_ranges.append((poly_start, poly_count, s.material_res_index))
+        if not faces or not vertices:
+            return None, []
+        mesh_name = f"{self.stem}_mdl{res_index}"
+        me = bpy.data.meshes.new(mesh_name)
+        me.from_pydata(vertices, [], faces)
+        me.use_auto_smooth = True
+        me.validate(clean_customdata=False)
+        me.update()
+        if uvs_list:
+            uv_layer = me.uv_layers.new(name="UVMap")
+            uv_data = uv_layer.data
+            for poly in me.polygons:
+                li = poly.loop_start
+                for j, vi in enumerate(poly.vertices):
+                    if vi < len(uvs_list):
+                        u, v = uvs_list[vi]
+                        uv_data[li + j].uv = (u, v)
+        obj = bpy.data.objects.new(mesh_name, me)
+        resid_to_slot: Dict[int, int] = {}
+        for fr in face_ranges:
+            mat_resid = fr[2]
+            if mat_resid not in resid_to_slot:
+                mat = self.material_by_res_index.get(mat_resid)
+                if mat is not None:
+                    obj.data.materials.append(mat)
+                    resid_to_slot[mat_resid] = len(obj.data.materials) - 1
+        if face_ranges:
+            polys = obj.data.polygons
+            for (pstart, pcount, mat_resid) in face_ranges:
+                slot = resid_to_slot.get(mat_resid)
+                if slot is not None:
+                    for pi in range(pstart, pstart + pcount):
+                        if 0 <= pi < len(polys):
+                            polys[pi].material_index = slot
+        return obj, face_ranges
+
+    def count_vif_commands(self) -> Tuple[int, int]:
+
+        buf = self.decomp
+        n = len(buf)
+        unpack_count = 0
+        mscal_count = 0
+        for i in range(0, n - 4, 4):
+            cmd = read_u32(buf, i)
+            if cmd == self.UNPACK:
+                unpack_count += 1
+            elif cmd == self.MSCAL:
+                mscal_count += 1
+        return unpack_count, mscal_count
+
+# -----------------------------------------------------------------------------
+# Helper functions for reading binary data
+# -----------------------------------------------------------------------------
+
+def read_u16(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<H", data, offset)[0]
+
+
+def read_i16(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<h", data, offset)[0]
+
+
+def read_u32(data: bytes, offset: int) -> int:
+    return struct.unpack_from("<I", data, offset)[0]
+
+
+def read_f32(data: bytes, offset: int) -> float:
+    return struct.unpack_from("<f", data, offset)[0]
+
+
+def half_to_float(h: int) -> float:
+    """Convert a 16‑bit half precision float into a Python float."""
+    return float(np.frombuffer(struct.pack("<H", h & 0xFFFF), dtype=np.float16)[0])
+
+
+def hexdump_bytes(b: bytes, max_len: int = 32) -> str:
+    """Return a string of hex bytes for logging."""
+    n = min(len(b), max_len)
+    return " ".join(f"{x:02X}" for x in b[:n])
+
+
+# -----------------------------------------------------------------------------
+# Image decoding
+# -----------------------------------------------------------------------------
+def expand_nibbles_lo_first(b: bytes) -> np.ndarray:
+    """Expand 4bpp (low nibble first) into 8bpp index array."""
+    arr = np.frombuffer(b, dtype=np.uint8)
+    lo = arr & 0x0F
+    hi = arr >> 4
+    return np.vstack([lo, hi]).T.reshape(-1)
+
+
+def log2_pow2(n: int) -> int:
+    l = 0
+    v = max(1, n)
+    while (1 << l) < v:
+        l += 1
+    return l
+
+
+def swizzle_ps2_addr(x: int, y: int, logw: int) -> int:
+
+    X3 = (x >> 3) & 1
+    Y1 = (y >> 1) & 1
+    Y2 = (y >> 2) & 1
+    x ^= ((Y1 ^ Y2) << 2)
+    nx = (x & 7) | ((x >> 1) & ~7)
+    ny = (y & 1) | ((y >> 1) & ~1)
+    n = (Y1) | (X3 << 1)
+    return (n | (nx << 2) | (ny << (logw - 1 + 2)))
+
+
+def unswizzle8_ps2_linearized(src: np.ndarray, w: int, h: int) -> np.ndarray:
+
+    dst = np.empty(w * h, dtype=np.uint8)
+    logw = log2_pow2(w)
+    for y in range(h):
+        for x in range(w):
+            s = swizzle_ps2_addr(x, y, logw)
+            dst[y * w + x] = src[s % src.size]
+    return dst
+
+
+def apply_ps2_alpha_scale(palette_rgba: np.ndarray, do_scale: bool) -> np.ndarray:
+    if not do_scale:
+        return palette_rgba
+    pal = palette_rgba.copy()
+    a = pal[:, 3].astype(np.uint16)
+    a = (a * 255 + 64) // 128
+    pal[:, 3] = np.clip(a, 0, 255).astype(np.uint8)
+    return pal
+
+
+def nearest_pow2(n: int) -> int:
+
+    if n <= 1:
+        return 1
+    if (n & (n - 1)) == 0:
+        return n
+    lower = 1 << (n.bit_length() - 1)
+    upper = lower << 1
+    return upper if (n - lower) > (upper - n) else lower
+
+
+def resize_indices_to_dims(idx2d: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
+
+    h, w = idx2d.shape
+    if new_h < h:
+        idx2d = idx2d[:new_h, :]
+        h = new_h
+    if new_w < w:
+        idx2d = idx2d[:, :new_w]
+        w = new_w
+    if new_h > h:
+        pad_h = new_h - h
+        idx2d = np.pad(idx2d, ((0, pad_h), (0, 0)), mode='edge')
+        h = new_h
+    if new_w > w:
+        pad_w = new_w - w
+        idx2d = np.pad(idx2d, ((0, 0), (0, pad_w)), mode='edge')
+    return idx2d
+
+
+def choose_single_size_for_4bpp(index_len_bytes: int) -> tuple:
+
+    total_pixels = index_len_bytes * 2
+    if total_pixels <= 0:
+        raise ValueError("Index length is zero; cannot choose size.")
+    dim_pool = [16, 32, 64, 128, 256, 512, 1024]
+    candidates = []
+    for w in dim_pool:
+        if total_pixels % w != 0:
+            continue
+        h = total_pixels // w
+        if h in dim_pool:
+            candidates.append((w, h))
+    if not candidates:
+        for w in dim_pool:
+            if total_pixels % w == 0:
+                h = total_pixels // w
+                if h > 0:
+                    candidates.append((w, h))
+    if not candidates:
+        raise ValueError(f"No dimension pair matches pixel count {total_pixels}.")
+    squares = [(w, h) for (w, h) in candidates if w == h]
+    if squares:
+        squares.sort(key=lambda wh: abs(wh[0] - int(math.sqrt(total_pixels))))
+        return squares[0]
+    candidates.sort(key=lambda wh: (abs(wh[0] - wh[1]), -wh[0]))
+    return candidates[0]
+
+
+def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
+
+    img = bpy.data.images.new(name=name, width=w, height=h, alpha=True, float_buffer=False)
+    flat = (rgba.astype(np.float32) / 255.0).reshape(-1, 4)
+    img.pixels = flat.flatten().tolist()
+    img.alpha_mode = 'STRAIGHT'
+    img.pack()
+    return img
+
+
+def create_material_from_image(img: bpy.types.Image, mat_name: str) -> bpy.types.Material:
+
+    mat = bpy.data.materials.new(mat_name)
+    mat.use_nodes = True
+    nt = mat.node_tree
+    for n in list(nt.nodes):
+        nt.nodes.remove(n)
+    out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (300, 0)
+    principled = nt.nodes.new("ShaderNodeBsdfPrincipled"); principled.location = (0, 0)
+    tex = nt.nodes.new("ShaderNodeTexImage"); tex.location = (-300, 0); tex.image = img
+    nt.links.new(tex.outputs["Color"], principled.inputs["Base Color"])
+    if img.has_data and "Alpha" in tex.outputs and "Alpha" in principled.inputs:
+        nt.links.new(tex.outputs["Alpha"], principled.inputs["Alpha"])
+        mat.blend_method = 'BLEND'
+    nt.links.new(principled.outputs["BSDF"], out.inputs["Surface"])
+    return mat
+
+
+# -----------------------------------------------------------------------------
+# Data classes for WRLD parsing
+# -----------------------------------------------------------------------------
+
+@dataclass
+class WorldHeader:
+    magic: bytes
+    wrld_type: int
+    total_size: int
+    global0: int
+    global1: int
+    global_count: int
+    continuation: int
+    reserved: int
+
+
+@dataclass
+class ExtendedHeader:
+    res_table_addr: int
+    res_count: int
+    unknown_count: int
+    sky_offsets: list
+
+
+@dataclass
+class ResourceEntry:
+    res_id: int
+    table_index: int
+    offset: int
+    length: int
+    a16: int
+    b16: int
+    a32: int
+    b32: int
+    kind: str = ""
+    ref_addr: int = -1
+    image: bpy.types.Image | None = None
+    material: bpy.types.Material | None = None
+    tex_size: tuple | None = None
+    note: str = ""
+    mdl_info: dict | None = None
+
+
+def parse_world_header(data: bytes) -> WorldHeader:
+    return WorldHeader(
+        magic=data[0:4],
+        wrld_type=read_u32(data, 4),
+        total_size=read_u32(data, 8),
+        global0=read_u32(data, 12),
+        global1=read_u32(data, 16),
+        global_count=read_u32(data, 20),
+        continuation=read_u32(data, 24),
+        reserved=read_u32(data, 28),
     )
 
-    print_groups_table(groups_info, log)
 
-    print_group_slave_headers(lvz_bytes=data_global_bytes_cache, groups_info=groups_info, log=log)
+def parse_extended_header(data: bytes) -> ExtendedHeader:
+    res_table_addr = read_u32(data, 0x20)
+    res_count = read_u16(data, 0x24)
+    unknown_count = read_u16(data, 0x26)
+    sky_offsets = [read_u32(data, 0x28 + i * 4) for i in range(8)]
+    return ExtendedHeader(res_table_addr, res_count, unknown_count, sky_offsets)
 
-    print_resource_addr_table(rtab, log)
+
+def parse_resource_table(data: bytes, header: WorldHeader, ext: ExtendedHeader) -> list:
+
+    n = len(data)
+    base = ext.res_table_addr
+    rows = ext.res_count
+    raw = []
+    for i in range(rows):
+        off = base + i * 8
+        if off + 8 > n:
+            break
+        res_id = read_u32(data, off)
+        res_off = read_u32(data, off + 4)
+        raw.append((i, res_id, res_off))
+    valid = [r for r in raw if 0 < r[2] < n]
+    sorted_offs = sorted(valid, key=lambda r: r[2])
+    entries = []
+    for idx, (table_idx, res_id, res_off) in enumerate(sorted_offs):
+        if idx + 1 < len(sorted_offs):
+            next_off = sorted_offs[idx + 1][2]
+        else:
+            if 0 < header.global0 < n and header.global0 > res_off:
+                next_off = header.global0
+            else:
+                next_off = n
+        length = max(0, min(next_off, n) - res_off)
+        if res_off + 8 <= n:
+            a16 = read_u16(data, res_off)
+            b16 = read_u16(data, res_off + 2)
+            a32 = read_u32(data, res_off)
+            b32 = read_u32(data, res_off + 4)
+        else:
+            a16 = b16 = a32 = b32 = 0
+        entries.append(
+            ResourceEntry(
+                res_id=res_id,
+                table_index=table_idx,
+                offset=res_off,
+                length=length,
+                a16=a16,
+                b16=b16,
+                a32=a32,
+                b32=b32,
+            )
+        )
+    return entries
+
+
+def classify_entries(entries: list) -> None:
+    """Classify each entry as MDL or TEX_REF according to heuristics."""
+    for e in entries:
+        if e.b16 == 0 and e.a16 != 0:
+            e.kind = "TEX_REF"
+            e.ref_addr = e.a32
+            e.note = "tex_ref"
+        else:
+            e.kind = "MDL"
+            e.note = "mdl_or_other"
+            e.mdl_info = None
+
+
+def decode_textures_for_entries(data: bytes, header: WorldHeader, entries: list, stem: str) -> None:
+
+    return None
+
+def get_or_create_collection(name: str) -> bpy.types.Collection:
+
+    dbg(f"[world] get_or_create_collection called for '{name}', but this function is now in world_importer")
+    return None
+
+# -----------------------------------------------------------------------------
+# MDL object builder
+# -----------------------------------------------------------------------------
+
+def build_mdl_objects(entries: list, resources: list, stem: str, collection: bpy.types.Collection = None, max_pairs_per_mdl: int = 4) -> None:
+
+    dbg("[world] build_mdl_objects stub invoked; use world_importer for object creation")
+    return None
+
+
+# -----------------------------------------------------------------------------
+# MDL geometry builder
+# -----------------------------------------------------------------------------
+
+def build_mdl_geometry(entries: list, data: bytes, stem: str, collection: bpy.types.Collection = None) -> None:
+
+    dbg("[world] build_mdl_geometry stub invoked; use world_importer for mesh construction")
+    return None
+
+def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
+    n = len(data)
+    for e in entries:
+        if e.kind != "MDL":
+            continue
+        start = e.offset
+        end = e.offset + e.length
+        if start < 0 or start >= n:
+            continue
+        slice_end = min(start + 64, n)
+        hexd = hexdump_bytes(data[start:slice_end], max_len=slice_end - start)
+
+        count = 0
+        if e.b16 and e.b16 % 4 == 0:
+            count = e.b16 // 4
+        elif e.a16 and e.a16 % 4 == 0:
+            count = e.a16 // 4
+
+        if count <= 0:
+            count = max_pairs
+        count = min(count, max_pairs)
+        pairs = []
+ 
+        for i in range(count):
+            pos = start + 4 + i * 4
+            if pos + 4 > n or pos + 4 > end:
+                break
+            p0 = read_u16(data, pos)
+            p1 = read_u16(data, pos + 2)
+            pairs.append((p0, p1))
+        e.mdl_info = {
+            "a16": e.a16,
+            "b16": e.b16,
+            "a32": e.a32,
+            "b32": e.b32,
+            "hexdump": hexd,
+            "pairs": pairs,
+        }
 
 #######################################################
-# Operator
-#######################################################
-data_global_bytes_cache = b""
+def log_and_import(path: str, decode_textures: bool = True, write_log: bool = True, build_models: bool = True) -> None:
 
-class LeedsImportLVZGroups(Operator, ImportHelper):
-    bl_idname = "import_scene.leeds_lvz_groups"
-    bl_label = "R* Leeds: LVZ groups (.lvz/.bin)"
-    bl_options = {'REGISTER', 'UNDO'}
+    data = Path(path).read_bytes()
+    header = parse_world_header(data)
+    ext = parse_extended_header(data)
+    entries = parse_resource_table(data, header, ext)
+    classify_entries(entries)
+    stem = Path(path).stem
 
-    filename_ext = ".lvz"
-    filter_glob: StringProperty(
-        name="File Filter",
-        default="*.lvz;*.LVZ;*.bin;*.BIN",
-        options={'HIDDEN'},
-    )
+    if decode_textures:
+        decode_textures_for_entries(data, header, entries, stem)
 
-    def execute(self, context):
-        global data_global_bytes_cache
-
-        lvz_path = Path(self.filepath)
-        img_path = lvz_path.with_suffix(".img")
-
-        desired_log_name = f"{lvz_path.stem}_import_log"
-        desired_log_path = lvz_path.with_name(desired_log_name)
-
-        log = DebugLog(desired_log_path)
-        log.log(f"LVZ path: {lvz_path}")
-        log.log(f"IMG path: {img_path}")
-        log.log("")
-
+    analyze_mdl_entries(data, entries)
+    if build_models:
         try:
-            try:
-                raw = lvz_path.read_bytes()
-                log.log(f"Read LVZ bytes: {len(raw)}")
-            except Exception as e:
-                log.log(f"[ERROR] failed to read LVZ: {e}")
-                log.write_out()
-                self.report({'ERROR'}, f"failed to read file: {e}")
-                return {'CANCELLED'}
+            build_mdl_geometry(entries, data, stem)
+        except Exception as ex:
+            dbg(f"[mdl] error while building MDL geometry: {ex}")
 
-            data = ensure_wrld_bytes(raw)
-            if data[:4] != b"DLRW":
-                msg = "DLRW not found (not a WRLD header after optional zlib)."
-                log.log(f"[ERROR] {msg}")
-                log.write_out()
-                self.report({'ERROR'}, msg)
-                return {'CANCELLED'}
-
-            data_global_bytes_cache = data
-            log.log("Confirmed WRLD magic 'DLRW' at 0x00")
-            log.log(f"Decompressed/Raw size in memory: {len(data)}")
-            log.log("")
-
-            try:
-                hdr = parse_wrld_header(data)
-                dir_info = parse_group_directory_and_tech(data, start_off=0x24)
-                groups_info = count_headers_in_groups(data, dir_info["entries"])
-
-                res_tab_off = hdr["resource_id_table"]
-                if res_tab_off >= len(data):
-                    raise ValueError(f"resource address table offset {hx32(res_tab_off)} beyond EOF ({len(data)} bytes)")
-
-                rtab = parse_resource_address_table(
-                    data,
-                    start_off=res_tab_off,
-                    group_count_u16=dir_info["count_u16"]
+    lines = []
+    lines.append(f"[wrld] loading '{path}' ({len(data)} bytes)")
+    lines.append(
+        f"[wrld] magic={header.magic} type={header.wrld_type} size={header.total_size} "
+        f"g0=0x{header.global0:08X} g1=0x{header.global1:08X} gcnt={header.global_count} "
+        f"cont=0x{header.continuation:08X} resv=0x{header.reserved:08X}"
+    )
+    lines.append(
+        f"[wrld] res_table=0x{ext.res_table_addr:08X} rows={ext.res_count} unk={ext.unknown_count}"
+    )
+    lines.append("[wrld] sky_offsets=" + ", ".join(f"0x{off:08X}" for off in ext.sky_offsets))
+    lines.append(f"[res] parsed {len(entries)} raw entries from table")
+    for e in entries:
+        lines.append(
+            f"[res] idx={e.table_index:02d} id={e.res_id} off=0x{e.offset:08X} len={e.length} "
+            f"kind={e.kind}"
+        )
+    for e in entries:
+        if e.kind == "TEX_REF":
+            detail = (
+                f"[res] idx={e.table_index:02d} id={e.res_id} TEX_REF "
+                f"a16={e.a16} b16={e.b16} a32=0x{e.a32:08X} b32=0x{e.b32:08X} "
+                f"ref=0x{e.ref_addr:08X}"
+            )
+            if e.tex_size:
+                detail += f" size={e.tex_size}"
+            detail += f" note={e.note}"
+            lines.append(detail)
+        else:
+            lines.append(
+                f"[res] idx={e.table_index:02d} id={e.res_id} MDL "
+                f"a16={e.a16} b16={e.b16} a32=0x{e.a32:08X} b32=0x{e.b32:08X}"
+            )
+            info = e.mdl_info or {}
+            hd = info.get('hexdump')
+            if hd:
+                lines.append(
+                    f"[mdl] idx={e.table_index:02d} id={e.res_id} hexdump={hd}"
                 )
-            except Exception as e:
-                log.log(f"[ERROR] parse error: {e}")
-                log.log("Traceback:")
-                tb = traceback.format_exc()
-                for line in tb.rstrip().splitlines():
-                    log.log(line)
-                log.write_out()
-                self.report({'ERROR'}, f"parse error: {e}")
-                return {'CANCELLED'}
+            pairs = info.get('pairs')
+            if pairs:
+                pair_str = ", ".join(f"({p0},{p1})" for p0, p1 in pairs)
+                lines.append(
+                    f"[mdl] idx={e.table_index:02d} id={e.res_id} pairs={pair_str}"
+                )
 
-            print_wrld_report(str(lvz_path), str(img_path), hdr, dir_info, groups_info, rtab, log)
-            log.log(f"\n[summary] resource address table bytes (count): {dir_info['count_u16']}")
+            mats_decl = info.get('materials_declared')
+            unpacks = info.get('unpack_count')
+            mscals = info.get('mscal_count')
+            verts = info.get('verts')
+            faces = info.get('faces')
+            if mats_decl is not None:
+                lines.append(
+                    f"[mdl] idx={e.table_index:02d} id={e.res_id} materials={mats_decl} unpacks={unpacks} mscals={mscals} verts={verts} faces={faces}"
+                )
 
-            crawl_img_slave_headers(img_path, data_global_bytes_cache, groups_info, log)
+    for line in lines:
+        print(line)
 
-            self.report({'INFO'}, "LVZ groups + per-group headers + resource address table + IMG headers parsed. See console and log.")
-
-        finally:
-            log.write_out()
-
-        return {'FINISHED'}
-
-#######################################################
-def menu_func_import(self, context):
-    self.layout.operator(LeedsImportLVZGroups.bl_idname, text=LeedsImportLVZGroups.bl_label)
-
-def register():
-    bpy.utils.register_class(LeedsImportLVZGroups)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-
-def unregister():
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-    bpy.utils.unregister_class(LeedsImportLVZGroups)
-
-if __name__ == "__main__":
-    register()
+    if write_log:
+        out_path = Path(path).with_suffix(".wrld_full_log.txt")
+        try:
+            out_path.write_text("\n".join(lines), encoding="utf-8")
+        except Exception as exc:
+            print(f"[log] failed to write '{out_path}': {exc}")

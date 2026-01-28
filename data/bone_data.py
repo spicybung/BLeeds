@@ -15,33 +15,43 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from typing import List, Dict, Tuple
+
 import bpy
 
 
+#######################################################
 # === LCS Bone Arrays ===
-commonBoneOrder = (
+
+commonBoneOrder: Tuple[str, ...] = (
     "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
     "Bip01 L Clavicle", "L UpperArm", "L Forearm", "L Hand", "L Finger", "Bip01 R Clavicle",
     "R UpperArm", "R Forearm", "R Hand", "R Finger", "L Thigh", "L Calf",
     "L Foot", "L Toe0", "R Thigh", "R Calf", "R Foot", "R Toe0"
 )
-kamBoneID = (
+
+kamBoneID: Tuple[int, ...] = (
     0, 1, 2, 3, 4, 5, 31, 32, 33, 34, 35, 21, 22, 23, 24, 25, 41, 42, 43, 2000, 51, 52, 53, 2001
 )
-kamFrameName = (
+
+kamFrameName: Tuple[str, ...] = (
     "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
     "Bip01~L~Clavicle", "L~UpperArm", "L~Forearm", "L~Hand", "L~Finger", "Bip01~R~Clavicle",
     "R~UpperArm", "R~Forearm", "R~Hand", "R~Finger", "L~Thigh", "L~Calf",
     "L~Foot", "L~Toe0", "R~Thigh", "R~Calf", "R~Foot", "R~Toe0"
 )
-kamBoneType = (
+
+kamBoneType: Tuple[int, ...] = (
     0, 0, 0, 2, 0, 3, 2, 0, 0, 0, 1, 0, 0, 0, 0, 1, 2, 0, 0, 1, 0, 0, 0, 1
 )
-kamBoneIndex = (
-    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"
+
+kamBoneIndex: Tuple[str, ...] = (
+    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09",
+    "10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
+    "20", "21", "22", "23"
 )
 
-commonBoneParentsLCS = {
+commonBoneParentsLCS: Dict[str, str] = {
     "Pelvis": "Root",
     "Spine": "Pelvis",
     "Spine1": "Spine",
@@ -64,24 +74,27 @@ commonBoneParentsLCS = {
     "R Thigh": "Pelvis",
     "R Calf": "R Thigh",
     "R Foot": "R Calf",
-    "R Toe0": "R Foot"
-} # o_O
+    "R Toe0": "R Foot",
+}
+
+#######################################################
 # === VCS Bone Arrays ===
-commonBoneOrderVCS = (
+
+commonBoneOrderVCS: Tuple[str, ...] = (
     "root", "pelvis", "spine", "spine1", "neck", "head",
     "jaw", "bip01_l_clavicle", "l_upperarm", "l_forearm", "l_hand", "l_finger",
     "bip01_r_clavicle", "r_upperarm", "r_forearm", "r_hand", "r_finger", "l_thigh",
     "l_calf", "l_foot", "l_toe0", "r_thigh", "r_calf", "r_foot", "r_toe0"
 )
 
-commonBoneNamesVCS = (
+commonBoneNamesVCS: Tuple[str, ...] = (
     "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
     "Jaw", "Bip01 L Clavicle", "L UpperArm", "L Forearm", "L Hand", "L Finger",
     "Bip01 R Clavicle", "R UpperArm", "R Forearm", "R Hand", "R Finger", "L Thigh",
     "L Calf", "L Foot", "L Toe0", "R Thigh", "R Calf", "R Foot", "R Toe0"
 )
 
-kamBoneIDVCS = (
+kamBoneIDVCS: Tuple[int, ...] = (
     0, 1, 2, 3, 4, 5,
     8, 31, 32, 33, 34, 35,
     21, 22, 23, 24, 25, 41,
@@ -89,14 +102,14 @@ kamBoneIDVCS = (
     2001
 )
 
-kamFrameNameVCS = (
+kamFrameNameVCS: Tuple[str, ...] = (
     "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
     "Jaw", "Bip01~L~Clavicle", "L~UpperArm", "L~Forearm", "L~Hand", "L~Finger",
     "Bip01~R~Clavicle", "R~UpperArm", "R~Forearm", "R~Hand", "R~Finger", "L~Thigh",
     "L~Calf", "L~Foot", "L~Toe0", "R~Thigh", "R~Calf", "R~Foot", "R~Toe0"
 )
 
-kamBoneTypeVCS = (
+kamBoneTypeVCS: Tuple[int, ...] = (
     0, 0, 0, 2, 0, 2,
     3, 2, 0, 0, 0, 1,
     0, 0, 0, 0, 1, 2,
@@ -104,11 +117,13 @@ kamBoneTypeVCS = (
     1
 )
 
-kamBoneIndexVCS = (
-    "00", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"
-)    # for compatibility with Kams Scripts(3DSMax)
+kamBoneIndexVCS: Tuple[str, ...] = (
+    "00", "01", "02", "03", "04", "05", "06", "07",
+    "08", "09", "10", "11", "12", "13", "14", "15",
+    "16", "17", "18", "19", "20", "21", "22", "23"
+)
 
-commonBoneParentsVCS = {
+commonBoneParentsVCS: Dict[str, str] = {
     "pelvis": "root",
     "spine": "pelvis",
     "spine1": "spine",
@@ -132,5 +147,7 @@ commonBoneParentsVCS = {
     "r_thigh": "pelvis",
     "r_calf": "r_thigh",
     "r_foot": "r_calf",
-    "r_toe0": "r_foot"
-} # o_O
+    "r_toe0": "r_foot",
+}
+
+# TODO: III/VC, SA formats

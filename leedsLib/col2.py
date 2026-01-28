@@ -1,6 +1,6 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
-# Years: 2025 - 
+# Years: 2025 -
 
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,407 +15,366 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import bpy
-import struct
 
-from bpy_extras.io_utils import ImportHelper
-from bpy.props import BoolProperty, StringProperty, IntProperty
-from bpy.types import Operator
-from mathutils import Vector
+import struct
+from pathlib import Path
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 #   This script is for .COL2 - the file format for GTA Stories collisions           #
 #   NOTE: Leeds Engine Collision 2 differs from Rockstars Renderware Col2 format    #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+# - Script resources:
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
+# •
+# - Mod resources/cool stuff:
+# •
 
 
-#######################################################
-HEADER_SIZE = 32
-SENTINEL = 0xFFFFFFFF
+HEADER_SIZE = 0x20
 
 #######################################################
-def read_exact(f, n):
-    b = f.read(n)
-    if not b or len(b) < n:
-        raise EOFError(f"Expected %d bytes, got %d" % (n, 0 if not b else len(b)))
-    return b
-#######################################################
-def read_u32(f):
-    return struct.unpack("<I", read_exact(f, 4))[0]
-#######################################################
-def read_i32(f):
-    return struct.unpack("<i", read_exact(f, 4))[0]
-#######################################################
-def read_u16(f):
-    return struct.unpack("<H", read_exact(f, 2))[0]
-#######################################################
-def read_i16(f):
-    return struct.unpack("<h", read_exact(f, 2))[0]
-#######################################################
-def read_f32(f):
-    return struct.unpack("<f", read_exact(f, 4))[0]
-#######################################################
-def hex32(v):
-    return f"0x{v:08X}"
-#######################################################
-def ascii_print(sig_bytes):
-    return "".join(chr(b) if 32 <= b <= 126 else "." for b in sig_bytes)
-#######################################################
-def hexdump_block(b, base_off=0, width=16):
+def hex32(value: int) -> str:
+    return f"0x{value:08X}"
+
+
+def read_exact(file, size: int) -> bytes:
+    data = file.read(size)
+    if len(data) != size:
+        raise EOFError(f"Tried to read {size} bytes, got {len(data)} bytes")
+    return data
+
+
+def read_u32(file) -> int:
+    return struct.unpack("<I", read_exact(file, 4))[0]
+
+
+def hexdump_block(data: bytes, base_off: int = 0, width: int = 16) -> str:
     lines = []
-    for i in range(0, len(b), width):
-        chunk = b[i:i+width]
-        hex_part = " ".join(f"{x:02X}" for x in chunk)
-        asc_part = "".join(chr(x) if 32 <= x <= 126 else "." for x in chunk)
-        lines.append(f"{base_off+i:08X}  {hex_part:<{width*3}}  {asc_part}")
+    for i in range(0, len(data), width):
+        chunk = data[i : i + width]
+        hex_part = " ".join(f"{b:02X}" for b in chunk)
+        asc_part = "".join(chr(b) if 32 <= b <= 126 else "." for b in chunk)
+        lines.append(f"{base_off + i:08X}  {hex_part:<{width * 3}}  {asc_part}")
     return "\n".join(lines)
-#######################################################
-def lerp(a, b, t):
-    return a + (b - a) * t
-#######################################################
-def dequant_i16_axis(q, amin, amax):
-    u = (q + 32768) / 65536.0
-    return lerp(amin, amax, u)
+
+
+def ascii_preview(sig_bytes: bytes) -> str:
+    out = []
+    for b in sig_bytes:
+        out.append(chr(b) if 32 <= b <= 126 else ".")
+    return "".join(out)
+
 
 #######################################################
-def parse_col2_header(f):
-    f.seek(0)
-    hdr = read_exact(f, HEADER_SIZE)
+# Header + resource table
+#######################################################
+def parse_col2_header(file, path: str):
+    file.seek(0)
+    header_bytes = read_exact(file, HEADER_SIZE)
 
-    sig_bytes = hdr[0:4]
-    sig_ascii  = ascii_print(sig_bytes)
-    reserved04 = struct.unpack_from("<I", hdr, 0x04)[0]
-    file_size  = struct.unpack_from("<I", hdr, 0x08)[0]
-    dir_off_1  = struct.unpack_from("<I", hdr, 0x0C)[0]
-    dir_off_2  = struct.unpack_from("<I", hdr, 0x10)[0]
-    dir_count  = struct.unpack_from("<I", hdr, 0x14)[0]
-    reserved18 = struct.unpack_from("<I", hdr, 0x18)[0]
-    reserved1C = struct.unpack_from("<I", hdr, 0x1C)[0]
+    sig_bytes, unk04, file_size, mirror1, mirror2, entry_hint, unk18, unk1C = struct.unpack(
+        "<4sIIIIIII", header_bytes
+    )
 
-    rep = []
-    rep.append("=== COL2 Header ===")
-    rep.append(f"Signature               : {sig_ascii!r} (bytes: {' '.join(f'{b:02X}' for b in sig_bytes)})")
-    rep.append(f"Reserved @0x04          : {hex32(reserved04)}")
-    rep.append(f"File Size               : {file_size} ({hex32(file_size)})")
-    rep.append(f"Resource Dir Offset #1  : {dir_off_1} ({hex32(dir_off_1)})")
-    rep.append(f"Resource Dir Offset #2  : {dir_off_2} ({hex32(dir_off_2)})")
-    rep.append(f"Offsets Match?          : {'SAME' if dir_off_1 == dir_off_2 else 'DIFF'}")
-    rep.append(f"Resource Entry Count    : {dir_count} ({hex32(dir_count)})")
-    rep.append(f"Reserved @0x18          : {hex32(reserved18)}")
-    rep.append(f"Reserved @0x1C          : {hex32(reserved1C)}")
+    sig_ascii = ascii_preview(sig_bytes)
 
-    notes = []
-    if sig_bytes != b"2loc":
-        notes.append("Signature is not '2loc' (expected 32 6C 6F 63).")
-    if file_size < HEADER_SIZE:
-        notes.append("File size smaller than header size.")
-    if dir_off_1 >= file_size:
-        notes.append("Resource directory offset is outside file bounds.")
-    if dir_off_1 != dir_off_2:
-        notes.append("Resource directory offsets do not match.")
-    if reserved04 != 0 or reserved18 != 0 or reserved1C != 0:
-        notes.append("Reserved fields not zero (observed non-zero).")
+    if file_size == 0:
+        file_size = Path(path).stat().st_size
 
-    if notes:
-        rep.append("--- Notes ---")
-        rep.extend(notes)
+    if 0 < mirror1 <= file_size:
+        data_end = mirror1
+    else:
+        data_end = file_size
+
+    report_lines = []
+    report_lines.append("=== COL2 Header ===")
+    report_lines.append(f"Signature        : {sig_bytes!r} ({sig_ascii})")
+    report_lines.append(f"Unknown @0x04    : {unk04} ({hex32(unk04)})")
+    report_lines.append(f"File size        : {file_size} ({hex32(file_size)})")
+    report_lines.append(f"Mirror dir off 1 : {mirror1} ({hex32(mirror1)})")
+    report_lines.append(f"Mirror dir off 2 : {mirror2} ({hex32(mirror2)})")
+    report_lines.append(f"Entry hint @0x14 : {entry_hint} (dec)")
+    report_lines.append(f"Reserved @0x18   : {unk18} ({hex32(unk18)})")
+    report_lines.append(f"Reserved @0x1C   : {unk1C} ({hex32(unk1C)})")
+    report_lines.append(f"Resource table   : starts at {hex32(HEADER_SIZE)}")
+    report_lines.append(
+        f"Collision data   : assumed within [0x{HEADER_SIZE:04X}, {hex32(data_end)})"
+    )
 
     return {
-        "raw": hdr,
+        "raw": header_bytes,
         "sig": sig_bytes,
         "sig_ascii": sig_ascii,
         "file_size": file_size,
-        "dir_off": dir_off_1,
-        "dir_off_dup": dir_off_2,
-        "dir_count": dir_count,
-        "reserved04": reserved04,
-        "reserved18": reserved18,
-        "reserved1C": reserved1C,
-        "report": "\n".join(rep),
+        "mirror_dir_off": mirror1,
+        "mirror_dir_off2": mirror2,
+        "entry_hint": entry_hint,
+        "data_end": data_end,
+        "report": "\n".join(report_lines),
     }
-#######################################################
-def scan_resource_table(f, start_off, file_size, stop_on_sentinel=True, max_entries_hint=None):
+
+
+def scan_primary_resource_table(file, header, log):
+    file_size = header["file_size"]
+    entry_hint = header["entry_hint"]
+
+    start_off = HEADER_SIZE
+    file.seek(start_off)
+
     entries = []
     lines = []
+    index = 0
 
-    idx = 0
-    lines.append("=== Resource Table ===")
-    lines.append(f"Start offset            : {start_off} ({hex32(start_off)})")
-    lines.append(f"Stop on sentinel        : {stop_on_sentinel} (0xFFFFFFFF)")
-    if max_entries_hint is not None:
-        lines.append(f"Max entries (hint)      : {max_entries_hint}")
+    lines.append("=== Primary resource table ===")
+    lines.append(f"Start offset     : {hex32(start_off)}")
+    lines.append(f"Entry hint       : {entry_hint} (dec)")
+    lines.append("Format           : u32 resourceId, u32 resourceOffset")
+    lines.append("Stop condition   : (id==0xFFFFFFFF && off==0) OR (id==0 && off==0) OR EOF")
 
-    f.seek(start_off, 0)
     while True:
-        here = f.tell()
-        if here + 8 > file_size:
-            lines.append(f"Reached end of file at {hex32(here)}; stopping.")
+        position = file.tell()
+        if position + 8 > file_size:
+            lines.append(f"Reached file end at {hex32(position)}; stop.")
             break
 
-        pair_bytes = f.read(8)
-        if not pair_bytes or len(pair_bytes) < 8:
-            lines.append("Short read in resource table; stopping.")
+        raw = file.read(8)
+        if len(raw) < 8:
+            lines.append("Short read; stop.")
             break
 
-        rid, roff = struct.unpack("<II", pair_bytes)
+        resource_id, resource_offset = struct.unpack("<II", raw)
 
-        # Sentinel
-        if stop_on_sentinel and (rid == SENTINEL or roff == SENTINEL):
-            lines.append(f"[{idx:04d}]  id={hex32(rid)}, off={hex32(roff)}  ← sentinel; stopping.")
+        if resource_id == 0xFFFFFFFF and resource_offset == 0:
+            lines.append(f"[{index:04d}] sentinel (FFFFFFFF,0) at {hex32(position)}; table end.")
             break
 
-        off_note = ""
-        if roff >= file_size:
-            off_note = "  [warn: offset outside file]"
-        lines.append(f"[{idx:04d}]  id={hex32(rid)}, off={hex32(roff)}{off_note}")
+        if resource_id == 0 and resource_offset == 0:
+            lines.append(f"[{index:04d}] sentinel (0,0) at {hex32(position)}; table end.")
+            break
 
-        entries.append((rid, roff))
-        idx += 1
+        offset_note = ""
+        if resource_offset >= file_size:
+            offset_note = "  [warn: offset >= file size]"
 
-        if (max_entries_hint is not None) and (idx >= max_entries_hint):
-            lines.append(f"Reached max entries hint ({max_entries_hint}); stopping.")
+        lines.append(
+            f"[{index:04d}] id={hex32(resource_id)} off={hex32(resource_offset)}{offset_note}"
+        )
+        entries.append((resource_id, resource_offset))
+        index += 1
+
+        if entry_hint and index > entry_hint + 64:
+            log(f"[WARN] Resource table has more than hint ({entry_hint}) + 64 entries; odd.")
             break
 
     return entries, "\n".join(lines)
 
+
 #######################################################
-def read_sector_common(f, base, file_size):
-    f.seek(base)
-    cx = read_f32(f); cy = read_f32(f); cz = read_f32(f); cr = read_f32(f)
-    minx = read_f32(f); miny = read_f32(f); minz = read_f32(f); wmin = read_f32(f)
-    maxx = read_f32(f); maxy = read_f32(f); maxz = read_f32(f); wmax = read_f32(f)
+# Collision2 header + readers
+#######################################################
+def read_colmodel_header(file, base_offset: int, data_end: int):
+    if base_offset < HEADER_SIZE or base_offset + 0x60 > data_end:
+        return None
 
-    unk_off = base + 0x30
-    unk24 = b""
-    if unk_off + 24 <= file_size:
-        f.seek(unk_off)
-        unk24 = read_exact(f, 24)
+    file.seek(base_offset)
+    data = read_exact(file, 0x60)
 
-    offs_off = base + 0x48
-    if offs_off + 12 <= file_size:
-        f.seek(offs_off)
-        next_rel = read_u32(f)
-        vbuf_rel = read_u32(f)
-        ibuf_rel = read_u32(f)
-    else:
-        next_rel = vbuf_rel = ibuf_rel = 0
+    center_x, center_y, center_z, radius = struct.unpack_from("<4f", data, 0x00)
 
-    next_abs = base + next_rel if next_rel else 0
-    vbuf_abs = base + vbuf_rel if vbuf_rel else 0
-    ibuf_abs = base + ibuf_rel if ibuf_rel else 0
+    if not (0.0 <= abs(radius) <= 100000.0):
+        return None
+
+    min_x, min_y, min_z, min_w = struct.unpack_from("<4f", data, 0x10)
+    max_x, max_y, max_z, max_w = struct.unpack_from("<4f", data, 0x20)
+    if not (min_x <= max_x and min_y <= max_y and min_z <= max_z):
+        return None
+
+    num_spheres, num_boxes, num_tris = struct.unpack_from("<hhh", data, 0x30)
+    num_lines = data[0x36]
+    num_tri_sections = data[0x37]
+    col_store_id = data[0x38]
+    field_39 = data[0x39]
+    field_3A = data[0x3A]
+    field_3B = data[0x3B]
+
+    for val in (num_spheres, num_boxes, num_tris):
+        if val < 0 or val > 20000:
+            return None
+
+    spheres_off = struct.unpack_from("<I", data, 0x3C)[0]
+    lines_off = struct.unpack_from("<I", data, 0x40)[0]
+    boxes_off = struct.unpack_from("<I", data, 0x44)[0]
+    tri_sec_off = struct.unpack_from("<I", data, 0x48)[0]
+    verts_off = struct.unpack_from("<I", data, 0x4C)[0]
+    tris_off = struct.unpack_from("<I", data, 0x50)[0]
+    unk0 = struct.unpack_from("<I", data, 0x54)[0]
+    pad0_0 = struct.unpack_from("<I", data, 0x58)[0]
+    pad0_1 = struct.unpack_from("<I", data, 0x5C)[0]
+
+    def in_data(off: int) -> bool:
+        return HEADER_SIZE <= off < data_end
+
+    if num_tris > 0:
+        if not (in_data(verts_off) and in_data(tris_off)):
+            return None
+
+    if num_boxes > 0 and boxes_off != 0 and not in_data(boxes_off):
+        return None
+    if num_spheres > 0 and spheres_off != 0 and not in_data(spheres_off):
+        return None
 
     return {
-        "sphere": (cx, cy, cz, cr),
-        "aabb_min": (minx, miny, minz, wmin),
-        "aabb_max": (maxx, maxy, maxz, wmax),
-        "unk24": unk24,
-        "next_rel": next_rel, "vbuf_rel": vbuf_rel, "ibuf_rel": ibuf_rel,
-        "next_abs": next_abs, "vbuf_abs": vbuf_abs, "ibuf_abs": ibuf_abs,
+        "base_off": base_offset,
+        "center": (center_x, center_y, center_z),
+        "radius": radius,
+        "aabb_min": (min_x, min_y, min_z, min_w),
+        "aabb_max": (max_x, max_y, max_z, max_w),
+        "numSpheres": num_spheres,
+        "numBoxes": num_boxes,
+        "numTris": num_tris,
+        "numLines": num_lines,
+        "numTriSections": num_tri_sections,
+        "colStoreId": col_store_id,
+        "field_39": field_39,
+        "field_3A": field_3A,
+        "field_3B": field_3B,
+        "spheres_off": spheres_off,
+        "lines_off": lines_off,
+        "boxes_off": boxes_off,
+        "triSec_off": tri_sec_off,
+        "verts_off": verts_off,
+        "tris_off": tris_off,
+        "unk0": unk0,
+        "pad0_0": pad0_0,
+        "pad0_1": pad0_1,
     }
-#######################################################
-def parse_vertex_buffer_as_i16_xyz(f, vbuf_abs, next_abs, file_size, aabb_min, aabb_max, log):
-    if vbuf_abs == 0 or vbuf_abs >= file_size:
+
+
+def decompress_compressed_vector(x_int: int, y_int: int, z_int: int):
+    return (x_int / 128.0, y_int / 128.0, z_int / 128.0)
+
+
+def read_colmodel_triangles(file, tris_off: int, num_tris: int, data_end: int, log):
+    if num_tris <= 0:
+        return [], -1
+
+    if tris_off >= data_end:
+        log(f"[WARN] Triangle pointer {hex32(tris_off)} outside data_end {hex32(data_end)}.")
+        return [], -1
+
+    file.seek(tris_off)
+    max_possible = (data_end - tris_off) // 8
+    count = min(num_tris, max_possible)
+    if count <= 0:
+        log(
+            f"[WARN] Triangle list @ {hex32(tris_off)} has zero usable entries "
+            f"(max_possible={max_possible})."
+        )
+        return [], -1
+
+    raw = read_exact(file, count * 8)
+    tris = []
+    max_index = 0
+
+    for index in range(count):
+        a_raw, b_raw, c_raw, surf, pad = struct.unpack_from("<hhhBB", raw, index * 8)
+
+        if a_raw < 0 or b_raw < 0 or c_raw < 0:
+            continue
+
+        a = a_raw // 6
+        b = b_raw // 6
+        c = c_raw // 6
+
+        if (a_raw % 6) or (b_raw % 6) or (c_raw % 6):
+            log(
+                f"[WARN] Triangle #{index} at {hex32(tris_off + index*8)} "
+                f"has non-multiple-of-6 offsets: a={a_raw}, b={b_raw}, c={c_raw}"
+            )
+
+        max_index = max(max_index, a, b, c)
+        tris.append((a, b, c))
+
+    if not tris:
+        log(f"[WARN] No valid triangles decoded from {hex32(tris_off)}.")
+        return [], -1
+
+    return tris, max_index
+
+
+def read_colmodel_vertices(file, verts_off: int, required_vertices: int, data_end: int, log):
+    if required_vertices <= 0:
+        log(f"[WARN] Requested 0 vertices at {hex32(verts_off)}.")
         return []
 
-    limit = next_abs if (next_abs and next_abs < file_size) else file_size
-
-    f.seek(vbuf_abs)
-    try:
-        num_vertices = read_u32(f)
-    except Exception:
+    if verts_off >= data_end:
+        log(f"[WARN] Vertex pointer {hex32(verts_off)} outside data_end {hex32(data_end)}.")
         return []
 
-    bytes_needed = 4 + num_vertices * 6
-    if vbuf_abs + bytes_needed > limit or num_vertices > 500000:
-        log(f"⚠ Vertex count {num_vertices} looks implausible at {hex32(vbuf_abs)}; falling back to scan until limit.")
-        f.seek(vbuf_abs + 4)
-        verts = []
-        while f.tell() + 6 <= limit and len(verts) < 50000:
-            xi = read_i16(f); yi = read_i16(f); zi = read_i16(f)
-            x = dequant_i16_axis(xi, aabb_min[0], aabb_max[0])
-            y = dequant_i16_axis(yi, aabb_min[1], aabb_max[1])
-            z = dequant_i16_axis(zi, aabb_min[2], aabb_max[2])
-            verts.append(Vector((x, y, z)))
-        return verts
+    max_possible = (data_end - verts_off) // 6
+    if max_possible <= 0:
+        log(f"[WARN] Vertex buffer @ {hex32(verts_off)} has no room inside {hex32(data_end)}.")
+        return []
 
+    count = min(required_vertices, max_possible)
+
+    file.seek(verts_off)
+    raw = read_exact(file, count * 6)
     verts = []
-    for _ in range(num_vertices):
-        xi = read_i16(f); yi = read_i16(f); zi = read_i16(f)
-        x = dequant_i16_axis(xi, aabb_min[0], aabb_max[0])
-        y = dequant_i16_axis(yi, aabb_min[1], aabb_max[1])
-        z = dequant_i16_axis(zi, aabb_min[2], aabb_max[2])
-        verts.append(Vector((x, y, z)))
+
+    for index in range(count):
+        xi, yi, zi = struct.unpack_from("<hhh", raw, index * 6)
+        verts.append(decompress_compressed_vector(xi, yi, zi))
+
+    if count < required_vertices:
+        log(
+            f"[WARN] Vertex buffer @ {hex32(verts_off)} ran out of room: "
+            f"needed {required_vertices}, used {count}."
+        )
+
     return verts
-#######################################################
-def parse_index_buffer_as_u16_tris(f, ibuf_abs, next_abs, file_size, log):
-    if ibuf_abs == 0 or ibuf_abs >= file_size:
-        return []
 
-    limit = next_abs if (next_abs and next_abs < file_size) else file_size
-
-    f.seek(ibuf_abs)
-    try:
-        num_indices = read_u32(f)
-    except Exception:
-        return []
-
-    bytes_needed = 4 + num_indices * 2
-    if (num_indices % 3) != 0 or ibuf_abs + bytes_needed > limit or num_indices > 1500000:
-        log(f"⚠ Index count {num_indices} looks implausible at {hex32(ibuf_abs)}; falling back to scan until limit.")
-        f.seek(ibuf_abs + 4)
-        raw = []
-        while f.tell() + 2 <= limit and len(raw) < 900000:
-            raw.append(read_u16(f))
-        cut = (len(raw) // 3) * 3
-        raw = raw[:cut]
-        faces = [(raw[i], raw[i+1], raw[i+2]) for i in range(0, cut, 3)]
-        return faces
-
-    faces = []
-    for i in range(0, num_indices, 3):
-        a = read_u16(f); b = read_u16(f); c = read_u16(f)
-        faces.append((a, b, c))
-    return faces
-#######################################################
-def parse_sector(f, base, file_size, sector_index,  report_lines, created_objects, log):
-    info = read_sector_common(f, base, file_size)
-
-    cx, cy, cz, cr = info["sphere"]
-    minx, miny, minz, wmin = info["aabb_min"]
-    maxx, maxy, maxz, wmax = info["aabb_max"]
-    unk24 = info["unk24"]
-    next_abs = info["next_abs"]
-    vbuf_abs = info["vbuf_abs"]
-    ibuf_abs = info["ibuf_abs"]
-
-    report_lines.append(f"=== Sector @ {base} ({hex32(base)}) #{sector_index} ===")
-    report_lines.append(f"Sphere c=({cx:.6f},{cy:.6f},{cz:.6f}) r={cr:.6f}")
-    report_lines.append(f"AABB min=({minx:.6f},{miny:.6f},{minz:.6f}) max=({maxx:.6f},{maxy:.6f},{maxz:.6f})")
-    if unk24:
-        u0,u1,u2,u3,u4,u5 = struct.unpack_from("<6I", unk24, 0)
-        report_lines.append(f"Unknown[24] @ +0x30: {unk24.hex(' ')}")
-        report_lines.append(f"  as_u32: {[hex32(u) for u in (u0,u1,u2,u3,u4,u5)]}")
-    else:
-        report_lines.append("Unknown[24] @ +0x30: (unreadable / EOF)")
-
-    report_lines.append("Offsets @ +0x48:")
-    report_lines.append(f"  next_rel={hex32(info['next_rel'])} → abs {hex32(next_abs) if next_abs else '0x00000000'}")
-    report_lines.append(f"  vbuf_rel={hex32(info['vbuf_rel'])} → abs {hex32(vbuf_abs) if vbuf_abs else '0x00000000'}")
-    report_lines.append(f"  ibuf_rel={hex32(info['ibuf_rel'])} → abs {hex32(ibuf_abs) if ibuf_abs else '0x00000000'}")
-
-    aabb_min = (minx, miny, minz)
-    aabb_max = (maxx, maxy, maxz)
-
-    verts = parse_vertex_buffer_as_i16_xyz(f, vbuf_abs, next_abs, file_size, aabb_min, aabb_max, log)
-    faces = parse_index_buffer_as_u16_tris(f, ibuf_abs, next_abs, file_size, log)
-
-    report_lines.append(f"VertexBuffer parsed: {len(verts)} vertex/positions")
-    report_lines.append(f"IndexBuffer parsed:  {len(faces)*3} indices → {len(faces)} triangles")
-
-    if not verts or not faces:
-        report_lines.append("⚠ No mesh built (empty verts or faces).")
-        return next_abs
-
-    return next_abs
-#######################################################
-class ImportCOL2Operator(Operator, ImportHelper):
-    """Import R* Leeds COL2 (header + table + sector meshes)."""
-    bl_idname = "import_scene.col2_leeds"
-    bl_label = "Import R* Leeds COL2"
-    bl_options = {'PRESET', 'UNDO'}
-
-    filename_ext = ".col2"
-    filter_glob: StringProperty(default="*.col2;*.COL2", options={'HIDDEN'})
-
-    #######################################################
-    def execute(self, context):
-        path = self.filepath
-        report_lines = []
-        created_objects = []
-
-        try:
-            with open(path, "rb") as f:
-                header = parse_col2_header(f)
-                file_size = header["file_size"]
-                dir_off   = header["dir_off"]
-
-                # Header hexdump
-                f.seek(0)
-                preview = read_exact(f, min(64, HEADER_SIZE))
-                hex_dump = hexdump_block(preview, base_off=0, width=16)
-
-                # Resource table
-                f.seek(dir_off)
-                entries, table_report = scan_resource_table(
-                    f,
-                    start_off=dir_off,
-                    file_size=file_size,
-                    stop_on_sentinel=True,
-                    max_entries_hint=None
-                )
-            with open(path, "rb") as f2:
-                report_lines.append("="*96)
-                report_lines.append(f"COL2 Report: {path}")
-                report_lines.append("="*96)
-                report_lines.append(header["report"])
-                report_lines.append("-"*96)
-                report_lines.append("Header hexdump (first bytes):")
-                report_lines.append(hex_dump)
-                report_lines.append("-"*96)
-                report_lines.append(table_report)
-                report_lines.append("-"*96)
-
-                sector_counter = 0
-                for idx, (rid, roff) in enumerate(entries):
-                    if roff >= file_size:
-                        report_lines.append(f"[WARN] Entry[{idx}] offset {hex32(roff)} outside file; skipping.")
-                        continue
-
-                    sector_counter += 1
-                    next_abs = parse_sector(
-                        f2,
-                        base=roff,
-                        file_size=file_size,
-                        sector_index=sector_counter,
-
-                        report_lines=report_lines,
-                        created_objects=created_objects,
-                        log=lambda m: report_lines.append(m)
-                    )
-
-
-
-            print("\n".join(report_lines))
-
-            text_name = "COL2_Report"
-            txt = bpy.data.texts.get(text_name) or bpy.data.texts.new(text_name)
-            txt.clear()
-            txt.write("\n".join(report_lines) + "\n")
-
-            self.report({'INFO'}, f"COL2 parsed. Entries: {len(entries)} | Sectors parsed: {sector_counter} | Objects: {len(created_objects)}")
-            return {'FINISHED'}
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed: {e}")
-            return {'CANCELLED'}
 
 #######################################################
-def menu_func_import(self, context):
-    self.layout.operator(ImportCOL2Operator.bl_idname, text="R* Leeds: Collision2 (.col2)")
+# Gathering models
+#######################################################
+def find_colmodels_from_entries(file, header, entries, report_lines, log):
+    data_end = header["data_end"]
+    colmodels = {}
 
-classes = (
-    ImportCOL2Operator,
-)
+    report_lines.append("=== CColModel discovery (single-level table) ===")
+    report_lines.append(f"Data end        : {hex32(data_end)}")
+    report_lines.append(f"Resource entries: {len(entries)}")
 
-def register():
-    for cls in classes:
-        bpy.utils.register_class(cls)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
+    for index, (resource_id, resource_offset) in enumerate(entries):
+        if resource_offset < HEADER_SIZE or resource_offset >= data_end:
+            report_lines.append(
+                f"[{index:04d}] id={hex32(resource_id)} "
+                f"off={hex32(resource_offset)} skipped (outside [HEADER,data_end))."
+            )
+            continue
 
-def unregister():
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-    for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        header_candidate = read_colmodel_header(file, resource_offset, data_end)
+        if header_candidate is None:
+            report_lines.append(
+                f"[{index:04d}] id={hex32(resource_id)} off={hex32(resource_offset)} "
+                f"not recognised as CColModel."
+            )
+            continue
 
-if __name__ == "__main__":
-    register()
+        entry = colmodels.get(resource_offset)
+        if entry is None:
+            entry = {"header": header_candidate, "refs": []}
+            colmodels[resource_offset] = entry
+        entry["refs"].append(resource_id)
+
+        report_lines.append(
+            f"[{index:04d}] id={hex32(resource_id)} off={hex32(resource_offset)} -> CColModel "
+            f"tris={header_candidate['numTris']} boxes={header_candidate['numBoxes']} "
+            f"spheres={header_candidate['numSpheres']}"
+        )
+
+    report_lines.append(f"Total CColModels accepted: {len(colmodels)}")
+    if not colmodels:
+        report_lines.append("No CColModel headers passed sanity; nothing to import.")
+    return colmodels

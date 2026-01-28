@@ -1,152 +1,420 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars)
 # Author: spicybung
-# Years: 2025 - 
-
+# Years: 2025 -
+#
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-
+#
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-
+#
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from __future__ import annotations
+
+import math
+from typing import Optional, Tuple
+
 import bpy
+from bpy.props import (
+    BoolProperty,
+    EnumProperty,
+    FloatVectorProperty,
+    StringProperty,
+)
+from mathutils import Vector
 
-from bpy.props import StringProperty, FloatProperty, BoolProperty, IntProperty
 
-class CW_InstanceProps(bpy.types.PropertyGroup):
-    wbl_name: StringProperty(name="WBL Name", description="Name shown for this imported WBL chunk or instance", default="")
-    mdl_name: StringProperty(name="MDL Name", description="MDL identifier or source filename without extension", default="")
-    import_scale: FloatProperty(name="Import Scale", description="Scale applied when building meshes from WBL/MDL data", default=1.0, min=0.0001, max=1000.0, soft_min=0.001, soft_max=100.0)
-    uv_offset: FloatProperty(name="UV Offset", description="Horizontal UV offset applied to imported vertices", default=0.0)
-    is_light: BoolProperty(name="Is Light", description="Marks this object as a light parsed from the source", default=False)
-    part_index: IntProperty(name="Part Index", description="Part index inside the source block (mesh index)", default=0, min=0)
-    flags: IntProperty(name="Flags", description="Flags parsed from the source entry", default=0, min=0)
+def find_mdl_root(obj: Optional[bpy.types.Object]) -> Optional[bpy.types.Object]:
+    """Walk up the parent chain and return the first object marked as a BLeeds MDL root."""
+    if obj is None:
+        return None
 
-class CW_OT_LoadFromCustom(bpy.types.Operator):
-    """Load Rockstar Leeds custom block into the active object"""
-    bl_idname = "object.cw_load_from_custom"
-    bl_label = "Load From Custom"
+    cur = obj
+    while cur is not None:
+        if getattr(cur, "bleeds_is_mdl_root", False):
+            return cur
+
+        try:
+            if bool(cur.get("bleeds_is_mdl_root", False)):
+                return cur
+        except Exception:
+            pass
+
+        cur = cur.parent
+
+    return None
+
+
+def read_root_base_scale_pos(root: bpy.types.Object) -> Tuple[Vector, Vector]:
+    """Read base scale/pos from either typed props or ID props."""
+    if hasattr(root, "bleeds_leeds_scale_base") and hasattr(root, "bleeds_leeds_pos_base"):
+        return Vector(root.bleeds_leeds_scale_base), Vector(root.bleeds_leeds_pos_base)
+
+    scale = root.get("bleeds_leeds_scale_base", [1.0, 1.0, 1.0])
+    pos = root.get("bleeds_leeds_pos_base", [0.0, 0.0, 0.0])
+    return Vector(scale), Vector(pos)
+
+
+def compute_effective_scale_pos(root: bpy.types.Object) -> Tuple[Vector, Vector]:
+    """Compute the current effective in-game scale/pos, based on the root transform."""
+    base_scale, base_pos = read_root_base_scale_pos(root)
+
+    root_scale = Vector((root.scale.x, root.scale.y, root.scale.z))
+    root_loc = Vector((root.location.x, root.location.y, root.location.z))
+
+    effective_scale = Vector((
+        base_scale.x * root_scale.x,
+        base_scale.y * root_scale.y,
+        base_scale.z * root_scale.z,
+    ))
+    effective_pos = Vector((
+        base_pos.x * root_scale.x + root_loc.x,
+        base_pos.y * root_scale.y + root_loc.y,
+        base_pos.z * root_scale.z + root_loc.z,
+    ))
+    return effective_scale, effective_pos
+
+
+def value_as_power_of_two_fraction_hint(value: float, eps: float = 1e-6) -> str:
+    """Return a friendly fraction hint for values like 0.5, 0.25, 0.0625, 0.03125."""
+    if value == 0.0:
+        return "0"
+    sign = "-" if value < 0.0 else ""
+    v = abs(float(value))
+
+    for p in range(0, 21):
+        candidate = 1.0 / (2.0 ** p) if p > 0 else 1.0
+        if abs(v - candidate) <= eps:
+            if p == 0:
+                return f"{sign}1"
+            return f"{sign}1/{2**p}"
+
+    for p in range(1, 21):
+        candidate = float(2 ** p)
+        if abs(v - candidate) <= eps:
+            return f"{sign}{2**p}"
+
+    return ""
+
+
+class EXPORT_OT_MDL_Bake_LeedsScalePos(bpy.types.Operator):
+    """Bake the current root transform into the stored Leeds scale/pos and reset the root."""
+    bl_idname = "bleeds.mdl_bake_leeds_scale_pos"
+    bl_label = "Bake Root into Leeds Scale/Pos"
     bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None:
-            self.report({'ERROR'}, "No active object")
-            return {'CANCELLED'}
-        self.report({'INFO'}, f"Loaded custom data into: {obj.name}")
-        return {'FINISHED'}
-
-
-class CW_OT_SaveToCustom(bpy.types.Operator):
-    """Save active object's data back into a Rockstar Leeds custom block"""
-    bl_idname = "object.cw_save_to_custom"
-    bl_label = "Save To Custom"
-    bl_options = {"REGISTER", "UNDO"}
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None:
-            self.report({'ERROR'}, "No active object")
-            return {'CANCELLED'}
-        self.report({'INFO'}, f"Saved custom data from: {obj.name}")
-        return {'FINISHED'}
-
-
-class CW_PT_Instance(bpy.types.Panel):
-    """Sidebar panel to view/edit CW_InstanceProps and trigger load/save"""
-    bl_label = "BLeeds Instance"
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "BLeeds"
 
     @classmethod
-    def poll(cls, context):
-        return context.object is not None
+    def poll(cls, context: bpy.types.Context) -> bool:
+        root = find_mdl_root(context.object)
+        return root is not None
 
-    def draw(self, context):
+    def execute(self, context: bpy.types.Context) -> set:
+        root = find_mdl_root(context.object)
+        if root is None:
+            self.report({"ERROR"}, "No BLeeds MDL root found.")
+            return {"CANCELLED"}
+
+        cached_world = {}
+        for obj in root.children_recursive:
+            cached_world[obj.name] = obj.matrix_world.copy()
+
+        eff_scale, eff_pos = compute_effective_scale_pos(root)
+
+        if hasattr(root, "bleeds_leeds_scale_base"):
+            root.bleeds_leeds_scale_base = (eff_scale.x, eff_scale.y, eff_scale.z)
+        else:
+            root["bleeds_leeds_scale_base"] = [eff_scale.x, eff_scale.y, eff_scale.z]
+
+        if hasattr(root, "bleeds_leeds_pos_base"):
+            root.bleeds_leeds_pos_base = (eff_pos.x, eff_pos.y, eff_pos.z)
+        else:
+            root["bleeds_leeds_pos_base"] = [eff_pos.x, eff_pos.y, eff_pos.z]
+
+        root.location = (0.0, 0.0, 0.0)
+        root.rotation_euler = (0.0, 0.0, 0.0)
+        root.scale = (1.0, 1.0, 1.0)
+
+        for obj in root.children_recursive:
+            mw = cached_world.get(obj.name, None)
+            if mw is not None:
+                obj.matrix_world = mw
+
+        return {"FINISHED"}
+
+
+class EXPORT_PT_MDL_LeedsScalePos(bpy.types.Panel):
+    bl_idname = "EXPORT_PT_MDL_LeedsScalePos"
+    bl_label = "BLeeds - Export Object"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        return find_mdl_root(context.object) is not None
+
+    def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
-        obj = context.object
-        inst = getattr(obj, "cw_instance", None)
+        layout.use_property_split = True
+        layout.use_property_decorate = False
 
-        if inst is None:
-            layout.label(text="cw_instance not set on this object", icon="INFO")
-            layout.operator("object.cw_load_from_custom", icon="IMPORT")
+        root = find_mdl_root(context.object)
+        if root is None:
+            layout.label(text="No BLeeds MDL root found.")
             return
 
-        col = layout.column(align=True)
-        col.prop(inst, "wbl_name")
-        col.prop(inst, "mdl_name")
-        col.prop(inst, "import_scale")
-        col.prop(inst, "uv_offset")
-        col.prop(inst, "is_light")
-        col.prop(inst, "part_index")
-        col.prop(inst, "flags")
+        box = layout.box()
+        col = box.column(align=True)
+        col.label(text=f"Root: {root.name}")
 
-        row = layout.row(align=True)
-        row.operator("object.cw_load_from_custom", icon="IMPORT")
-        row.operator("object.cw_save_to_custom", icon="EXPORT")
+        hash_key = None
+        try:
+            if hasattr(root, "bleeds_mdl_atomic_hash_key"):
+                hash_key = int(root.bleeds_mdl_atomic_hash_key)
+            elif "bleeds_mdl_atomic_hash_key" in root:
+                hash_key = int(root["bleeds_mdl_atomic_hash_key"])
+        except Exception:
+            pass
+        if hash_key is not None:
+            col.label(text=f"Hash Key: 0x{hash_key:08X}")
 
-class CW_MT_ImportChoice(bpy.types.Menu):
-    """File > Import menu for Rockstar Leeds formats"""
-    bl_idname = "CW_MT_import_choice"
-    bl_label = "Rockstar Leeds Import"
+        meta = col.column(align=True)
+        if hasattr(root, "bleeds_mdl_platform"):
+            meta.prop(root, "bleeds_mdl_platform", text="Platform")
+        else:
+            meta.label(text=f"Platform: {root.get('bleeds_mdl_platform', 'Unknown')}")
 
-    def draw(self, context):
+        if hasattr(root, "bleeds_mdl_type"):
+            meta.prop(root, "bleeds_mdl_type", text="MDL Type")
+        else:
+            meta.label(text=f"MDL Type: {root.get('bleeds_mdl_type', 'Unknown')}")
+
+        if hasattr(root, "bleeds_mdl_filepath"):
+            meta.prop(root, "bleeds_mdl_filepath", text="Source")
+        else:
+            src = root.get("bleeds_mdl_filepath", "")
+            if src:
+                meta.label(text=f"Source: {src}")
+
+        layout.separator()
+        base_box = layout.box()
+        base_box.label(text="MDL Base (In-Game)")
+
+        if hasattr(root, "bleeds_leeds_scale_base"):
+            base_box.prop(root, "bleeds_leeds_scale_base", text="Scale")
+        else:
+            base_box.prop(root, '["bleeds_leeds_scale_base"]', text="Scale")
+
+        if hasattr(root, "bleeds_leeds_pos_base"):
+            base_box.prop(root, "bleeds_leeds_pos_base", text="Pos")
+        else:
+            base_box.prop(root, '["bleeds_leeds_pos_base"]', text="Pos")
+
+        base_scale, base_pos = read_root_base_scale_pos(root)
+        hint_row = base_box.row(align=True)
+        hint_row.label(text="Scale hint:")
+        hint_row.label(
+            text=(
+                f"X {value_as_power_of_two_fraction_hint(base_scale.x)}  "
+                f"Y {value_as_power_of_two_fraction_hint(base_scale.y)}  "
+                f"Z {value_as_power_of_two_fraction_hint(base_scale.z)}"
+            )
+        )
+
+        layout.separator()
+        tr_box = layout.box()
+        tr_box.label(text="Blender Root Transform")
+        tr_box.prop(root, "location")
+        tr_box.prop(root, "rotation_euler", text="Rotation")
+        tr_box.prop(root, "scale")
+
+        layout.separator()
+        eff_box = layout.box()
+        eff_box.label(text="Effective (In-Game) After Root")
+
+        eff_scale, eff_pos = compute_effective_scale_pos(root)
+        eff_box.label(text=f"Scale: ({eff_scale.x:.8g}, {eff_scale.y:.8g}, {eff_scale.z:.8g})")
+        eff_box.label(text=f"Pos:   ({eff_pos.x:.8g}, {eff_pos.y:.8g}, {eff_pos.z:.8g})")
+
+        eff_hint_row = eff_box.row(align=True)
+        eff_hint_row.label(text="Scale hint:")
+        eff_hint_row.label(
+            text=(
+                f"X {value_as_power_of_two_fraction_hint(eff_scale.x)}  "
+                f"Y {value_as_power_of_two_fraction_hint(eff_scale.y)}  "
+                f"Z {value_as_power_of_two_fraction_hint(eff_scale.z)}"
+            )
+        )
+
+        if abs(root.rotation_euler.x) > 1e-6 or abs(root.rotation_euler.y) > 1e-6 or abs(root.rotation_euler.z) > 1e-6:
+            warn = eff_box.column(align=True)
+            warn.alert = True
+            warn.label(text="Warning: Root rotation is non-zero.")
+            warn.label(text="MDL scale/pos is axis-aligned; rotation is not represented in the file.")
+
+        layout.separator()
+        layout.operator(EXPORT_OT_MDL_Bake_LeedsScalePos.bl_idname, icon="FILE_TICK")
+
+        try:
+            from ..ops.mdl_exporter import gather_mesh_parts  
+        except Exception:
+            gather_mesh_parts = None
+        if gather_mesh_parts is not None and root is not None:
+            try:
+                meshes = gather_mesh_parts(context, root)
+            except Exception:
+                meshes = []
+            counts: list[int] = []
+            depsgraph = context.evaluated_depsgraph_get()
+            for obj in meshes:
+                try:
+                    obj_eval = obj.evaluated_get(depsgraph)
+                    mesh_eval = obj_eval.to_mesh(preserve_all_data_layers=True, depsgraph=depsgraph)
+                    counts.append(len(mesh_eval.vertices))
+                except Exception:
+                    counts.append(0)
+                finally:
+                    try:
+                        obj_eval.to_mesh_clear()
+                    except Exception:
+                        pass
+            try:
+                if hasattr(root, "bleeds_mdl_part_batch_verts"):
+                    root.bleeds_mdl_part_batch_verts = [int(x) for x in counts]
+                else:
+                    root["bleeds_mdl_part_batch_verts"] = [int(x) for x in counts]
+            except Exception:
+                pass
+            if counts:
+                geom_box = layout.box()
+                geom_box.label(text="Geometry Stats")
+                for i, cnt in enumerate(counts):
+                    geom_box.label(text=f"Part {i}: {cnt} verts")
+
+
+# --------------------------------------------------------------------------
+# Export Normals Toggle
+#
+# The exporter now supports enabling/disabling normal export via a property
+# stored on the MDL root.  This panel exposes a checkbox to control
+# ``bleeds_export_use_normals`` for the active root.  When enabled the
+# exporter writes a normals stream immediately after the UV stream for
+# each DMA packet.
+
+class EXPORT_PT_MDL_ExportOptions(bpy.types.Panel):
+    bl_idname = "EXPORT_PT_MDL_ExportOptions"
+    bl_label = "BLeeds Export Options"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        obj = context.object
+        return obj is not None and find_mdl_root(obj) is not None
+
+    def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
-        layout.operator("import_scene.cw_wbl", text="CW WBL (.wbl)")
-        layout.operator("import_scene.cw_mdl", text="CW MDL (.mdl)")
-        layout.operator("import_scene.mh2_mdl", text="MH2 MDL (.mdl)")
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        root = find_mdl_root(context.object)
+        if root is None:
+            layout.label(text="No BLeeds MDL root found.")
+            return
+
+        if not hasattr(root, "bleeds_export_use_normals") and "bleeds_export_use_normals" not in root:
+            try:
+                root["bleeds_export_use_normals"] = False
+            except Exception:
+                pass
+
+        try:
+            layout.prop(root, '["bleeds_export_use_normals"]', text="Export Normals")
+        except Exception:
+            layout.label(text="Unable to access export normals flag.")
 
 
-class CW_MT_ExportChoice(bpy.types.Menu):
-    """File > Export menu for Rockstar Leeds formats"""
-    bl_idname = "CW_MT_export_choice"
-    bl_label = "Rockstar Leeds Export"
+def register() -> None:
+    bpy.utils.register_class(EXPORT_OT_MDL_Bake_LeedsScalePos)
+    bpy.utils.register_class(EXPORT_PT_MDL_LeedsScalePos)
+    bpy.utils.register_class(EXPORT_PT_MDL_ExportOptions)
 
-    def draw(self, context):
-        layout = self.layout
-        layout.operator("export_scene.cw_wbl", text="WBL (.wbl)")
+    if not hasattr(bpy.types.Object, "bleeds_is_mdl_root"):
+        bpy.types.Object.bleeds_is_mdl_root = BoolProperty(
+            name="BLeeds MDL Root",
+            description="Marks this object as the root of an imported BLeeds MDL",
+            default=False,
+        )
 
-class TOPBAR_MT_file_import_bleeds(bpy.types.Menu):
-    bl_idname = "TOPBAR_MT_file_import_bleeds"
-    bl_label  = "BLeeds"
+    if not hasattr(bpy.types.Object, "bleeds_mdl_platform"):
+        bpy.types.Object.bleeds_mdl_platform = EnumProperty(
+            name="Platform",
+            description="Stories platform for this MDL",
+            items=[
+                ("PS2", "PS2", "PlayStation 2"),
+                ("PSP", "PSP", "PlayStation Portable"),
+            ],
+            default="PS2",
+        )
 
-    def draw(self, context):
-        layout = self.layout
-        layout.operator("import_scene.cw_wbl",
-                        text="R* Leeds: Chinatown Wars Worldblock (.wbl)",
-                        icon='MESH_GRID')
-        layout.operator("import_scene.mh2_mdl",
-                text="R* Leeds: Manhunt 2 Model (.mdl)",
-                icon='MESH_GRID')
+    if not hasattr(bpy.types.Object, "bleeds_mdl_type"):
+        bpy.types.Object.bleeds_mdl_type = EnumProperty(
+            name="MDL Type",
+            description="Stories MDL type",
+            items=[
+                ("PED", "PED", "Ped/character model"),
+                ("SIM", "SIM", "Prop model"),
+                ("VEH", "VEH", "Vehicle model"),
+            ],
+            default="SIM",
+        )
 
-def _menu_import_append(self, context):
-    self.layout.menu(TOPBAR_MT_file_import_bleeds.bl_idname)
+    if not hasattr(bpy.types.Object, "bleeds_mdl_filepath"):
+        bpy.types.Object.bleeds_mdl_filepath = StringProperty(
+            name="Source File",
+            description="Original MDL file path used for import",
+            default="",
+            subtype="FILE_PATH",
+        )
 
-def cw_menu_import(self, context):
-    self.layout.menu(TOPBAR_MT_file_import_bleeds.bl_idname)
+    if not hasattr(bpy.types.Object, "bleeds_leeds_scale_base"):
+        bpy.types.Object.bleeds_leeds_scale_base = FloatVectorProperty(
+            name="Leeds Scale (Base)",
+            description="Base in-game scale stored by the MDL (used for vertex decode)",
+            size=3,
+            default=(1.0, 1.0, 1.0),
+            subtype="XYZ",
+        )
 
-def cw_menu_export(self, context):
-    layout = self.layout
-    layout.operator("export_scene.cw_wbl", text="Rockstar Leeds: WBL (.wbl)")
+    if not hasattr(bpy.types.Object, "bleeds_leeds_pos_base"):
+        bpy.types.Object.bleeds_leeds_pos_base = FloatVectorProperty(
+            name="Leeds Pos (Base)",
+            description="Base in-game position stored by the MDL (used for vertex decode)",
+            size=3,
+            default=(0.0, 0.0, 0.0),
+            subtype="TRANSLATION",
+        )
 
-classes = (CW_InstanceProps,
-           CW_OT_LoadFromCustom,
-           CW_OT_SaveToCustom,
-           CW_PT_Instance,
-           TOPBAR_MT_file_import_bleeds
-           )
-def register():
-    for c in classes: bpy.utils.register_class(c)
-    bpy.utils.register_class(TOPBAR_MT_file_import_bleeds)
-    bpy.types.TOPBAR_MT_file_import.append(_menu_import_append)
-def unregister():
-    for c in reversed(classes): bpy.utils.unregister_class(c)
-    bpy.types.TOPBAR_MT_file_import.remove(_menu_import_append)
-    bpy.utils.unregister_class(TOPBAR_MT_file_import_bleeds)
+
+def unregister() -> None:
+    bpy.utils.unregister_class(EXPORT_PT_MDL_ExportOptions)
+    bpy.utils.unregister_class(EXPORT_PT_MDL_LeedsScalePos)
+    bpy.utils.unregister_class(EXPORT_OT_MDL_Bake_LeedsScalePos)
+
+    for prop_name in (
+        "bleeds_is_mdl_root",
+        "bleeds_mdl_platform",
+        "bleeds_mdl_type",
+        "bleeds_mdl_filepath",
+        "bleeds_leeds_scale_base",
+        "bleeds_leeds_pos_base",
+    ):
+        if hasattr(bpy.types.Object, prop_name):
+            delattr(bpy.types.Object, prop_name)

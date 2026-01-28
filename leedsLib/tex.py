@@ -1,5 +1,4 @@
-
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - R* Leeds texture reader for CHK/XTX/TEX
 # Author: spicybung
 # Years: 2025 -
 #
@@ -17,20 +16,18 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
-import io
-import bpy
+import struct
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional, Sequence
 
-from bpy.types import Operator
-from bpy.props import StringProperty, IntProperty
-from bpy_extras.io_utils import ImportHelper
-from bpy.types import TOPBAR_MT_file_import
+import numpy as np
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .CHK/.XTX/.TEX - dictionaries for LCS/VCS/CW/MH2 textures    #
+#   This script is for .CHK/XTX/TEX - dictionaries for LCS/VCS/CW/MH2 textures      #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
-# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (... .xtx, .tex)
+# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (.xtx, .tex)
 # - Mod resources/cool stuff:
 # • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (extract textures)
 # • https://gtaforums.com/topic/518948-rel-gta-stories-texture-explorer-20/ (view/explore textures)
@@ -38,324 +35,544 @@ from bpy.types import TOPBAR_MT_file_import
 
 
 #######################################################
-def u8(b: bytes, off: int) -> int:
-    return b[off]
-#######################################################
-def u24(b: bytes, off: int) -> int:
-    return b[off] | (b[off + 1] << 8) | (b[off + 2] << 16)
-#######################################################
-def u32(b: bytes, off: int) -> int:
-    return int.from_bytes(b[off:off+4], byteorder="little", signed=False)
-#######################################################
-def cstr64(b: bytes) -> str:
-    n = b.find(0)
-    if n == -1:
-        n = len(b)
-    return b[:n].decode("ascii", "replace")
-#######################################################
-def read_block(fp: io.BufferedReader, offset: int, size: int):
-    here = fp.tell()
-    try:
-        fp.seek(offset, os.SEEK_SET)
-        data = fp.read(size)
-        if not data or len(data) < size:
-            return (None, 0 if not data else len(data))
-        return (data, len(data))
-    finally:
-        fp.seek(here, os.SEEK_SET)
+def read_u32(data: bytes, offset: int) -> int:
 
-#######################################################
-def parse_collection_header(fp):
-    head, fsz = read_block(fp, 0, 0x30)
-    if head is None:
-        raise RuntimeError("file too small")
-    return {
-        "sig": head[0:4].decode("ascii","replace"),
-        "plat": u32(head,0x04),
-        "fsz": fsz,
-        "coll_size": u32(head,0x08),
-        "glob1": u32(head,0x0C),
-        "glob2": u32(head,0x10),
-        "glob_count": u32(head,0x14),
-        "cont_byte": u8(head,0x20),
-        "flags24": u24(head,0x21),
-        "first_slot": u32(head,0x28),
-        "last_slot":  u32(head,0x2C),
-    }
+    return struct.unpack_from('<I', data, offset)[0]
 
-#######################################################
-def parse_container_from_current(fp):
-  
-    base = fp.tell()
-    block, fsz = read_block(fp, base, 16 + 64)  # 80 bytes total
-    if block is None:
+
+def read_cstr(data: bytes, offset: int, length: int) -> str:
+
+    s = data[offset:offset + length]
+    end = s.find(b'\0')
+    if end == -1:
+        end = len(s)
+    return s[:end].decode('ascii', 'replace')
+
+
+###############################################################################
+# PSP unswizzling routines (4‑bit, 8‑bit and 32‑bit)
+###############################################################################
+
+
+def unswizzle_psp_4bit(src: bytes, w: int, h: int) -> bytes:
+
+    min_width = 32  
+    bufw = w if w >= min_width else min_width
+    stride = bufw // 2
+    dest = bytearray(stride * h)
+    nbx = stride // 16
+    nby = (h + 7) // 8
+    src_pos = 0
+    for yb in range(nby):
+        row_base = yb * 8 * stride
+        for xb in range(nbx):
+            block_base = row_base + xb * 16
+            b_off = block_base
+            for n in range(8):
+                dest[b_off:b_off + 16] = src[src_pos:src_pos + 16]
+                src_pos += 16
+                b_off += stride
+    out = bytearray((w // 2) * h)
+    for row in range(h):
+        src_offset = row * stride
+        dst_offset = row * (w // 2)
+        out[dst_offset:dst_offset + (w // 2)] = dest[src_offset:src_offset + (w // 2)]
+    return bytes(out)
+
+
+def unswizzle_psp_8bit(src: bytes, w: int, h: int) -> bytes:
+    """Unscramble a swizzled 8‑bpp texture using the PSP algorithm."""
+    min_width = 16  
+    bufw = w if w >= min_width else min_width
+    stride = bufw
+    dest = bytearray(stride * h)
+    nbx = stride // 16
+    nby = (h + 7) // 8
+    src_pos = 0
+    for yb in range(nby):
+        row_base = yb * 8 * stride
+        for xb in range(nbx):
+            block_base = row_base + xb * 16
+            b_off = block_base
+            for n in range(8):
+                dest[b_off:b_off + 16] = src[src_pos:src_pos + 16]
+                src_pos += 16
+                b_off += stride
+    out = bytearray(w * h)
+    for row in range(h):
+        src_offset = row * stride
+        dst_offset = row * w
+        out[dst_offset:dst_offset + w] = dest[src_offset:src_offset + w]
+    return bytes(out)
+
+
+def unswizzle_psp_32bit(src: bytes, w: int, h: int) -> bytes:
+    """Unscramble a swizzled 32‑bit texture using the PSP algorithm."""
+    min_width = 4
+    bufw = w if w >= min_width else min_width
+    stride = bufw * 4
+    dest = bytearray(stride * h)
+    nbx = stride // 16
+    nby = (h + 7) // 8
+    src_pos = 0
+    for yb in range(nby):
+        row_base = yb * 8 * stride
+        for xb in range(nbx):
+            block_base = row_base + xb * 16
+            b_off = block_base
+            for n in range(8):
+                dest[b_off:b_off + 16] = src[src_pos:src_pos + 16]
+                src_pos += 16
+                b_off += stride
+    out = bytearray(w * h * 4)
+    for row in range(h):
+        src_offset = row * stride
+        dst_offset = row * w * 4
+        out[dst_offset:dst_offset + w * 4] = dest[src_offset:src_offset + w * 4]
+    return bytes(out)
+
+
+def expand_nibbles_lo_first(data: bytes) -> np.ndarray:
+
+    out = np.empty(len(data) * 2, dtype=np.uint8)
+    for i, value in enumerate(data):
+        out[2 * i] = value & 0x0F
+        out[2 * i + 1] = (value >> 4) & 0x0F
+    return out
+
+
+###############################################################################
+# PS2 unswizzling and CLUT conversion routines
+###############################################################################
+
+
+def swizzle_ps2(x: int, y: int, logw: int) -> int:
+
+    nx = (x & 7) ^ (((y >> 1) ^ (y >> 2)) << 2)
+    nx = (nx & 7) | ((x >> 1) & ~7)
+    ny = (y & 1) | ((y >> 1) & ~1)
+    n = ((y >> 1) & 1) | (((x >> 3) & 1) << 1)
+    return n | (nx << 2) | (ny << (logw - 1 + 2))
+
+
+def unswizzle_ps2_indices(idx: np.ndarray, w: int, h: int) -> np.ndarray:
+
+    total = w * h
+    dst = np.empty(total, dtype=np.uint8)
+    logw = 0
+    tmp = 1
+    while tmp < w:
+        tmp <<= 1
+        logw += 1
+    for y in range(h):
+        for x in range(w):
+            dst[y * w + x] = idx[swizzle_ps2(x, y, logw) % len(idx)]
+    return dst
+
+
+def convert_clut_ps2(data: np.ndarray) -> None:
+   
+    mapping = [0x00, 0x10, 0x08, 0x18]
+    for i in range(len(data)):
+        v = int(data[i])
+        data[i] = (v & ~0x18) | mapping[(v & 0x18) >> 3]
+
+
+###############################################################################
+# Header structures for PSP and PS2
+###############################################################################
+
+
+@dataclass
+class PspTexHeader:
+    """Represents a 16‑byte PSP texture header in a CHK container."""
+
+    unknown0: int
+    raster_offset: int
+    swizzle_width: int
+    width_pow2: int
+    height_pow2: int
+    bpp: int
+    mip_count: int
+    tail: int
+
+    @property
+    def width(self) -> int:
+        """Return the texture width calculated from ``width_pow2``."""
+        return 1 << self.width_pow2 if self.width_pow2 < 32 else 0
+
+    @property
+    def height(self) -> int:
+        """Return the texture height calculated from ``height_pow2``."""
+        return 1 << self.height_pow2 if self.height_pow2 < 32 else 0
+
+
+@dataclass
+class Ps2TexHeader:
+    """Represents a 16‑byte PS2 texture header in a CHK container."""
+
+    reserved0: int
+    reserved1: int
+    raster_offset: int
+    flags: int
+
+    @property
+    def swizzle_mask(self) -> int:
+        return self.flags & 0xFF
+
+    @property
+    def mip_count(self) -> int:
+        return (self.flags >> 8) & 0xF
+
+    @property
+    def bpp(self) -> int:
+        return (self.flags >> 14) & 0x3F
+
+    @property
+    def width_pow2(self) -> int:
+        return (self.flags >> 20) & 0x3F
+
+    @property
+    def height_pow2(self) -> int:
+        return (self.flags >> 26) & 0x3F
+
+    @property
+    def width(self) -> int:
+        return 1 << self.width_pow2 if self.width_pow2 < 32 else 0
+
+    @property
+    def height(self) -> int:
+        return 1 << self.height_pow2 if self.height_pow2 < 32 else 0
+
+
+###############################################################################
+# Parsing functions
+###############################################################################
+
+
+def parse_psp_header(data: bytes, offset: int) -> Optional[PspTexHeader]:
+
+    if offset <= 0 or offset + 16 > len(data):
         return None
-    tex_off   = u32(block, 0x00)
-    coll      = u32(block, 0x04)
-    next_slot = u32(block, 0x08)
-    prev_slot = u32(block, 0x0C)
-    name      = cstr64(block[0x10:0x10+64])
+    hdr = data[offset:offset + 16]
+    if len(hdr) < 16:
+        return None
+    unknown0 = read_u32(hdr, 0)
+    raster_offset = read_u32(hdr, 4)
+    swizzle_width = struct.unpack_from('<H', hdr, 8)[0]
+    width_pow2 = hdr[10]
+    height_pow2 = hdr[11]
+    bpp = hdr[12]
+    mip_count = hdr[13]
+    tail = struct.unpack_from('<H', hdr, 14)[0]
+    width = 1 << width_pow2 if width_pow2 < 32 else 0
+    height = 1 << height_pow2 if height_pow2 < 32 else 0
+    if width == 0 or height == 0 or width > 4096 or height > 4096:
+        return None
+    return PspTexHeader(
+        unknown0=unknown0,
+        raster_offset=raster_offset,
+        swizzle_width=swizzle_width,
+        width_pow2=width_pow2,
+        height_pow2=height_pow2,
+        bpp=bpp,
+        mip_count=mip_count,
+        tail=tail,
+    )
+
+
+def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
+    """
+    Attempt to parse a PS2 CHK/XTX texture header at the given offset.
+
+    The standard Leeds PS2 header packs swizzle, mip count, unknown bits, bpp,
+    width exponent and height exponent into a 32‑bit ``flags`` field.  In Vice
+    City Stories (.xtx) files, an alternate bit layout is used where the
+    low 6 bits contain the height exponent, bits 6–11 contain the width
+    exponent, bits 12–17 contain the bits per pixel, bits 18–19 are unknown,
+    bits 20–23 contain the mip count, and bits 24–31 contain the swizzle
+    mask.  This parser detects implausible dimensions from the standard
+    mapping and, if appropriate, remaps the alternate layout into the
+    canonical format before returning a ``Ps2TexHeader`` instance.
+
+    Parameters
+    ----------
+    data : bytes
+        The entire CHK/XTX/TEX archive data.
+    offset : int
+        The offset within ``data`` where the 16‑byte PS2 header begins.
+
+    Returns
+    -------
+    Optional[Ps2TexHeader]
+        A parsed header if dimensions are valid; otherwise ``None``.
+    """
+    if offset <= 0 or offset + 16 > len(data):
+        return None
+    hdr = data[offset:offset + 16]
+    if len(hdr) < 16:
+        return None
+    reserved0 = read_u32(hdr, 0)
+    reserved1 = read_u32(hdr, 4)
+    raster_offset = read_u32(hdr, 8)
+    flags = read_u32(hdr, 12)
+    w_pow2_std = (flags >> 20) & 0x3F
+    h_pow2_std = (flags >> 26) & 0x3F
+    bpp_std = (flags >> 14) & 0x3F
+    width_std = 1 << w_pow2_std if w_pow2_std < 32 else 0
+    height_std = 1 << h_pow2_std if h_pow2_std < 32 else 0
+    use_alt = False
+    h_pow2_alt = flags & 0x3F
+    w_pow2_alt = (flags >> 6) & 0x3F
+    bpp_alt = (flags >> 12) & 0x3F
+    alt_unknown = (flags >> 18) & 0x3
+    mip_alt = (flags >> 20) & 0xF
+    swizzle_alt = (flags >> 24) & 0xFF
+    width_alt = 1 << w_pow2_alt if w_pow2_alt < 32 else 0
+    height_alt = 1 << h_pow2_alt if h_pow2_alt < 32 else 0
+    std_invalid = (width_std == 0 or height_std == 0 or width_std > 4096 or height_std > 4096)
+    alt_valid_dims = (width_alt > 0 and height_alt > 0 and width_alt <= 4096 and height_alt <= 4096)
+    alt_bpp_reasonable = bpp_alt in (4, 8, 16, 32)
+    if (
+        std_invalid or
+        (width_std <= 8 and height_std <= 8) or
+        (bpp_std not in (4, 8, 16, 32))
+    ) and alt_valid_dims and alt_bpp_reasonable:
+        use_alt = True
+    if use_alt:
+        canonical_flags = (
+            (swizzle_alt & 0xFF)
+            | ((mip_alt & 0xF) << 8)
+            | ((alt_unknown & 0x3) << 12)
+            | ((bpp_alt & 0x3F) << 14)
+            | ((w_pow2_alt & 0x3F) << 20)
+            | ((h_pow2_alt & 0x3F) << 26)
+        )
+        flags = canonical_flags
+        width_std = width_alt
+        height_std = height_alt
+    if width_std == 0 or height_std == 0 or width_std > 4096 or height_std > 4096:
+        return None
+    return Ps2TexHeader(
+        reserved0=reserved0,
+        reserved1=reserved1,
+        raster_offset=raster_offset,
+        flags=flags,
+    )
+
+
+###############################################################################
+# Container parsing and traversal
+###############################################################################
+
+
+def slot_base_from_slot_ptr(slot_ptr: int) -> int:
+    """Convert a container slot pointer (offset‑of‑offset) to its base address."""
+    if slot_ptr <= 0:
+        return 0
+    return max(0, slot_ptr - 8)
+
+
+def parse_container(data: bytes, base: int) -> Optional[Dict[str, int]]:
+
+    if base < 0 or base + 80 > len(data):
+        return None
+    tex_off = read_u32(data, base + 0x00)
+    coll_off = read_u32(data, base + 0x04)
+    next_slot = read_u32(data, base + 0x08)
+    prev_slot = read_u32(data, base + 0x0C)
+    name = read_cstr(data, base + 0x10, 64)
     return {
-        "base": base,
-        "tex_off": tex_off,
-        "coll": coll,
-        "prev_slot": prev_slot,
-        "next_slot": next_slot,
-        "name": name,
-        "fsz": fsz,
+        'base': base,
+        'tex_off': tex_off,
+        'coll_off': coll_off,
+        'next_slot': next_slot,
+        'prev_slot': prev_slot,
+        'name': name,
     }
 
-#######################################################
-def hex_dump_around(fp, center_pos: int, span: int = 16) -> str:
-    keep = fp.tell()
-    try:
-        fp.seek(center_pos, os.SEEK_SET)
-        data = fp.read(span) or b""
-    finally:
-        fp.seek(keep, os.SEEK_SET)
-    return " ".join(f"{b:02X}" for b in data)
-#######################################################
-def read_rasterinfo(fp: io.BufferedReader, offset: int, file_size: int) -> dict:
-    """
-    Read the 16-byte rasterinfo structure at 'offset':
-      +0x00 u32 reserved0
-      +0x04 u16 count_a
-      +0x06 u16 count_b
-      +0x08 u32 image_info
-      +0x0C u32 flags
-    """
-    here = fp.tell()
-    try:
-        if offset <= 0 or offset + 16 > file_size:
-            return {"present": False, "reason": f"rasterinfo out of bounds (off=0x{offset:08X})"}
-        fp.seek(offset, os.SEEK_SET)
-        data = fp.read(16)
-        if not data or len(data) < 16:
-            return {"present": False, "reason": "short read for rasterinfo"}
 
-        reserved0 = u32(data, 0x00)
-        count_a   = int.from_bytes(data[0x04:0x06], "little", signed=False)
-        count_b   = int.from_bytes(data[0x06:0x08], "little", signed=False)
-        image_info= u32(data, 0x08)
-        flags     = u32(data, 0x0C)
+###############################################################################
+# Decoding functions for PSP and PS2 textures
+###############################################################################
 
-        return {
-            "present": True,
-            "reserved0": reserved0,
-            "count_a": count_a,
-            "count_b": count_b,
-            "image_info": image_info,
-            "flags": flags,
-            "raw_hex": " ".join(f"{b:02X}" for b in data),
-        }
-    finally:
-        fp.seek(here, os.SEEK_SET)
 
-#######################################################
-def print_rasterinfo_info(rinfo: dict, idx: int):
-    """
-    Console dump for the rasterinfo block of a slot.
-    """
-    print(f"rasterinfo (slot {idx}):")
-    if not rinfo.get("present", False):
-        print(f"  present    : False ({rinfo.get('reason', 'unknown reason')})")
-        print("==============================================================")
-        return
-    print("  present    : True")
-    print(f"  reserved0  : 0x{rinfo['reserved0']:08X}")
-    print(f"  count_a    : {rinfo['count_a']} (0x{rinfo['count_a']:04X})")
-    print(f"  count_b    : {rinfo['count_b']} (0x{rinfo['count_b']:04X})")
-    print(f"  image_info : 0x{rinfo['image_info']:08X} ({rinfo['image_info']})")
-    print(f"  flags      : 0x{rinfo['flags']:08X}")
-    print(f"  raw(16)    : {rinfo['raw_hex']}")
-    print("==============================================================")
+def decode_psp_texture(
+    data: bytes,
+    thdr: PspTexHeader,
+    block_size: int,
+    palette_override: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+) -> Optional[np.ndarray]:
+    w = thdr.width
+    h = thdr.height
+    bpp = thdr.bpp
+    offset = thdr.raster_offset
+    if w <= 0 or h <= 0 or offset <= 0:
+        return None
+    pixel_count = w * h
+    if bpp == 4:
+        base_bytes = (pixel_count + 1) // 2
+    elif bpp == 8:
+        base_bytes = pixel_count
+    elif bpp == 32:
+        base_bytes = pixel_count * 4
+    else:
+        return None
+    if offset + base_bytes > len(data):
+        return None
+    raw = data[offset:offset + base_bytes]
+    if thdr.swizzle_width:
+        if bpp == 4:
+            unswizzled = unswizzle_psp_4bit(raw, w, h)
+            idx = expand_nibbles_lo_first(unswizzled)
+        elif bpp == 8:
+            unswizzled = unswizzle_psp_8bit(raw, w, h)
+            idx = np.frombuffer(unswizzled, dtype=np.uint8)
+        elif bpp == 32:
+            unswizzled = unswizzle_psp_32bit(raw, w, h)
+            rgba = np.frombuffer(unswizzled, dtype=np.uint8).reshape((h, w, 4))
+            return rgba
+    else:
+        if bpp == 4:
+            idx = expand_nibbles_lo_first(raw)
+        elif bpp == 8:
+            idx = np.frombuffer(raw, dtype=np.uint8)
+        elif bpp == 32:
+            rgba = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 4))
+            return rgba
+    pal = palette_override
+    if pal is None:
+        if bpp == 4:
+            pal_size = 16 * 4
+        elif bpp == 8:
+            pal_size = 256 * 4
+        else:
+            pal_size = 0
+        if pal_size > 0:
+            pal_start = offset + block_size - pal_size
+            pal_end = pal_start + pal_size
+            if 0 <= pal_start < pal_end <= len(data):
+                pal_bytes = data[pal_start:pal_end]
+                pal = []
+                for i in range(0, len(pal_bytes), 4):
+                    r = pal_bytes[i]
+                    g = pal_bytes[i + 1]
+                    b = pal_bytes[i + 2]
+                    a = pal_bytes[i + 3]
+                    pal.append((r, g, b, a))
+            else:
+                pal = None
+    rgba = np.empty((h, w, 4), dtype=np.uint8)
+    if pal:
+        for i, v in enumerate(idx[:pixel_count]):
+            y = i // w
+            x = i % w
+            col = pal[int(v) % len(pal)]
+            rgba[y, x] = col
+    else:
+        max_idx = int(idx.max()) if len(idx) > 0 else 0
+        scale = 255.0 / max_idx if max_idx > 0 else 0.0
+        for i, v in enumerate(idx[:pixel_count]):
+            y = i // w
+            x = i % w
+            gval = int(v * scale + 0.5)
+            rgba[y, x] = (gval, gval, gval, 255)
+    return rgba
 
-#######################################################
-def print_header_info(hdr: dict, file_size: int):
-    print("==============================================================")
-    print("Collection Header")
-    print("--------------------------------------------------------------")
-    print(f"sig         : {hdr['sig']!r}")
-    print(f"plat        : 0x{hdr['plat']:08X}")
-    print(f"fsz(read)   : 0x{hdr['fsz']:X} ({hdr['fsz']})")
-    print(f"file_size   : 0x{file_size:X} ({file_size})")
-    print(f"coll_size   : 0x{hdr['coll_size']:X} ({hdr['coll_size']})")
-    print(f"glob1       : 0x{hdr['glob1']:08X}")
-    print(f"glob2       : 0x{hdr['glob2']:08X}")
-    print(f"glob_count  : {hdr['glob_count']}")
-    print(f"cont_byte   : 0x{hdr['cont_byte']:02X}")
-    print(f"flags24     : 0x{hdr['flags24']:06X}")
-    print(f"first_slot  : 0x{hdr['first_slot']:08X} ({hdr['first_slot']})")
-    print(f"last_slot   : 0x{hdr['last_slot']:08X} ({hdr['last_slot']})")
-    print("==============================================================")
 
-#######################################################
-def print_container_info(cinfo: dict, idx: int = None):
-    if idx is not None:
-        print(f"# Slot {idx}")
-    print("Container summary (parsed from current position)")
-    print("--------------------------------------------------------------")
-    print(f"container base        : 0x{cinfo['base']:08X} ({cinfo['base']})")
-    print(f"texture offset: 0x{cinfo['tex_off']:08X} ({cinfo['tex_off']})")
-    print(f"collection header: 0x{cinfo['coll']:08X} ({cinfo['coll']})")
-    print(f"previous slot: 0x{cinfo['prev_slot']:08X} ({cinfo['prev_slot']})")
-    print(f"next slot: 0x{cinfo['next_slot']:08X} ({cinfo['next_slot']})")
-    print(f"texture name: {cinfo['name']!r}")
-    print(f"blocksize(read): {cinfo['fsz']}")
-    print("==============================================================")
+def decode_ps2_texture(
+    data: bytes,
+    thdr: Ps2TexHeader,
+    block_size: int,
+    palette_override: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+) -> Optional[np.ndarray]:
+    w = thdr.width
+    h = thdr.height
+    bpp = thdr.bpp
+    offset = thdr.raster_offset
+    if w <= 0 or h <= 0 or offset <= 0:
+        return None
+    pixel_count = w * h
+    if bpp == 4:
+        base_bytes = (pixel_count + 1) // 2
+    elif bpp == 8:
+        base_bytes = pixel_count
+    elif bpp == 16:
+        base_bytes = pixel_count * 2
+    elif bpp == 32:
+        base_bytes = pixel_count * 4
+    else:
+        return None
+    if offset + base_bytes > len(data):
+        return None
+    raw = data[offset:offset + base_bytes]
+    pal = palette_override
+    if bpp in (4, 8) and pal is None:
+        pal_len = 16 if bpp == 4 else 256
+        pal_bytes_len = pal_len * 4
+        pal_start = offset + block_size - pal_bytes_len
+        pal_end = pal_start + pal_bytes_len
+        if 0 <= pal_start < pal_end <= len(data):
+            pal_bytes = data[pal_start:pal_end]
+            pal = []
+            for i in range(0, len(pal_bytes), 4):
+                r = pal_bytes[i]
+                g = pal_bytes[i + 1]
+                b = pal_bytes[i + 2]
+                a = pal_bytes[i + 3]
+                a = int(a * 255 / 128)
+                if a > 255:
+                    a = 255
+                pal.append((r, g, b, a))
+        else:
+            pal = None
+    if bpp == 4:
+        idx = np.empty(pixel_count, dtype=np.uint8)
+        for i in range(pixel_count // 2):
+            byte = raw[i]
+            idx[i * 2] = byte & 0x0F
+            idx[i * 2 + 1] = byte >> 4
+        if pixel_count % 2:
+            idx[-1] = raw[pixel_count // 2] & 0x0F
+        if thdr.swizzle_mask & 1:
+            idx = unswizzle_ps2_indices(idx, w, h)
+    elif bpp == 8:
+        idx = np.frombuffer(raw, dtype=np.uint8).copy()
+        if thdr.swizzle_mask & 1:
+            idx = unswizzle_ps2_indices(idx, w, h)
+        convert_clut_ps2(idx)
+    elif bpp == 32:
+        if thdr.swizzle_mask & 1:
+            unswizzled = unswizzle_psp_32bit(raw, w, h)
+        else:
+            unswizzled = raw
+        rgba = np.frombuffer(unswizzled, dtype=np.uint8).reshape((h, w, 4))
+        alpha = rgba[:, :, 3].astype(np.int32) * 255 // 128
+        alpha = np.clip(alpha, 0, 255).astype(np.uint8)
+        rgba[:, :, 3] = alpha
+        return rgba
+    else:
+        return None
+    rgba = np.empty((h, w, 4), dtype=np.uint8)
+    if pal:
+        for i in range(pixel_count):
+            y = i // w
+            x = i % w
+            col = pal[int(idx[i]) % len(pal)]
+            rgba[y, x] = col
+    else:
+        max_idx = int(idx.max()) if len(idx) > 0 else 0
+        scale = 255.0 / max_idx if max_idx > 0 else 0.0
+        for i in range(pixel_count):
+            y = i // w
+            x = i % w
+            val = int(idx[i] * scale + 0.5)
+            rgba[y, x] = (val, val, val, 255)
+    return rgba
 
-#######################################################
-def _slot_base_from_slot_ptr(slot_ptr: int) -> int:
-    return max(0, slot_ptr - 0x08)
 
-#######################################################
-def iterate_slots(fp, first_slot: int, last_slot: int, file_size: int, expected_count: int):
+###############################################################################
+# Main decoding logic for Blender
+###############################################################################
 
-    if first_slot <= 0 or first_slot >= file_size:
-        print(f"[warn] first_slot 0x{first_slot:08X} is out of file bounds, aborting iteration.")
-        return
 
-    visited = set()
-    idx = 0
-
-    # Seek to the first container base
-    first_base = _slot_base_from_slot_ptr(first_slot)
-    fp.seek(first_base, os.SEEK_SET)
-
-    while True:
-        here = fp.tell()
-        if here in visited:
-            print(f"[stop] container base 0x{here:08X} has already been visited (cycle detected).")
-            break
-        visited.add(here)
-
-        # Read and print this container
-        cinfo = parse_container_from_current(fp)
-        if cinfo is None:
-            print(f"[stop] could not read container at base 0x{here:08X}.")
-            break
-
-        print_container_info(cinfo, idx=idx)
-
-        rinfo = read_rasterinfo(fp, cinfo["tex_off"], file_size)
-        print_rasterinfo_info(rinfo, idx=idx)
-
-        idx += 1
-        if expected_count and idx >= expected_count:
-            print(f"[stop] reached expected slot count ({expected_count}).")
-            break
-
-        # Decide where to go next
-        nxt = cinfo["next_slot"]
-        if nxt == 0:
-            print("[stop] next_slot == 0 (null).")
-            break
-        if nxt >= file_size:
-            print(f"[stop] next_slot 0x{nxt:08X} is out of bounds (>= file size).")
-            break
-
-        # Compute next container base from slot pointer and seek
-        nxt_base = _slot_base_from_slot_ptr(nxt)
-        fp.seek(nxt_base, os.SEEK_SET)
-
-        # As a safety, also stop if we arrived at the last slot's base and its next
-        # would circle oddly. This gives us a bound when header exposes last_slot.
-        if last_slot and _slot_base_from_slot_ptr(last_slot) == nxt_base:
-            # We'll still parse it in next loop round; after that, whichever pointer it has will decide.
-            pass
-
-#######################################################
-class IMPORT_OT_collection_header(Operator, ImportHelper):
-    bl_idname = "import_scene.collection_header_leeds_cw"
-    bl_label = "Import TXD (Iterate Slots)"
-    bl_options = {"REGISTER", "UNDO"}
-    filename_ext = ".xtx"
-    filter_glob: StringProperty(default="*.xtx;*.chk;*.tex;*.XTX;*.CHK;*.TEX", options={'HIDDEN'})
-
-    #######################################################
-    def execute(self, context):
-        path = self.filepath
-        if not path or not os.path.isfile(path):
-            self.report({'ERROR'}, "No file selected or path is invalid")
-            return {'CANCELLED'}
-
-        try:
-            with open(path, "rb") as fp:
-                # File size
-                fp.seek(0, os.SEEK_END)
-                file_size = fp.tell()
-                fp.seek(0, os.SEEK_SET)
-
-                # Read header and print
-                hdr = parse_collection_header(fp)
-                print_header_info(hdr, file_size)
-
-                # ========== Phase A: Show the seek report for the first slot (as before) ==========
-                first_slot = hdr["first_slot"]
-                last_slot  = hdr["last_slot"]
-                if first_slot >= file_size:
-                    self.report({'WARNING'}, f"first_slot (0x{first_slot:08X}) beyond EOF")
-                    return {'CANCELLED'}
-
-                fp.seek(first_slot, os.SEEK_SET)
-                pos_after_first = fp.tell()
-                back_by = 8
-                new_pos = max(0, pos_after_first - back_by)
-                fp.seek(new_pos, os.SEEK_SET)
-
-                print("---- Seek report --------------------------------------------")
-                print(f"Seeked to first_slot:  0x{first_slot:08X} ({first_slot})")
-                print(f"Then jumped back 0x{back_by:X} ({back_by}) bytes")
-                print(f"Current position:      0x{fp.tell():08X} ({fp.tell()})")
-                print(f"Hex @ current pos (16 bytes): {hex_dump_around(fp, fp.tell(), 16)}")
-                print("--------------------------------------------------------------")
-
-                # Parse and print the very first container at this base (for continuity)
-                cinfo = parse_container_from_current(fp)
-                if cinfo is None:
-                    self.report({'ERROR'}, "Container parse failed at current position")
-                    return {'CANCELLED'}
-                print_container_info(cinfo, idx=0)
-
-                rinfo0 = read_rasterinfo(fp, cinfo["tex_off"], file_size)
-                print_rasterinfo_info(rinfo0, idx=0)
-
-                # ========== Phase B: Iterate forward through the slot chain, 80 bytes each ==========
-                print("=============== Iterating through slot chain (80 bytes each) ===============")
-                # We already printed idx 0 above; start the loop from the next one.
-                # iterate_slots() itself will print starting again from idx 0, so to avoid a duplicate
-                # we move the file pointer to the *next* container before calling it.
-                nxt = cinfo["next_slot"]
-                if nxt and nxt < file_size:
-                    fp.seek(max(0, nxt - 8), os.SEEK_SET)
-                    # We pass glob_count as an upper bound if reasonable (>0)
-                    exp_cnt = hdr["glob_count"] if hdr["glob_count"] > 0 else 0
-                    # We printed 1 already, so if using expected count, subtract one so we end exactly.
-                    exp_cnt = max(0, exp_cnt - 1) if exp_cnt else 0
-                    iterate_slots(fp, nxt, last_slot, file_size, exp_cnt)
-                else:
-                    print("[info] next_slot of the first container is null or out-of-bounds; no iteration performed.")
-                print("=============================================================================")
-
-        except Exception as e:
-            self.report({'ERROR'}, f"Error: {e}")
-            raise
-
-        self.report({'INFO'}, "Done. See system console for detailed output.")
-        return {'FINISHED'}
-
-#######################################################
-def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_collection_header.bl_idname,
-                         text="R* Leeds: Texture Dictionary (.chk/.xtx/.tex)")
-
-def register():
-    bpy.utils.register_class(IMPORT_OT_collection_header)
-    TOPBAR_MT_file_import.append(menu_func_import)
-
-def unregister():
-    TOPBAR_MT_file_import.remove(menu_func_import)
-    bpy.utils.unregister_class(IMPORT_OT_collection_header)
-
-if __name__ == "__main__":
-    register()

@@ -1,10 +1,29 @@
 # BLeeds 🩸 
 
 BLeeds is an IO for Blender, with scripts designed around the Leeds Engine file formats. It is a work-in-progress reverse engineering of the model file formats for Stories games, as well as Manhunt 2, and Chinatown Wars.
-Currently, the scripts supports Stories (PS2 & *partially* PSP), as well as MH2 - although due to it being a WIP, I would suggest running the scripts in Blenders scripting console if you wish to try. 
-However, if you are not a reverse engineerer, you probably won't be able to help much. Feel free to still try it so far, though.
+
+## Supported Features
+
+The following is a list of features that are supported by the addon
+
+#### File Types
+
+- [X] Model files (.mdl, .wbl)
+  - [X] Import
+  - [ ] Export
+- [X] Texture Files (.chk, .xtx, .tex)
+  - [X] Import
+  - [ ] Export
+- [X] Collision files (.col2)
+  - [X] Import
+  - [ ] Export
+- [X] Map files (.wrld)
+  - [X] Import
+  - [ ] Export
+- [ ] Animation files
 
 
-
-
-Mainly keeping work here on Github right now so I dont forget(WORK IN PROGRESS).
+1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest master branch
+2. Import the downloaded .zip file by selecting it from *(User) Preferences/Addons/Install from File*
+3. Set the addon "GTA DragonFF" to enabled
+4. Import dff from Import tab or an IPL/IFP from the panel in *Scene Settings*
