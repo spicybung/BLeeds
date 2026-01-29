@@ -19,7 +19,7 @@ import os
 import struct
 import math
 from dataclasses import dataclass, field
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Optional, Any
 
 from mathutils import Matrix, Vector
 
@@ -379,7 +379,6 @@ def read_string(f, ptr: int) -> str:
 
 
 def read_point3(f) -> Vector:
-    """Reads 3 float32s from the file and returns a Vector."""
     return Vector(struct.unpack("<3f", f.read(12)))
 
 
@@ -388,7 +387,6 @@ def read_point3(f) -> Vector:
 
 
 def read_local_matrix(f) -> Tuple[Matrix, int, Tuple[Vector, Vector, Vector, Vector]]:
-    """Reads a 3x4 matrix and logs the starting offset before reading."""
     matrix_offset = f.tell()
 
     row1 = read_point3(f)  
@@ -418,7 +416,6 @@ def read_local_matrix(f) -> Tuple[Matrix, int, Tuple[Vector, Vector, Vector, Vec
 
 
 def read_global_matrix(f, offset: int) -> Matrix:
-    """Reads the 4x4 'global' matrix at given offset and restores file pointer."""
     cur = f.tell()
     f.seek(offset)
 
@@ -478,7 +475,6 @@ def get_render_flag_names(render_flags: int) -> List[str]:
 
 
 def process_frame_tree(ctx: StoriesMDLContext, f, frame_ptr: int) -> StoriesArmatureInfo:
-    """Walks the frame tree and records local/world matrices and names; no Blender empties created here."""
     arm = StoriesArmatureInfo()
     if frame_ptr == 0:
         return arm
@@ -607,15 +603,6 @@ def read_material_list(ctx: StoriesMDLContext, f) -> List[StoriesMaterialDesc]:
 #######################################################
 # === PS2 Geometry read (parts, strips, skin) ===
 def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeometryInfo:
-    """
-    Read a PS2 Stories geometry block.  The Stories engine uses two
-    distinct layout styles for geometry depending on whether the model
-    is a simple prop (SIM) or a ped/clump (PED).  Props do not have
-    an explicit part table; instead the DMA segments follow the
-    geometry header directly.  Peds/clumps contain a part table of
-    offsets and material IDs before the DMA stream.  This function
-    detects which layout is present and decodes accordingly.
-    """
     g = StoriesGeometryInfo()
     ctx.log("Detected Section Type: 3 (Geometry, PS2)")
 
@@ -806,20 +793,6 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
         step: int = 4,
         require_b1_80: bool = True,
     ) -> Optional[Tuple[int, bytes]]:
-        """Find a VIF-style 4-byte header near `start`.
-
-        The PS2 Stories geometry stream is a mix of packed payload data and
-        4-byte VIF command headers. Older importer code used fixed skips (e.g.
-        28 bytes) to land on the next header. That works only for specific
-        vertex counts/alignment; when you add/remove verts, 2-byte or 16-byte
-        alignment changes move the header, and the importer starts reading UVs
-        (or normals) from the wrong position.
-
-        We keep this deliberately simple and safe:
-          - scan forward in 4-byte steps (commands are dword-aligned)
-          - constrain scanning to a small window
-          - optionally require b1==0x80, matching retail UNPACK headers
-        """
         if end < start:
             return None
         scan_end = min(end, start + max_scan_bytes)
@@ -1562,7 +1535,6 @@ class read_stories:
         self.ctx: StoriesMDLContext | None = None
 
     def read(self) -> StoriesMDLContext:
-        """Open file and decode Stories MDL into a StoriesMDLContext."""
         ctx = StoriesMDLContext(
             filepath=self.filepath,
             platform=self.platform,
@@ -1795,40 +1767,10 @@ class read_stories:
 
 
 def read_stories_mdl(filepath: str, platform: str, mdl_type: str) -> StoriesMDLContext:
-    """
-    Backwards-compatible function wrapper for older code paths.
-    New code should use:
-
-        reader = read_stories(filepath, platform, mdl_type)
-        ctx = reader.read()
-    """
     reader = read_stories(filepath, platform, mdl_type)
     return reader.read()
 
-
-
-# ============================================================
-#  Export: PS2 SimpleModel MDL (PROP / PED)
-#
-#  Goal:
-#   - Use the ROOT empty as the export "anchor".
-#   - Write Scale/Pos into the MDL from the ROOT's saved Leeds values
-#     (bleeds_leeds_scale_base / bleeds_leeds_pos_base) *and* the ROOT's
-#     Blender transform via the "Effective (In-Game) After Root" formula.
-#   - Geometry is encoded in world-space (after ROOT transform),
-#     so the written Scale/Pos matches what the game will see.
-# ============================================================
-
-import math
-import struct
-
-from dataclasses import dataclass
-from typing import List, Tuple, Optional
-
-# NOTE: This file intentionally avoids importing bpy. Export mesh extraction
-# is handled in ops/mdl_exporter.py. Everything below is pure binary building.
-
-# VTables / IDs (matching what your importer understands)
+# VTables / IDs
 LCSCLUMPPS2 = 0x00000002
 VCSCLUMPPS2 = 0x0000AA02
 
@@ -1839,7 +1781,7 @@ VCSATOMIC2 = 0x0300AA00
 
 FIRST_SECTION_OFFSET = 0x24
 
-# VIF / GIF constants (convertStripPS2-style)
+# VIF / GIF constants
 TRI_STRIP_FLAG = 0x60000041
 
 VIF_UNPACK = 0x6C018000
@@ -1897,9 +1839,6 @@ def write_u32(buf_or_value, value: int | None = None):
     return None
 
 def reserve_u32(buf: bytearray, initial_value: int = 0) -> int:
-    """
-    Write a placeholder u32 and return its offset.
-    """
     off = len(buf)
     write_u32(buf, initial_value)
     return off
@@ -1964,11 +1903,6 @@ def read_root_base_scale_pos(root_obj) -> Optional[ScalePos]:
 
 
 def compute_effective_scale_pos(root_obj) -> Optional[ScalePos]:
-    """
-    This matches gui/mdl_menus.py compute_effective_scale_pos(root):
-      eff_scale = base_scale * root.scale
-      eff_pos   = base_pos * root.scale + root.location
-    """
     base = read_root_base_scale_pos(root_obj)
     if base is None:
         return None
@@ -2015,22 +1949,6 @@ def split_ps2_tristrip_vertices(
     max_verts: int = PS2_MAX_TRISTRIP_VERTS,
     overlap: int = 2,
 ) -> List[List["Ps2Vertex"]]:
-    """
-    Split a stitched triangle-strip vertex sequence into multiple strips that
-    each satisfy the PS2 Leeds vertex limit.
-
-    Why overlap?
-      A triangle strip defines triangle i using vertices (i-2, i-1, i).
-      If you cut a strip naively, you lose the first triangle of the next chunk.
-      Overlapping the final 2 vertices preserves continuity:
-        chunk0: v0..v69
-        chunk1: v68,v69,v70.. (<=70 total)
-      This recreates the exact same triangle sequence with duplicated vertices
-      at boundaries, which is safe for the Leeds renderer.
-
-    Returns: list of sub-strips, each length in [3, max_verts] (unless the input
-    strip is shorter than 3).
-    """
     if max_verts < 3:
         max_verts = 3
     if overlap < 0:
@@ -2069,12 +1987,6 @@ def build_ps2_dma_for_strip(
     scale_pos_override: Optional[ScalePos] = None,
     rounding_mode: str = "ROUND",
 ) -> Tuple[bytearray, ScalePos]:
-    """
-    Correct PS2 strip export:
-    - Split into <=70 vertex chunks
-    - Each chunk gets its own MSCAL (engine expects this)
-    - Continuity preserved using overlap (last 2 verts) + optional degenerate for parity fix
-    """
 
     if not verts:
         return bytearray(), ScalePos(scale=(1.0, 1.0, 1.0), pos=(0.0, 0.0, 0.0))
@@ -2243,10 +2155,6 @@ class HeaderPatchInfo:
     ptr_after_alloc_off: int
 
 def get_cached_atomic_hash_key(root_obj) -> int:
-    """
-    Reads a cached Atomic1 hash lookup key from Blender custom props.
-    Supports a couple of key names so you can rename later without breaking exports.
-    """
     if root_obj is None:
         return 0
     for key in ("bleeds_atomic_hash_key", "leeds_atomic_hash_key", "mdl_atomic_hash_key"):
@@ -2259,28 +2167,12 @@ def get_cached_atomic_hash_key(root_obj) -> int:
 
 
 def set_cached_atomic_hash_key(root_obj, value: int) -> None:
-    """
-    Store the key the same way scale+pos is cached.
-    """
     if root_obj is None:
         return
     root_obj["bleeds_atomic_hash_key"] = int(value) & 0xFFFFFFFF
 
 
 def begin_mdl_header(buf: bytearray) -> HeaderPatchInfo:
-    """
-    Write a Stories MDL header skeleton:
-
-    00: 'ldm\\0'
-    04: shrink (0)
-    08: file_len
-    0C: local_numTable
-    10: global_numTable
-    14: numEntries
-    18: ptr2_before_tex
-    1C: allocMem
-    20: ptr_after_allocMem (top-level pointer, 0x24 here)
-    """
     buf += b"ldm\x00"
     write_u32(buf, 0)  
 
@@ -2374,29 +2266,6 @@ def write_texture_strings_after_tables(
 
 
 def resolve_texture_name_identity(out: bytearray, atomic2_offset: int) -> int:
-    """
-    Append the identity matrix block for a prop Atomic.
-
-    A retail PS2 prop MDL stores two identity matrices (local and global)
-    followed by a trailer.  Each matrix consists of 16 values in
-    row‑major order.  The first 15 values are 32‑bit floats matching
-    the 3×4 identity transform (1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0), and
-    the final value is a 32‑bit integer set to 1 (0x00000001) rather than
-    a float.  Using an integer here exactly mirrors the behaviour of
-    retail files, which encode the homogeneous coordinate as an int and
-    decode it as a float during reading (yielding the very small float
-    1.401298e‑45 when interpreted as an IEEE float).
-
-    After the two matrices there is an eight‑dword trailer: two zeros,
-    a pointer to the previous Atomic (Atomic2), the sentinel values
-    0xAAAAAAAA and 0xFFFFFFFF, and three zeros.  This matches the
-    structure found in files like bat.mdl and ensures the next/prev
-    links between Atomic blocks are correct.
-
-    The return value is the offset within ``out`` where this identity
-    block starts.  The block itself is 160 bytes long (128 bytes for
-    the matrices and 32 bytes for the trailer).
-    """
     frames_offset = len(out)
 
     for _ in range(2):
@@ -2495,24 +2364,6 @@ def write_simplemodel_ps2_prop_mdl(
     unknown_geom_ints: Optional[List[int]] = None,
     geom_block_override: Optional[bytes] = None,
 ) -> None:
-    """
-    Writes a PS2 prop MDL in the same structural order you observed in bat.mdl:
-
-    0x00  header (ldm)
-    0x30  Atomic2
-    0x40  Identity matrices block (ends with AA..FF)
-    0xE0  Atomic1
-    0x11C texture name pointer list block (the thing that prevents duping)
-    0x150 geometry header (points to texture list and then DMA starts at 0x180)
-    0x180 DMA packets stream
-    then string table + pointer-offset table
-
-    - Atomic1 has: prev_vtable=0x30, prev_entry=0x38, next_entry=0x38
-    - Atomic1 has hash key duplicated (8 bytes): key, key
-    - Atomic1 ends with: tex_ptr (points to material_names[1]) + vcol
-
-    If you only have 1 texture name, Atomic1's tex_ptr will point to that single string.
-    """
 
     if not material_names:
         material_names = ["default"]
@@ -2718,10 +2569,6 @@ def write_simplemodel_ps2_ped_mdl(
     dma_packets: List[bytearray],
     material_names: List[str],
 ) -> None:
-    """
-    Minimal SimpleModel PED-style MDL: CLUMP + ATOMIC + frames + materials + geometry.
-    (Still supports multi-part DMA/material list.)
-    """
     if len(dma_packets) == 0:
         raise RuntimeError("No DMA packets provided for export.")
     if len(material_names) != len(dma_packets):

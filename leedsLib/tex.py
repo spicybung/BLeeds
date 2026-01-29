@@ -282,31 +282,7 @@ def parse_psp_header(data: bytes, offset: int) -> Optional[PspTexHeader]:
 
 
 def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
-    """
-    Attempt to parse a PS2 CHK/XTX texture header at the given offset.
 
-    The standard Leeds PS2 header packs swizzle, mip count, unknown bits, bpp,
-    width exponent and height exponent into a 32‑bit ``flags`` field.  In Vice
-    City Stories (.xtx) files, an alternate bit layout is used where the
-    low 6 bits contain the height exponent, bits 6–11 contain the width
-    exponent, bits 12–17 contain the bits per pixel, bits 18–19 are unknown,
-    bits 20–23 contain the mip count, and bits 24–31 contain the swizzle
-    mask.  This parser detects implausible dimensions from the standard
-    mapping and, if appropriate, remaps the alternate layout into the
-    canonical format before returning a ``Ps2TexHeader`` instance.
-
-    Parameters
-    ----------
-    data : bytes
-        The entire CHK/XTX/TEX archive data.
-    offset : int
-        The offset within ``data`` where the 16‑byte PS2 header begins.
-
-    Returns
-    -------
-    Optional[Ps2TexHeader]
-        A parsed header if dimensions are valid; otherwise ``None``.
-    """
     if offset <= 0 or offset + 16 > len(data):
         return None
     hdr = data[offset:offset + 16]
@@ -367,7 +343,7 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
 
 
 def slot_base_from_slot_ptr(slot_ptr: int) -> int:
-    """Convert a container slot pointer (offset‑of‑offset) to its base address."""
+    """Convert a container slot pointer to its base address."""
     if slot_ptr <= 0:
         return 0
     return max(0, slot_ptr - 8)
