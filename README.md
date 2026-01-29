@@ -2,7 +2,7 @@
 
 BLeeds is an IO for Blender, with scripts designed around the Leeds Engine file formats. It is a work-in-progress reverse engineering of the model file formats for Stories games, as well as Manhunt 2, and Chinatown Wars.
 
-## Supported Features
+## Supported Formats
 
 The following is a list of file formats that are currently supported by the addon
 
@@ -17,7 +17,7 @@ The following is a list of file formats that are currently supported by the addo
 - [X] Collision files (.col2)
   - [X] Import
   - [ ] Export
-- [X] Map files (.wrld)
+- [X] Map files (.wrld, .wbl)
   - [X] Import
   - [ ] Export
 - [ ] Animation files
