@@ -1,48 +1,32 @@
-# BLeeds
+# BLeeds 🩸 
 
-BLeeds is a Blender add-on for Rockstar Leeds file formats.
+BLeeds is an IO for Blender, with scripts designed around the Leeds Engine file formats(Stories, Chinatown Wars, Manhunt 2). It is a work-in-progress reverse engineering of R* Leeds file formats.
 
-It is mainly for GTA Liberty City Stories, GTA Vice City Stories, Manhunt 2, and Chinatown Wars files.
-The add-on is still a work in progress and the formats are still being reverse engineered.
+## Supported Formats
 
-## Current support
+The following is a list of file formats that are currently supported by the addon
 
-### Models
-- `.mdl`
-- `.wbl`
-- import
-- export work is experimental
+#### File Types
 
-### Textures
-- `.chk`
-- `.xtx`
-- `.tex`
-- import
+- [X] Model files (.mdl, .wbl)*
+  - [X] Import
+  - [x] Export (*partial, experimental*)
+- [X] Texture Files (.chk, .xtx, .tex)*
+  - [X] Import
+  - [ ] Export
+- [X] Collision files (.col2)*
+  - [X] Import
+  - [x] Export (*partial, experimental*)
+- [X] Map files (.wrld, .wbl)*
+  - [X] Import
+  - [x] Export (*partial, experimental*)
+- [X] Animation files
+  - [X] Import
+  - [ ] Export
 
-### Collision
-- `.col2`
-- import
-- export work is experimental
+* all of the above are currently experimental, meaning not all files have been tested yet.
 
-### World data
-- `.wrld`
-- import
-
-### LVZ/IMG
-- import work is experimental
-- writer work is experimental
-
-### Animation
-- `.anim`
-- import work is experimental
-
-## Install
-
-1. Download or zip the `BLeeds` folder.
-2. In Blender, open `Edit > Preferences > Add-ons`.
-3. Click `Install`, pick the zip, then enable `BLeeds`.
-4. Use the import/export entries under Blender's file menu.
-
-## Author
-
-spicybung
+1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest master branch
+2. Import the downloaded .zip file by selecting it from *(User) Preferences/Addons/Install from File*
+3. Set the addon "BLeeds" to enabled
+4. Import files from Import tab, export files from the Export tab
