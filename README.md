@@ -28,7 +28,23 @@ The following is a list of file formats that are currently supported by the addo
 
 * all of the above are currently experimental, meaning not all files have been tested yet.
 
+## How to use
+
 1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest master branch
 2. Import the downloaded .zip file by selecting it from *(User) Preferences/Addons/Install from File*
 3. Set the addon "BLeeds" to enabled
 4. Import files from Import tab, export files from the Export tab
+
+## Contributing
+
+Contributions are welcome! If you have suggestions, bug reports, or want to contribute code, please check out the [Contributing Guidelines](CONTRIBUTING.md).
+
+## License
+
+This project is licensed under the GPL 3.0 License - see the [LICENSE](LICENSE) file for details.
+
+## Acknowledgments
+- Special thanks to the Blender community and contributors.
+- The GTA modding community.
+- The GTA Mods Wiki & GTAModding Wiki(RIP)for being a huge considerate help in figuring things, such as data structures, out.
+- Daniel Sayanov, for his great help, knowledge in R* Leeds formats, as well as inspiration.
