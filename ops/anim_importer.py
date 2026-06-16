@@ -1,4 +1,7 @@
-from __future__ import annotations
+# SPDX-License-Identifier: GPL-3.0-or-later
+# BLeeds - Rockstar Leeds ANIM reader/applicator
+# GTA Liberty City Stories / Vice City Stories / Manhunt 2 CAnimBlendTree containers.
+
 import math
 import struct
 from dataclasses import dataclass, field
@@ -1685,6 +1688,7 @@ def applyAnimEntryToArmature(
 
     mode = str(pose_space_mode).upper()
     if shouldLogPedWeaponAbsoluteLocalMode(armature_object, entry, mode):
+        log_lines.append("AUTO pose mode: weapon PED animation uses MDL_ABSOLUTE_POSE / recursive absolute MDL-local solver; PLR raw-delta is not forced")
         mode = "MDL_ABSOLUTE_POSE"
     if mode in ("MDL_ABSOLUTE_POSE", "ABSOLUTE_POSE", "ABSOLUTE_MDL_POSE"):
         keyed_count, solver_lines = applyAnimEntryAsAbsolutePose(

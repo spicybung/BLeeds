@@ -1,4 +1,10 @@
-from __future__ import annotations
+# BLeeds - GUI operators for R* Leeds CHK/XTX/TEX textures
+# Author: spicybung
+# Years: 2025 - 2026
+#
+# Import operator that hooks into Blender's File → Import menu
+# via the main BLeeds add-on.
+
 import bpy
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper

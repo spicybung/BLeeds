@@ -1,4 +1,20 @@
-from __future__ import annotations
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# Author: spicybung
+# Years: 2025 - 2026
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import struct
 import zlib
 import time
@@ -17,6 +33,31 @@ from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 from bpy.props import StringProperty, BoolProperty
 from mathutils import Matrix
+
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   This script is for .IMG & .LVZ - file formats for Stories/MH2 worlds            #  
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+# - Script resources:
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-process for included formats)
+# • https://gtamods.com/wiki/Relocatable_chunk#:~:text=The%20different%20file%20types%20are%3A
+# • https://gtamods.com/wiki/IMG_archive
+# • https://web.archive.org/web/20180402031926/http://gtamodding.ru/wiki/IMG (*Russian*)
+# • https://web.archive.org/web/20180406213309/http://gtamodding.ru/wiki/LVZ (*Russian*)
+# • https://web.archive.org/web/20180729202923/http://gtamodding.ru/wiki/WRLD (*Russian*)
+# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (*Russian* - WRLD textures)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesview/worldstream.cpp
+# • https://web-archive-org.translate.goog/web/20180810183857/http://gtamodding.ru/wiki/LVZ?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
+# • https://web-archive-org.translate.goog/web/20180807031320/http://www.gtamodding.ru/wiki/IMG?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto)
+# • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto - WRLD textures)
+# - Mod resources/cool stuff:
+# • https://gtaforums.com/topic/285544-gtavcslcs-modding/ (includes old unimg.exe for GTA: Stories)
+# • https://github.com/electronicarts/RenderWare3Docs/blob/master/whitepapers/worlds.pdf (Leeds Worlds are based on RW Worlds, which are based on .bsp)
+# • https://developer.valvesoftware.com/wiki/BSP_(Quake) (see above)
+# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .MDL's, .WRLD's, .BSP's... )
+# • https://vk.com/video143954957_456239416 (*Russian* - how DTZ + LVZ + IMG work together in GTA: Stories by Daniil Sayanov)
+# • https://www.gtagarage.com/mods/screen.php?s=60828 (converts LVZ + IMG to RW .DFF)
+
+#######################################################
 
 class DebugOut:
     def __init__(self, enable_console: bool, write_file: bool, file_path: Optional[str]):
@@ -3159,4 +3200,3 @@ class read_img:
             transforms_by_res[res_id] = matrix_from_16_floats_row_major_values(m)
         dbg(f"[ids] unique printed: {kept}")
         return transforms_by_res
-

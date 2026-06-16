@@ -1,4 +1,6 @@
-from __future__ import annotations
+# SPDX-License-Identifier: GPL-3.0-or-later
+# BLeeds - Blender operators for Rockstar Leeds ANIM files.
+
 from pathlib import Path
 from typing import List
 

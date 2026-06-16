@@ -1,10 +1,39 @@
-from __future__ import annotations
+# BLeeds - R* Leeds texture reader for CHK/XTX/TEX
+# Author: spicybung
+# Years: 2025 - 2026
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import os
 import struct
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Sequence
 
 import numpy as np
+
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   This script is for .CHK/XTX/TEX - dictionaries for LCS/VCS/CW/MH2 textures      #
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+# - Script resources:
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
+# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (.xtx, .tex)
+# - Mod resources/cool stuff:
+# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (extract textures)
+# • https://gtaforums.com/topic/518948-rel-gta-stories-texture-explorer-20/ (view/explore textures)
+# • https://www.dixmor-hospital.com/mhs/index.php (Manhunt 2)
+
+#######################################################
 
 def read_u32(data: bytes, offset: int) -> int:
 
@@ -477,4 +506,3 @@ def decode_ps2_texture(
             val = int(idx[i] * scale + 0.5)
             rgba[y, x] = (val, val, val, 255)
     return rgba
-

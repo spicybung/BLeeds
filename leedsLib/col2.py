@@ -1,6 +1,32 @@
-from __future__ import annotations
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
+# Author: spicybung
+# Years: 2025 - 2026
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import struct
 from pathlib import Path
+
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   This script is for .COL2 - the file format for GTA Stories collisions           #
+#   NOTE: Leeds Engine Collision 2 differs from Rockstars Renderware Col2 format    #
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+# - Script resources:
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
+# •
+# - Mod resources/cool stuff:
+# •
 
 HEADER_SIZE = 0x20
 COLMODEL_HEADER_SIZE = 0x60

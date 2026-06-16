@@ -1,4 +1,20 @@
-from __future__ import annotations
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# Author: spicybung
+# Years: 2025 - 2026
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import os
 import struct
 import math
@@ -6,6 +22,35 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Any, Optional, Iterable
 
 from mathutils import Matrix, Vector
+
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+#   This script is for Stories .MDLs, the file format for actors & props            #
+#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
+# - Script resources:
+# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
+# • https://gtamods.com/wiki/Leeds_Engine (TODO: update stub)
+# • https://gtamods.com/wiki/MDL (TODO: update stub with more documentation in own words)
+# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h (ditto)
+# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp (ditto)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (*Russian*)
+# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (*ditto - by Alex/AK73 & good resource to start*)
+# • https://web.archive.org/web/20180714005051/https://www.gtamodding.ru/wiki/GTA_Stories_RAW_Editor (ditto)
+# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
+# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start w/out any other documentation)
+# - Mod resources/cool stuff:
+# • https://developer.valvesoftware.com/wiki/MDL_(Quake) (Rockstar Leeds MDL is loosely based on Quake MDL)
+# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (GTA3xx .img: .mdls, textures, animations)
+# • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
+# • https://gtaforums.com/topic/285544-gtavcslcs-modding/
+# • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
+# • http://aap.papnet.eu/gta/RE/lcs_pipes.txt (a brief binary example of how bitflags work for PS2/PSP/Mobile Stories games)
+# • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
+# • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
+# • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
+# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .MDL's, .WRLD's, .BSP's... )
+# • https://www.gamedeveloper.com/programming/opinion-why-on-earth-would-we-write-our-own-game-engine- (Renderwares fate)
+# • https://vkvideo.ru/playlist/-76377865_3/video143954957_456239182?linked=1 ( *Russian* - VCS PSP MDL viewer by Daniil Sayanov)
 
 try:
     from ..data.bone_data import (
@@ -41,6 +86,10 @@ except Exception:
         kamBoneIndexVCS,
         commonBoneParentsVCS,
     )
+# Bone arrays and shared PED hierarchy constants live in BLeeds/data/bone_data.py.
+
+#######################################################
+# === Model Rendering Flags ===
 
 FLAG_DRAWLAST: int = 0x4 | 0x8
 FLAG_ADDITIVE: int = 0x8
@@ -10138,4 +10187,3 @@ class Mh2MdlReader:
 
 def import_mh2(path, context, collection_name=None):
     return Mh2MdlReader(path, context, collection_name).run()
-
