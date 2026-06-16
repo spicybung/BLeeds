@@ -1,20 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 - 
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import os
 import struct
 import datetime
@@ -25,30 +9,9 @@ import bpy
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .WBL - the file format for Chinatown Wars world sectors      #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Leeds_Engine (some assets point to CW being made in Unity? ports maybe?)
-# • https://gtamods.com/wiki/MDL (TODO: update stub to include Chinatown Wars documentation)
-# • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)#.D0.9C.D0.BE.D0.B4.D0.B5.D0.BB.D0.B8 (*Russian*)
-# • https://web.archive.org/web/20221108130633/http://gtamodding.ru/wiki/GAME.PAK_(Chinatown_Wars)?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# - Mod resources/cool stuff:
-# • https://gtaforums.com/topic/781150-relctw-chinatown-wars-mobile-resource-explorer/  (*analyzes game.pak for mobile & partial support for psp*)
-# • https://web.archive.org/web/20221005045615/https://github.com/DK22Pac/ctw-gxt-tools (*texture editor - in case the repo goes down*)
-
-
-#######################################################
 class read_chinatown:
-    """Reads Chinatown Wars Worldblocks"""
 
-    # ===== DEBUG CONFIGURATION =====
     DEBUG_MODE: bool = True
-    # ===============================
-
-    #######################################################
-    # Small data containers
-    #######################################################
 
     @dataclass
     class CWTransform:
@@ -58,9 +21,6 @@ class read_chinatown:
         pos: Tuple[float, float, float]
         padding: int
 
-    #######################################################
-    # Debug helpers
-    #######################################################
     @classmethod
     def get_debug_logfile(cls, import_path: str) -> str:
         basename = os.path.basename(import_path)
@@ -77,25 +37,20 @@ class read_chinatown:
                 try:
                     logf.write(s + "\n")
                     logf.flush()
-                except Exception as e:  
+                except Exception as e:
                     print(f"Failed to write to log file: {e}")
 
     @classmethod
     def print_bytes(cls, data: bytes, start: int = 0,
                     end: Optional[int] = None, logf=None) -> None:
-        """Debug-print a slice of bytes in hex."""
         b = data[start:end]
         hexstr = " ".join(f"{x:02X}" for x in b)
         cls.dprint(f"[0x{start:02X}] {hexstr}", logf)
-    
+
     @staticmethod
     def padhex(n: int, w: int = 8) -> str:
-        """Return a zero-padded hex string."""
         return f"0x{n:0{w}X}"
 
-    #######################################################
-    # Binary helpers
-    #######################################################
     @staticmethod
     def read_u8(data: bytes, offset: int) -> int:
         return struct.unpack_from("<B", data, offset)[0]
@@ -164,9 +119,6 @@ class read_chinatown:
             padding=Padding,
         )
 
-    #######################################################
-    # Material bank 
-    #######################################################
     class MaterialBank:
 
         def __init__(self, current_dir: str, logf=None):
@@ -176,9 +128,6 @@ class read_chinatown:
             self.material_index_by_texid: Dict[int, int] = {}
 
         def get_slot(self, tex_id: int) -> int:
-            """
-            Get or create a material slot index for the given texture ID.
-            """
             if tex_id in self.material_index_by_texid:
                 return self.material_index_by_texid[tex_id]
 
@@ -243,15 +192,9 @@ class read_chinatown:
             return slot_index
 
         def append_all_to_mesh(self, mesh: bpy.types.Mesh) -> None:
-            """
-            Append all materials in this bank as slots on the given mesh.
-            """
             for _mat_name, mat in self.material_slots:
                 mesh.materials.append(mat)
 
-    #######################################################
-    # Tri-strips
-    #######################################################
     @staticmethod
     def tri_strip_to_tris(vertex_count: int) -> List[Tuple[int, int, int]]:
         faces: List[Tuple[int, int, int]] = []
@@ -746,6 +689,7 @@ class read_chinatown:
                 logf.write("IMPORT ERROR\n")
                 logf.write(tb_str)
                 logf.flush()
+
             raise RuntimeError(f"Import error while reading '{filepath}': {e}") from e
         finally:
             if logf:

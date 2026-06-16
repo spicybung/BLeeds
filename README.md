@@ -1,30 +1,48 @@
-# BLeeds 🩸 
+# BLeeds
 
-BLeeds is an IO for Blender, with scripts designed around the Leeds Engine file formats. It is a work-in-progress reverse engineering of the model file formats for Stories games, as well as Manhunt 2, and Chinatown Wars.
+BLeeds is a Blender add-on for Rockstar Leeds file formats.
 
-## Supported Formats
+It is mainly for GTA Liberty City Stories, GTA Vice City Stories, Manhunt 2, and Chinatown Wars files.
+The add-on is still a work in progress and the formats are still being reverse engineered.
 
-The following is a list of file formats that are currently supported by the addon
+## Current support
 
-#### File Types
+### Models
+- `.mdl`
+- `.wbl`
+- import
+- export work is experimental
 
-- [X] Model files (.mdl, .wbl)*
-  - [X] Import
-  - [ ] Export
-- [X] Texture Files (.chk, .xtx, .tex)*
-  - [X] Import
-  - [ ] Export
-- [X] Collision files (.col2)*
-  - [X] Import
-  - [ ] Export
-- [X] Map files (.wrld, .wbl)*
-  - [X] Import
-  - [ ] Export
-- [ ] Animation files
+### Textures
+- `.chk`
+- `.xtx`
+- `.tex`
+- import
 
-* all of the above are currently experimental, meaning not all files have been tested yet.
+### Collision
+- `.col2`
+- import
+- export work is experimental
 
-1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest master branch
-2. Import the downloaded .zip file by selecting it from *(User) Preferences/Addons/Install from File*
-3. Set the addon "BLeeds" to enabled
-4. Import files from Import tab, export files from the Export tab
+### World data
+- `.wrld`
+- import
+
+### LVZ/IMG
+- import work is experimental
+- writer work is experimental
+
+### Animation
+- `.anim`
+- import work is experimental
+
+## Install
+
+1. Download or zip the `BLeeds` folder.
+2. In Blender, open `Edit > Preferences > Add-ons`.
+3. Click `Install`, pick the zip, then enable `BLeeds`.
+4. Use the import/export entries under Blender's file menu.
+
+## Author
+
+spicybung

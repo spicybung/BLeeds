@@ -1,10 +1,4 @@
-# BLeeds - GUI operators for R* Leeds CHK/XTX/TEX textures
-# Author: spicybung
-# Years: 2025 -
-#
-# Import operator that hooks into Blender's File → Import menu
-# via the main BLeeds add-on.
-
+from __future__ import annotations
 import bpy
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
@@ -12,15 +6,13 @@ from bpy.props import StringProperty, EnumProperty
 
 from ..ops import tex_importer
 
-
 class IMPORT_OT_tex(Operator, ImportHelper):
-    """Import a Rockstar Leeds CHK/XTX/TEX texture list"""
 
     bl_idname = "import_scene.leeds_tex"
     bl_label = "Import Texture List"
     bl_options = {'PRESET', 'UNDO'}
 
-    filename_ext = ".chk"
+    filename_ext = ".xtx"
 
     filter_glob: StringProperty(
         name="File Filter",
@@ -68,18 +60,15 @@ class IMPORT_OT_tex(Operator, ImportHelper):
 
         return {'FINISHED'}
 
-classes = (IMPORT_OT_tex)
-
+classes = (IMPORT_OT_tex,)
 
 def register():
     for c in classes:
         bpy.utils.register_class(c)
 
-
 def unregister():
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
-
 
 if __name__ == "__main__":
     register()

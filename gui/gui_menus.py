@@ -1,20 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 - 
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import bpy
 from bpy.props import (
     StringProperty,
@@ -27,7 +11,6 @@ from bpy.types import (
     Menu,
 )
 
-#######################################################
 class CW_InstanceProps(PropertyGroup):
     mdl_name: StringProperty(
         name="Instance MDL",
@@ -39,7 +22,6 @@ class CW_InstanceProps(PropertyGroup):
         description="Custom identifier for this CW instance",
         default="",
     )
-
 
 class CW_OT_LoadFromCustom(Operator):
     bl_idname = "cw_instance.load_from_custom"
@@ -53,9 +35,9 @@ class CW_OT_LoadFromCustom(Operator):
             return {"CANCELLED"}
 
         inst = obj.cw_instance
+
         self.report({"INFO"}, f"Loaded from custom ID: {inst.custom_id}")
         return {"FINISHED"}
-
 
 class CW_OT_SaveToCustom(Operator):
     bl_idname = "cw_instance.save_to_custom"
@@ -69,10 +51,9 @@ class CW_OT_SaveToCustom(Operator):
             return {"CANCELLED"}
 
         inst = obj.cw_instance
+
         self.report({"INFO"}, f"Saved to custom ID: {inst.custom_id}")
         return {"FINISHED"}
-
-
 
 class CW_MT_ExportChoice(Menu):
     bl_idname = "CW_MT_ExportChoice"
@@ -85,10 +66,17 @@ class CW_MT_ExportChoice(Menu):
             text="R* Leeds: 3D Model (.mdl)",
         )
         layout.operator(
+            "export_scene.leeds_lvz_img",
+            text="R* Leeds: LeVelZlib IMG Archive (.lvz + .img)",
+        )
+        layout.operator(
+            "export_scene.col2_leeds",
+            text="R* Leeds: Collision Archive (.col2)",
+        )
+        layout.operator(
             "export_scene.cw_wbl",
             text="R* Leeds: Worldblock (.wbl)",
         )
-
 
 class TOPBAR_MT_file_import_bleeds(Menu):
     bl_idname = "TOPBAR_MT_file_import_bleeds"
@@ -99,6 +87,10 @@ class TOPBAR_MT_file_import_bleeds(Menu):
         layout.operator(
             "import_scene.bleeds_stories_mdl",
             text="R* Leeds: 3D Model (.mdl)",
+        )
+        layout.operator(
+            "import_scene.leeds_anim",
+            text="R* Leeds: Animation (.anim)",
         )
         layout.operator(
             "import_scene.col2_leeds",
@@ -121,10 +113,8 @@ class TOPBAR_MT_file_import_bleeds(Menu):
             text="R* Leeds: Worldblock (.wbl)",
         )
 
-
 def cw_menu_import(self, context):
     self.layout.menu(TOPBAR_MT_file_import_bleeds.bl_idname)
-
 
 def cw_menu_export(self, context):
     self.layout.menu(CW_MT_ExportChoice.bl_idname)

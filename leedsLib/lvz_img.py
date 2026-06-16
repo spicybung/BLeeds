@@ -1,20 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 - 
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import struct
 import zlib
 import time
@@ -25,40 +9,15 @@ import numpy as np
 
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Tuple, List, Dict, Optional
+from typing import Tuple, List, Dict, Optional, Iterable
 
 import bpy
+from ..compat import setMeshAutoSmooth
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 from bpy.props import StringProperty, BoolProperty
 from mathutils import Matrix
 
-
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .IMG & .LVZ - file formats for Stories/MH2 worlds            #  
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process for included formats)
-# • https://gtamods.com/wiki/Relocatable_chunk#:~:text=The%20different%20file%20types%20are%3A
-# • https://gtamods.com/wiki/IMG_archive
-# • https://web.archive.org/web/20180402031926/http://gtamodding.ru/wiki/IMG (*Russian*)
-# • https://web.archive.org/web/20180406213309/http://gtamodding.ru/wiki/LVZ (*Russian*)
-# • https://web.archive.org/web/20180729202923/http://gtamodding.ru/wiki/WRLD (*Russian*)
-# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (*Russian* - WRLD textures)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesview/worldstream.cpp
-# • https://web-archive-org.translate.goog/web/20180810183857/http://gtamodding.ru/wiki/LVZ?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# • https://web-archive-org.translate.goog/web/20180807031320/http://www.gtamodding.ru/wiki/IMG?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto)
-# • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto - WRLD textures)
-# - Mod resources/cool stuff:
-# • https://gtaforums.com/topic/285544-gtavcslcs-modding/ (includes old unimg.exe for GTA: Stories)
-# • https://github.com/electronicarts/RenderWare3Docs/blob/master/whitepapers/worlds.pdf (Leeds Worlds are based on RW Worlds, which are based on .bsp)
-# • https://developer.valvesoftware.com/wiki/BSP_(Quake) (see above)
-# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .MDL's, .WRLD's, .BSP's... )
-# • https://vk.com/video143954957_456239416 (*Russian* - how DTZ + LVZ + IMG work together in GTA: Stories by Daniil Sayanov)
-# • https://www.gtagarage.com/mods/screen.php?s=60828 (converts LVZ + IMG to RW .DFF)
-
-
-#######################################################
 class DebugOut:
     def __init__(self, enable_console: bool, write_file: bool, file_path: Optional[str]):
         self.enable_console = enable_console
@@ -87,9 +46,48 @@ def dbg(msg: str):
     else:
         print(msg)
 
-#######################################################
-# Helpers shared by LVZ and IMG
-#######################################################
+LVZ_MAX_DECOMPRESSED_BYTES = 256 * 1024 * 1024
+LVZ_MAX_RESOURCE_ROWS = 200000
+LVZ_MAX_TEXTURE_BLOB_BYTES = (2 * 1024 * 1024) + 64
+LVZ_DIRECT_TEXTURE_HEADER_BYTES = 16
+LVZ_DIRECT_TEXTURE_PALETTE_BYTES = 64
+LVZ_MAX_TEXTURE_DIMENSION = 2048
+LVZ_MAX_TEXTURE_PIXELS = LVZ_MAX_TEXTURE_DIMENSION * LVZ_MAX_TEXTURE_DIMENSION
+LVZ_MAX_IMG_ROWS_PER_CONTAINER = 200000
+LVZ_MAX_MDL_BATCHES_PER_RESOURCE = 512
+LVZ_MAX_MDL_VERTICES_PER_BATCH = 8192
+LVZ_MAX_MDL_VERTICES_PER_OBJECT = 250000
+LVZ_MAX_VERBOSE_VERTEX_LOGS_PER_MDL = 512
+LVZ_MIN_RESOURCE_CANDIDATE_ADDR = 0x40
+
+IMG_PASS_NAMES_VCS = (
+    "SUPERLOD",
+    "UNDERWATER",
+    "LOD",
+    "ROADS",
+    "NORMAL",
+    "NOZWRITE",
+    "LIGHTS",
+    "TRANSPARENT",
+)
+IMG_PASS_NAMES_LCS = (
+    "SUPERLOD",
+    "LOD",
+    "ROADS",
+    "NORMAL",
+    "NOZWRITE",
+    "LIGHTS",
+    "TRANSPARENT",
+)
+IMG_VISIBLE_PASS_NAMES_DEFAULT = {
+    "UNDERWATER",
+    "ROADS",
+    "NORMAL",
+    "NOZWRITE",
+    "LIGHTS",
+    "TRANSPARENT",
+}
+IMG_LOD_PASS_NAMES = {"SUPERLOD", "LOD"}
 
 def read_u32(b: bytes, o: int) -> int:
     return struct.unpack_from("<I", b, o)[0]
@@ -106,17 +104,38 @@ def align_down4(o: int) -> int:
 def is_zlib(data: bytes) -> bool:
     return len(data) >= 2 and data[0] == 0x78 and data[1] in (0x01, 0x9C, 0xDA)
 
+def decompress_with_limit(data: bytes, wbits: int, max_output: int = LVZ_MAX_DECOMPRESSED_BYTES) -> bytes:
+    decoder = zlib.decompressobj(wbits)
+    out = decoder.decompress(data, max_output + 1)
+    if len(out) > max_output or decoder.unconsumed_tail:
+        raise ValueError(
+            f"Refusing to decompress LVZ past {max_output} bytes. "
+            "The input may be corrupt, the wrong platform variant, or not a Leeds LVZ."
+        )
+    tail = decoder.flush(max_output + 1 - len(out))
+    out += tail
+    if len(out) > max_output:
+        raise ValueError(
+            f"Refusing to decompress LVZ past {max_output} bytes. "
+            "The input may be corrupt, the wrong platform variant, or not a Leeds LVZ."
+        )
+    return out
+
 def safe_decompress(data: bytes) -> Tuple[bytes, bool]:
     if not data:
         return data, False
     if is_zlib(data):
         try:
-            return zlib.decompress(data), True
+            return decompress_with_limit(data, zlib.MAX_WBITS), True
+        except ValueError:
+            raise
         except Exception:
             pass
     for wbits in (16 + zlib.MAX_WBITS, -zlib.MAX_WBITS):
         try:
-            return zlib.decompress(data, wbits), True
+            return decompress_with_limit(data, wbits), True
+        except ValueError:
+            raise
         except Exception:
             continue
     return data, False
@@ -128,9 +147,773 @@ def hexdump_bytes(b: bytes, max_len: int = 32) -> str:
 def half_to_float(h: int) -> float:
     return float(np.frombuffer(struct.pack('<H', h), dtype=np.float16)[0])
 
-#######################################################
-# LVZ data structures
-#######################################################
+def float_to_half_u16(value: float) -> int:
+    return int(np.frombuffer(np.float16(float(value)).tobytes(), dtype=np.uint16)[0])
+
+def matrix_to_16_floats_row_major(matrix: Matrix) -> Tuple[float, ...]:
+
+    return tuple(float(matrix[col][row]) for row in range(4) for col in range(4))
+
+def matrix_from_16_floats_row_major_values(values) -> Matrix:
+
+    return Matrix((
+        (values[0], values[4], values[8],  values[12]),
+        (values[1], values[5], values[9],  values[13]),
+        (values[2], values[6], values[10], values[14]),
+        (values[3], values[7], values[11], values[15]),
+    ))
+
+def read_matrix_16_floats_row_major(buf: bytes, off: int) -> Matrix:
+    values = struct.unpack_from("<16f", buf, off)
+    return matrix_from_16_floats_row_major_values(values)
+
+def write_matrix_16_floats_row_major(buf: bytearray, off: int, matrix: Matrix):
+    values = matrix_to_16_floats_row_major(matrix)
+    struct.pack_into("<16f", buf, off, *values)
+
+def detect_world_game_from_sector_row_count(row_count: int, fallback: str = "vcs") -> str:
+
+    if int(row_count) == 47:
+        return "lcs"
+    if int(row_count) == 37:
+        return "vcs"
+    return str(fallback or "vcs").lower()
+
+def sector_origin_for_xy(game_hint: str, sector_x: int, sector_y: int) -> Tuple[float, float, float]:
+    game = str(game_hint or "vcs").lower()
+    if game == "lcs":
+        xinc = 100.0
+        yinc = 86.6
+        xstart = -2000.0
+        ystart = -2000.0
+    else:
+        xinc = 125.0
+        yinc = 108.25
+        xstart = -2400.0
+        ystart = -2000.0
+    x = xstart + (xinc * 0.5) + (xinc * int(sector_x)) - ((int(sector_y) & 1) * xinc * 0.5)
+    y = ystart + (yinc * 0.5) + (yinc * int(sector_y))
+    return (float(x), float(y), 0.0)
+
+def matrix_from_16_floats_row_major_values_with_origin(values, origin) -> Matrix:
+    matrix = matrix_from_16_floats_row_major_values(values)
+    if origin is not None:
+        ox, oy, oz = origin
+        matrix[0][3] += float(ox)
+        matrix[1][3] += float(oy)
+        matrix[2][3] += float(oz)
+    return matrix
+
+def calculate_object_local_bounding_sphere(obj) -> Optional[Tuple[float, float, float, float]]:
+    if obj is None or getattr(obj, "type", None) != 'MESH' or obj.data is None:
+        return None
+    vertices = obj.data.vertices
+    if not vertices:
+        return None
+    xs = [float(v.co.x) for v in vertices]
+    ys = [float(v.co.y) for v in vertices]
+    zs = [float(v.co.z) for v in vertices]
+    cx = (min(xs) + max(xs)) * 0.5
+    cy = (min(ys) + max(ys)) * 0.5
+    cz = (min(zs) + max(zs)) * 0.5
+    radius = 0.0
+    for v in vertices:
+        dx = float(v.co.x) - cx
+        dy = float(v.co.y) - cy
+        dz = float(v.co.z) - cz
+        radius = max(radius, math.sqrt(dx * dx + dy * dy + dz * dz))
+    return (cx, cy, cz, radius)
+
+def collect_lvz_img_export_objects(context, selected_only: bool) -> List[bpy.types.Object]:
+    if selected_only:
+        candidates = list(getattr(context, "selected_objects", []) or [])
+    else:
+        candidates = list(bpy.data.objects)
+    objects = []
+    for obj in candidates:
+        if obj is None:
+            continue
+        if "blds_res_index" not in obj:
+            continue
+        objects.append(obj)
+    objects.sort(key=lambda item: (int(item.get("blds_res_index", -1)), item.name))
+    return objects
+
+def build_first_img_detail_by_res(details) -> Dict[int, Tuple]:
+    out = {}
+    for row in details:
+        res_id = int(row[0])
+        if res_id not in out:
+            out[res_id] = row
+    return out
+
+def find_source_path_from_objects(objects: List[bpy.types.Object], prop_name: str) -> str:
+    for obj in objects:
+        value = str(obj.get(prop_name, "") or "")
+        if value:
+            return value
+    return ""
+
+def find_source_img_next_to_lvz(lvz_path: str) -> str:
+    if not lvz_path:
+        return ""
+    lvz = Path(lvz_path)
+    candidates = [
+        lvz.with_suffix(".IMG"),
+        lvz.with_suffix(".img"),
+        lvz.with_suffix(".IMG.zip"),
+        lvz.with_suffix(".img.zip"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return ""
+
+def read_img_file_bytes(path: str) -> bytes:
+    p = Path(path)
+    if p.suffix.lower() == ".zip":
+        with zipfile.ZipFile(p, "r") as zf:
+            names = zf.namelist()
+            chosen = None
+            for name in names:
+                if name.lower().endswith(".img"):
+                    chosen = name
+                    break
+            if chosen is None and names:
+                chosen = names[0]
+            if chosen is None:
+                raise ValueError(f"IMG zip has no entries: {path}")
+            return zf.read(chosen)
+    return p.read_bytes()
+
+def is_ver2_img_archive(img_bytes: bytes) -> bool:
+    return len(img_bytes) >= 8 and img_bytes[:4] == b"VER2"
+
+def parse_ver2_img_directory(img_bytes: bytes) -> List[Dict[str, object]]:
+    if not is_ver2_img_archive(img_bytes):
+        return []
+    count = read_u32(img_bytes, 4)
+    dir_end = 8 + count * 32
+    if count <= 0 or dir_end > len(img_bytes):
+        return []
+    entries = []
+    for index in range(count):
+        off = 8 + index * 32
+        sector = read_u32(img_bytes, off)
+        sectors = read_u32(img_bytes, off + 4)
+        raw_name = img_bytes[off + 8:off + 32].split(b"\0", 1)[0]
+        try:
+            name = raw_name.decode("ascii", "replace")
+        except Exception:
+            name = ""
+        start = sector * 2048
+        end = start + sectors * 2048
+        if start < len(img_bytes):
+            end = min(end, len(img_bytes))
+            entries.append({
+                "index": index,
+                "sector": sector,
+                "sectors": sectors,
+                "start": start,
+                "end": end,
+                "name": name,
+            })
+    entries.sort(key=lambda item: (int(item["start"]), int(item["end"])))
+    return entries
+
+def find_ver2_entry_for_abs_offset(entries: List[Dict[str, object]], abs_off: int) -> Optional[Dict[str, object]]:
+    for entry in entries:
+        if int(entry["start"]) <= abs_off < int(entry["end"]):
+            return entry
+    return None
+
+def looks_like_img_instance_row(img_bytes: bytes, off: int, max_resource_id: Optional[int] = None) -> bool:
+    if off < 0 or off + 0x50 > len(img_bytes):
+        return False
+    res_id = read_u16(img_bytes, off + 0x02)
+    if res_id == 0 or res_id == 0xFFFF:
+        return False
+    if max_resource_id is not None and res_id >= int(max_resource_id):
+        return False
+    try:
+        bounds = [half_to_float(read_u16(img_bytes, off + 0x04 + i * 2)) for i in range(4)]
+        matrix = struct.unpack_from("<16f", img_bytes, off + 0x10)
+    except Exception:
+        return False
+    if not all(math.isfinite(float(v)) for v in bounds):
+        return False
+    if not all(math.isfinite(float(v)) for v in matrix):
+        return False
+    if any(abs(float(v)) > 100000.0 for v in matrix):
+        return False
+    row_scale0 = math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1] + matrix[2] * matrix[2])
+    row_scale1 = math.sqrt(matrix[4] * matrix[4] + matrix[5] * matrix[5] + matrix[6] * matrix[6])
+    row_scale2 = math.sqrt(matrix[8] * matrix[8] + matrix[9] * matrix[9] + matrix[10] * matrix[10])
+    scales = (row_scale0, row_scale1, row_scale2)
+    if not all(math.isfinite(float(v)) for v in scales):
+        return False
+    if any(v > 4096.0 for v in scales):
+        return False
+    if any(v <= 0.000001 for v in scales):
+        return False
+    if abs(float(matrix[15]) - 1.0) > 0.001:
+        return False
+    return True
+
+def material_or_image_wants_texture_write(material, image) -> bool:
+    for owner in (material, image):
+        if owner is None:
+            continue
+        for key in (
+            "blds_lvz_texture_dirty",
+            "blds_lvz_write_texture",
+            "blds_texture_dirty",
+            "blds_texture_export",
+        ):
+            try:
+                if bool(owner.get(key, False)):
+                    return True
+            except Exception:
+                pass
+    return False
+
+def parse_trailing_int(text: str) -> Optional[int]:
+    if not text:
+        return None
+    end = len(text)
+    start = end
+    while start > 0 and text[start - 1].isdigit():
+        start -= 1
+    if start == end:
+        return None
+    try:
+        return int(text[start:end])
+    except Exception:
+        return None
+
+def material_texture_res_index(material) -> Optional[int]:
+    if material is None:
+        return None
+    for key in ("blds_texture_res_index", "blds_res_index", "blds_lvz_res_index"):
+        try:
+            if key in material:
+                return int(material.get(key))
+        except Exception:
+            pass
+    return parse_trailing_int(getattr(material, "name", ""))
+
+def image_texture_res_index(image) -> Optional[int]:
+    if image is None:
+        return None
+    for key in ("blds_texture_res_index", "blds_res_index", "blds_lvz_res_index"):
+        try:
+            if key in image:
+                return int(image.get(key))
+        except Exception:
+            pass
+    return parse_trailing_int(getattr(image, "name", ""))
+
+def find_image_for_material(material) -> Optional[bpy.types.Image]:
+    if material is None:
+        return None
+    try:
+        image_name = str(material.get("blds_texture_image_name", "") or "")
+        if image_name and image_name in bpy.data.images:
+            return bpy.data.images[image_name]
+    except Exception:
+        pass
+    if getattr(material, "use_nodes", False) and material.node_tree is not None:
+        for node in material.node_tree.nodes:
+            if getattr(node, "type", None) == 'TEX_IMAGE':
+                image = getattr(node, "image", None)
+                if image is not None:
+                    return image
+    return None
+
+def collect_lvz_texture_images_from_objects(objects: List[bpy.types.Object]) -> Dict[int, Tuple[bpy.types.Material, bpy.types.Image]]:
+    replacements: Dict[int, Tuple[bpy.types.Material, bpy.types.Image]] = {}
+    for obj in objects:
+        data = getattr(obj, "data", None)
+        materials = getattr(data, "materials", None)
+        if not materials:
+            continue
+        for material in materials:
+            if material is None:
+                continue
+            image = find_image_for_material(material)
+            if image is None:
+                continue
+            res_id = material_texture_res_index(material)
+            if res_id is None:
+                res_id = image_texture_res_index(image)
+            if res_id is None:
+                continue
+            if res_id not in replacements:
+                replacements[int(res_id)] = (material, image)
+    return replacements
+
+def get_image_pixels_rgba_u8(image: bpy.types.Image) -> Tuple[np.ndarray, int, int]:
+    width, height = int(image.size[0]), int(image.size[1])
+    if width <= 0 or height <= 0:
+        raise ValueError(f"Image '{image.name}' has invalid size {width}x{height}")
+    try:
+        pixels = np.array(image.pixels[:], dtype=np.float32)
+    except Exception as exc:
+        raise ValueError(f"Could not read pixels for image '{image.name}': {exc}")
+    expected = width * height * 4
+    if pixels.size < expected:
+        raise ValueError(f"Image '{image.name}' pixel buffer is truncated ({pixels.size} < {expected})")
+    pixels = pixels[:expected].reshape((height, width, 4))
+    pixels = np.clip(pixels * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
+    return pixels, width, height
+
+def choose_texture_dimensions_for_blob(image_width: int, image_height: int, target_pixels: int) -> Tuple[int, int]:
+    if image_width > 0 and image_height > 0 and image_width * image_height == target_pixels:
+        return image_width, image_height
+    if image_width > 0 and target_pixels % image_width == 0:
+        h = target_pixels // image_width
+        if h > 0:
+            return image_width, h
+    if image_height > 0 and target_pixels % image_height == 0:
+        w = target_pixels // image_height
+        if w > 0:
+            return w, image_height
+    aspect = float(image_width) / float(max(1, image_height)) if image_width > 0 else 1.0
+    best = (target_pixels, 1)
+    best_score = float("inf")
+    limit = int(math.sqrt(max(1, target_pixels))) + 1
+    for h in range(1, limit + 1):
+        if target_pixels % h != 0:
+            continue
+        w = target_pixels // h
+        for cw, ch in ((w, h), (h, w)):
+            score = abs((float(cw) / float(max(1, ch))) - aspect)
+            if score < best_score:
+                best = (cw, ch)
+                best_score = score
+    return best
+
+def resize_rgba_nearest(src: np.ndarray, dst_width: int, dst_height: int) -> np.ndarray:
+    src_height, src_width = src.shape[0], src.shape[1]
+    if src_width == dst_width and src_height == dst_height:
+        return src.copy()
+    x_idx = np.floor(np.arange(dst_width, dtype=np.float32) * (float(src_width) / float(dst_width))).astype(np.int32)
+    y_idx = np.floor(np.arange(dst_height, dtype=np.float32) * (float(src_height) / float(dst_height))).astype(np.int32)
+    x_idx = np.clip(x_idx, 0, src_width - 1)
+    y_idx = np.clip(y_idx, 0, src_height - 1)
+    return src[y_idx[:, None], x_idx[None, :], :].copy()
+
+def reduce_color_for_palette_key(color: Iterable[int]) -> Tuple[int, int, int, int]:
+    r, g, b, a = [int(v) for v in color]
+    if a < 8:
+        return (0, 0, 0, 0)
+    return (r & 0xF8, g & 0xF8, b & 0xF8, min(255, max(0, a)))
+
+def build_4bpp_palette_and_indices(rgba: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    flat = rgba.reshape((-1, 4))
+    histogram: Dict[Tuple[int, int, int, int], int] = {}
+    for color in flat:
+        key = reduce_color_for_palette_key(color)
+        histogram[key] = histogram.get(key, 0) + 1
+    if not histogram:
+        palette = np.zeros((16, 4), dtype=np.uint8)
+        indices = np.zeros((flat.shape[0],), dtype=np.uint8)
+        return palette, indices
+    ordered = sorted(histogram.items(), key=lambda item: (-item[1], item[0]))
+    colors = [item[0] for item in ordered[:16]]
+    while len(colors) < 16:
+        colors.append((0, 0, 0, 0))
+    palette = np.asarray(colors[:16], dtype=np.uint8)
+    pal_rgb = palette[:, :3].astype(np.int16)
+    pal_a = palette[:, 3].astype(np.int16)
+    src_rgb = flat[:, :3].astype(np.int16)
+    src_a = flat[:, 3].astype(np.int16)
+    indices = np.empty((flat.shape[0],), dtype=np.uint8)
+    for i in range(flat.shape[0]):
+        drgb = pal_rgb - src_rgb[i]
+        da = pal_a - src_a[i]
+        dist = (drgb[:, 0] * drgb[:, 0]) + (drgb[:, 1] * drgb[:, 1]) + (drgb[:, 2] * drgb[:, 2]) + ((da * da) // 2)
+        indices[i] = int(np.argmin(dist)) & 0x0F
+    return palette, indices
+
+def pack_4bpp_indices_lo_first(indices: np.ndarray) -> bytes:
+    idx = np.asarray(indices, dtype=np.uint8).reshape(-1)
+    if idx.size & 1:
+        idx = np.concatenate([idx, np.zeros((1,), dtype=np.uint8)])
+    lo = idx[0::2] & 0x0F
+    hi = (idx[1::2] & 0x0F) << 4
+    return bytes((lo | hi).astype(np.uint8))
+
+def swizzle_indices_for_ps2_linearized(indices: np.ndarray, width: int, height: int) -> np.ndarray:
+    src = np.asarray(indices, dtype=np.uint8).reshape((height, width))
+    dst = np.zeros((width * height,), dtype=np.uint8)
+    logw = read_lvz._log2_pow2(width)
+    for y in range(height):
+        for x in range(width):
+            s = read_lvz.swizzle_ps2_addr(x, y, logw)
+            if 0 <= s < dst.size:
+                dst[s] = src[y, x]
+    return dst
+
+def encode_image_to_lvz_4bpp_blob(image: bpy.types.Image, target_blob_len: int, use_swizzle: bool = True) -> Tuple[bytes, Tuple[int, int], int]:
+    if target_blob_len < 64:
+        raise ValueError("target texture blob is shorter than a 16-color palette")
+    target_index_bytes = target_blob_len - 64
+    target_pixels = target_index_bytes * 2
+    rgba, image_width, image_height = get_image_pixels_rgba_u8(image)
+    target_width, target_height = choose_texture_dimensions_for_blob(image_width, image_height, target_pixels)
+    if target_width <= 0 or target_height <= 0:
+        raise ValueError(f"could not infer a sane texture size for blob length 0x{target_blob_len:X}")
+    if target_width > 2048 or target_height > 2048:
+        raise ValueError(
+            f"refusing inferred texture size {target_width}x{target_height} for blob length 0x{target_blob_len:X}; "
+            "the TEX_REF range is probably not a single texture blob"
+        )
+    if image_width * image_height != target_pixels and (target_width != image_width or target_height != image_height):
+        raise ValueError(
+            f"image size {image_width}x{image_height} does not exactly match target blob length 0x{target_blob_len:X} "
+            f"({target_pixels} 4bpp pixels). Refusing implicit resize/repack."
+        )
+    rgba = resize_rgba_nearest(rgba, target_width, target_height)
+
+    rgba_for_file = np.flipud(rgba)
+    palette, linear_indices = build_4bpp_palette_and_indices(rgba_for_file)
+    if use_swizzle:
+        packed_indices = swizzle_indices_for_ps2_linearized(linear_indices, target_width, target_height)
+    else:
+        packed_indices = linear_indices
+    index_bytes = pack_4bpp_indices_lo_first(packed_indices)
+    if len(index_bytes) != target_index_bytes:
+        if len(index_bytes) > target_index_bytes:
+            index_bytes = index_bytes[:target_index_bytes]
+        else:
+            index_bytes = index_bytes + bytes(target_index_bytes - len(index_bytes))
+    palette_for_file = palette.copy()
+    alpha = palette_for_file[:, 3].astype(np.uint16)
+    alpha = (alpha * 128 + 127) // 255
+    palette_for_file[:, 3] = np.clip(alpha, 0, 128).astype(np.uint8)
+    return index_bytes + palette_for_file.reshape(-1).tobytes(), (target_width, target_height), len(set(map(tuple, palette.tolist())))
+
+def build_unique_texture_ranges(lvz_bytes: bytes, rows: List[Dict]) -> Dict[int, Dict[str, int]]:
+    out: Dict[int, Dict[str, int]] = {}
+
+    for row in rows:
+        if row.get("kind") != "TEX":
+            continue
+        res_id = int(row.get("res_id", row.get("index", -1)))
+        resource_start = int(row.get("res_addr", -1))
+        resource_end = int(row.get("res_end", -1))
+        if res_id < 0 or resource_start < 0 or resource_end <= resource_start:
+            continue
+        payload_start = resource_start + LVZ_DIRECT_TEXTURE_HEADER_BYTES
+        if payload_start >= resource_end:
+            continue
+        length = resource_end - payload_start
+        if length <= 0 or length > LVZ_MAX_TEXTURE_BLOB_BYTES:
+            continue
+        out[res_id] = {
+            "start": payload_start,
+            "end": resource_end,
+            "length": length,
+            "table_ref_off": resource_start,
+            "direct_texture": 1,
+            "header_start": resource_start,
+        }
+
+    tex_refs = []
+    seen_ref_addrs = set()
+    for row in rows:
+        if row.get("kind") != "TEX_REF":
+            continue
+        res_id = int(row.get("res_id", row.get("index", -1)))
+        ref_addr = int(row.get("ref_addr", -1))
+        table_ref_off = int(row.get("res_addr", -1))
+        if res_id < 0 or ref_addr < 0 or ref_addr >= len(lvz_bytes):
+            continue
+        if ref_addr in seen_ref_addrs:
+            continue
+        seen_ref_addrs.add(ref_addr)
+        tex_refs.append((ref_addr, res_id, table_ref_off))
+    tex_refs.sort(key=lambda item: item[0])
+    for i, (start, res_id, table_ref_off) in enumerate(tex_refs):
+        if res_id in out:
+            continue
+        end = tex_refs[i + 1][0] if i + 1 < len(tex_refs) else len(lvz_bytes)
+        if end <= start:
+            continue
+        length = end - start
+        if length > LVZ_MAX_TEXTURE_BLOB_BYTES:
+            continue
+        out[res_id] = {
+            "start": start,
+            "end": end,
+            "length": length,
+            "table_ref_off": table_ref_off,
+        }
+    return out
+
+def patch_lvz_texture_resources_from_scene(lvz_bytes: bytes, rows: List[Dict], objects: List[bpy.types.Object], use_swizzle: bool = True) -> Tuple[bytes, List[Dict[str, object]], List[Dict[str, object]]]:
+    texture_images = collect_lvz_texture_images_from_objects(objects)
+    ranges_by_res = build_unique_texture_ranges(lvz_bytes, rows)
+    patched = bytearray(lvz_bytes)
+    changed: List[Dict[str, object]] = []
+    skipped: List[Dict[str, object]] = []
+    for res_id, (material, image) in sorted(texture_images.items(), key=lambda item: item[0]):
+        if not material_or_image_wants_texture_write(material, image):
+            skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": "texture is not marked dirty/exportable"})
+            continue
+        info = ranges_by_res.get(int(res_id))
+        if info is None:
+            skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": "no TEX_REF range"})
+            continue
+        start = int(info["start"])
+        length = int(info["length"])
+        if start < 0 or length <= 0 or start + length > len(lvz_bytes):
+            skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": f"invalid TEX_REF range start=0x{start:X} len=0x{length:X}"})
+            continue
+        try:
+            encoded, dims, palette_count = encode_image_to_lvz_4bpp_blob(image, length, use_swizzle=use_swizzle)
+        except Exception as exc:
+            skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": str(exc)})
+            continue
+        if len(encoded) != length:
+            skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": f"encoded size mismatch {len(encoded)} != {length}"})
+            continue
+        patched[start:start + length] = encoded
+        changed.append({
+            "res_id": res_id,
+            "material": material.name,
+            "image": image.name,
+            "start": start,
+            "length": length,
+            "width": dims[0],
+            "height": dims[1],
+            "palette_count": palette_count,
+        })
+    return bytes(patched), changed, skipped
+
+def write_lvz_img_scene_archive(
+    context,
+    source_lvz_path: str,
+    source_img_path: str,
+    output_lvz_path: str,
+    selected_only: bool = False,
+    update_transforms: bool = True,
+    update_bounds: bool = True,
+    update_all_matching_instances: bool = False,
+    update_textures: bool = True,
+    texture_swizzle_ps2: bool = True,
+    write_debug_log: bool = True,
+) -> Dict[str, object]:
+    objects = collect_lvz_img_export_objects(context, selected_only)
+    if not objects:
+        raise ValueError("No LVZ/IMG imported objects were found. Expected objects with blds_res_index.")
+
+    if not source_lvz_path:
+        source_lvz_path = find_source_path_from_objects(objects, "blds_source_lvz_path")
+    if not source_img_path:
+        source_img_path = find_source_path_from_objects(objects, "blds_source_img_path")
+    if not source_img_path and source_lvz_path:
+        source_img_path = find_source_img_next_to_lvz(source_lvz_path)
+
+    if not source_lvz_path:
+        raise ValueError("Missing source LVZ path. Import an LVZ first or fill Source LVZ Path in the export dialog.")
+    if not source_img_path:
+        raise ValueError("Missing source IMG path. Put the IMG next to the LVZ or fill Source IMG Path in the export dialog.")
+
+    source_lvz = Path(source_lvz_path)
+    source_img = Path(source_img_path)
+    output_lvz = Path(output_lvz_path)
+    output_img = output_lvz.with_suffix(".IMG")
+
+    lvz_bytes_in = source_lvz.read_bytes()
+    lvz_decomp, lvz_was_compressed = safe_decompress(lvz_bytes_in)
+    if lvz_bytes_in[:4] == b"DLRW":
+        lvz_decomp = lvz_bytes_in
+        lvz_was_compressed = False
+    lvz_decomp_out = bytes(lvz_decomp)
+    img_bytes_in = read_img_file_bytes(str(source_img))
+    img_bytes_out = bytearray(img_bytes_in)
+    img_is_ver2 = is_ver2_img_archive(img_bytes_in)
+    img_ver2_entries = parse_ver2_img_directory(img_bytes_in) if img_is_ver2 else []
+
+    img_reader = read_img(img_bytes=img_bytes_in, lvz_bytes=lvz_decomp_out)
+    conts = img_reader.find_conts()
+    details = img_reader.enumerate_details(conts)
+    details_by_res: Dict[int, List[Tuple]] = {}
+    for detail in details:
+        res_id = int(detail[0])
+        details_by_res.setdefault(res_id, []).append(detail)
+
+    exact_detail_by_key: Dict[Tuple[int, int], Tuple] = {}
+    for detail in details:
+        res_id, cont, rel_off = int(detail[0]), int(detail[1]), int(detail[2])
+        exact_detail_by_key[(cont, rel_off)] = detail
+
+    changed_textures = []
+    skipped_textures = []
+    if update_textures:
+        try:
+            lvz_reader = read_lvz(
+                decomp_bytes=lvz_decomp_out,
+                stem=source_lvz.stem,
+                use_swizzle=texture_swizzle_ps2,
+                debug_print=False,
+            )
+            master = lvz_reader.parse_master_header()
+            _groups_hdr, res_count, _cursor = lvz_reader.parse_slave_groups_and_rescount()
+            rows = lvz_reader.walk_master_resource_table(master.res_table_addr, res_count)
+            lvz_decomp_out, changed_textures, skipped_textures = patch_lvz_texture_resources_from_scene(
+                lvz_bytes=lvz_decomp_out,
+                rows=rows,
+                objects=objects,
+                use_swizzle=texture_swizzle_ps2,
+            )
+        except Exception as tex_exc:
+            skipped_textures.append({"res_id": -1, "material": "", "image": "", "reason": f"texture writer setup failed: {tex_exc}"})
+
+    changed_rows = []
+    skipped_objects = []
+    for obj in objects:
+        res_id = int(obj.get("blds_res_index", -1))
+        target_details: List[Tuple] = []
+        has_exact = "blds_img_cont" in obj and "blds_img_rel_off" in obj
+        if has_exact:
+            key = (int(obj.get("blds_img_cont", 0)), int(obj.get("blds_img_rel_off", 0)))
+            detail = exact_detail_by_key.get(key)
+            if detail is not None:
+                target_details = [detail]
+        if not target_details:
+            rows_for_res = details_by_res.get(res_id, [])
+            if update_all_matching_instances:
+                target_details = list(rows_for_res)
+            elif rows_for_res:
+                target_details = [rows_for_res[0]]
+        if not target_details:
+            skipped_objects.append((obj.name, res_id, "no matching IMG row"))
+            continue
+
+        for detail in target_details:
+            detail_res_id, cont, rel_off = int(detail[0]), int(detail[1]), int(detail[2])
+            row_off = cont + rel_off
+            if row_off < 0 or row_off + 0x50 > len(img_bytes_out):
+                skipped_objects.append((obj.name, res_id, f"IMG row out of range at 0x{row_off:X}"))
+                continue
+            if img_is_ver2:
+                entry = find_ver2_entry_for_abs_offset(img_ver2_entries, row_off)
+                if entry is None or row_off + 0x50 > int(entry["end"]):
+                    skipped_objects.append((obj.name, res_id, f"IMG row is not inside a VER2 archive payload at 0x{row_off:X}"))
+                    continue
+            if not looks_like_img_instance_row(img_bytes_in, row_off):
+                skipped_objects.append((obj.name, res_id, f"IMG row signature check failed at 0x{row_off:X}"))
+                continue
+            if update_transforms:
+                write_matrix_16_floats_row_major(img_bytes_out, row_off + 0x10, obj.matrix_world)
+            bounds = None
+            if update_bounds:
+                bounds = calculate_object_local_bounding_sphere(obj)
+                if bounds is not None:
+                    struct.pack_into("<HHHH", img_bytes_out, row_off + 0x04,
+                                     float_to_half_u16(bounds[0]),
+                                     float_to_half_u16(bounds[1]),
+                                     float_to_half_u16(bounds[2]),
+                                     float_to_half_u16(bounds[3]))
+            changed_rows.append({
+                "object": obj.name,
+                "res_id": detail_res_id,
+                "cont": cont,
+                "rel_off": rel_off,
+                "row_off": row_off,
+                "bounds": bounds,
+            })
+
+    output_lvz.parent.mkdir(parents=True, exist_ok=True)
+    if update_textures:
+        if lvz_was_compressed:
+            output_lvz.write_bytes(zlib.compress(lvz_decomp_out))
+        else:
+            output_lvz.write_bytes(lvz_decomp_out)
+    else:
+        output_lvz.write_bytes(lvz_bytes_in)
+    output_img.write_bytes(bytes(img_bytes_out))
+
+    log_path = output_lvz.with_name(output_lvz.stem + "_lvz_img_export.log")
+    if write_debug_log:
+        lines = []
+        lines.append("===== BLeeds LVZ + IMG Export Writer =====")
+        lines.append(f"source_lvz: {source_lvz}")
+        lines.append(f"source_img: {source_img}")
+        lines.append(f"output_lvz: {output_lvz}")
+        lines.append(f"output_img: {output_img}")
+        lines.append(f"objects_seen: {len(objects)}")
+        lines.append(f"img_rows_changed: {len(changed_rows)}")
+        lines.append(f"update_transforms: {update_transforms}")
+        lines.append(f"update_bounds: {update_bounds}")
+        lines.append(f"update_all_matching_instances: {update_all_matching_instances}")
+        lines.append(f"update_textures: {update_textures}")
+        lines.append(f"texture_swizzle_ps2: {texture_swizzle_ps2}")
+        lines.append(f"lvz_was_compressed: {lvz_was_compressed}")
+        lines.append(f"source_lvz_bytes: {len(lvz_bytes_in)}")
+        lines.append(f"written_lvz_mode: {'zlib' if (update_textures and lvz_was_compressed) else 'raw/original'}")
+        lines.append(f"source_img_bytes: {len(img_bytes_in)}")
+        lines.append(f"source_img_kind: {'VER2 archive' if img_is_ver2 else 'raw IMG memory stream'}")
+        if img_is_ver2:
+            lines.append(f"source_img_ver2_entries: {len(img_ver2_entries)}")
+        lines.append("")
+        lines.append("Changed LVZ textures:")
+        if changed_textures:
+            for tex_row in changed_textures:
+                lines.append(
+                    f"  TEX_RES={tex_row['res_id']} mat='{tex_row['material']}' image='{tex_row['image']}' "
+                    f"LVZ+0x{tex_row['start']:08X} len=0x{tex_row['length']:X} "
+                    f"size={tex_row['width']}x{tex_row['height']} palette_entries={tex_row['palette_count']}"
+                )
+        else:
+            lines.append("  none")
+        if skipped_textures:
+            lines.append("")
+            lines.append("Skipped LVZ textures:")
+            for tex_row in skipped_textures:
+                lines.append(
+                    f"  TEX_RES={tex_row.get('res_id')} mat='{tex_row.get('material')}' "
+                    f"image='{tex_row.get('image')}': {tex_row.get('reason')}"
+                )
+        lines.append("")
+        lines.append("Changed IMG rows:")
+        for row in changed_rows:
+            b = row["bounds"]
+            if b is None:
+                btxt = "unchanged"
+            else:
+                btxt = f"({b[0]:.6f}, {b[1]:.6f}, {b[2]:.6f}, r={b[3]:.6f})"
+            lines.append(
+                f"  obj='{row['object']}' RES={row['res_id']} "
+                f"IMG+0x{row['cont']:08X}+0x{row['rel_off']:08X} "
+                f"abs=0x{row['row_off']:08X} bounds={btxt}"
+            )
+        if skipped_objects:
+            lines.append("")
+            lines.append("Skipped objects:")
+            for name, res_id, reason in skipped_objects:
+                lines.append(f"  obj='{name}' RES={res_id}: {reason}")
+        lines.append("")
+        if update_textures:
+            lines.append("LVZ texture blobs are rewritten from live Blender material image nodes when a matching TEX RES is found.")
+        else:
+            lines.append("LVZ bytes are carried through unchanged because texture writing is disabled.")
+        lines.append("IMG instance rows are rewritten from live Blender object matrices.")
+        log_path.write_text("\n".join(lines), encoding="utf-8")
+
+    return {
+        "output_lvz": str(output_lvz),
+        "output_img": str(output_img),
+        "log_path": str(log_path) if write_debug_log else "",
+        "objects_seen": len(objects),
+        "changed_rows": len(changed_rows),
+        "skipped_objects": len(skipped_objects),
+        "changed_textures": len(changed_textures),
+        "skipped_textures": len(skipped_textures),
+    }
 
 @dataclass
 class LVZMaster:
@@ -154,13 +937,15 @@ class SlaveGroup:
 
 @dataclass
 class MDLMaterial:
-    texture_id: int           # map LVZ RES 
+    texture_id: int
     tri_strip_size: int
     backface_cull: bool
     u_scale: float
     v_scale: float
     flags2: int
     bbox6_i16: Tuple[int, int, int, int, int, int]
+    row_format: str = ""
+    packet_raw: int = 0
 
 @dataclass
 class MDLMaterialList:
@@ -170,6 +955,8 @@ class MDLMaterialList:
     bytes_read: int
     aa_tail: bytes
     next_off: int
+    format_tag: str = "ps2_unknown"
+    row_len: int = 0
 
 @dataclass
 class TriStrip:
@@ -189,10 +976,6 @@ class MDLStripGroup:
     start_off: int
     end_off: int
 
-#######################################################
-# LVZ responsibilities (master/slave/RES, TEX, MDL)
-#######################################################
-
 class read_lvz:
     UNPACK = 0x6C018000
     STMASK = 0x20000000
@@ -205,10 +988,11 @@ class read_lvz:
         self.use_swizzle = use_swizzle
         self.debug_print = debug_print
         self.material_by_res_index: Dict[int, bpy.types.Material] = {}
-
-    #######################################################
-    # Master/slave/resource table
-    #######################################################
+        self.master_resource_count: int = 0
+        self.master_resource_stride: int = 0
+        self.master_group_table_end: int = 0
+        self.master_first_group_addr: int = 0
+        self.master_game_hint: str = "unknown"
 
     def parse_master_header(self) -> LVZMaster:
         lvz = self.decomp
@@ -259,12 +1043,157 @@ class read_lvz:
             info = {"first16_hex": hexdump_bytes(blk[:16], 16)}
         return (tag_str, info, note)
 
+    def score_resource_entry_stride(self, base: int, res_count: int, stride: int, table_limit: int) -> int:
+        lvz = self.decomp
+        n = len(lvz)
+        if stride not in (8, 12):
+            return -1000000
+        if base <= 0 or base >= n or res_count <= 0:
+            return -1000000
+        if base + res_count * stride > min(n, table_limit):
+            return -1000000
+
+        sample_count = min(res_count, 1024)
+        score = 0
+        nonempty = 0
+        supported = 0
+        invalid = 0
+        id_like = 0
+        dma_zero = 0
+
+        for i in range(sample_count):
+            off = base + i * stride
+            raw_ptr = read_u32(lvz, off + 0)
+            dma_ptr = read_u32(lvz, off + 4)
+            res_id_field = read_u32(lvz, off + 8) if stride == 12 else None
+
+            if stride == 12:
+                if res_id_field == 0xFFFFFFFF:
+                    id_like += 2
+                elif 0 <= int(res_id_field) <= max(res_count + 4096, 0xFFFF):
+                    id_like += 1
+                else:
+                    id_like -= 4
+
+            if dma_ptr == 0 or (LVZ_MIN_RESOURCE_CANDIDATE_ADDR <= dma_ptr < n and (dma_ptr & 3) == 0):
+                dma_zero += 1
+            else:
+                score -= 1
+
+            if raw_ptr in (0, 0xFFFFFFFF):
+                score += 1
+                continue
+            nonempty += 1
+
+            if not (LVZ_MIN_RESOURCE_CANDIDATE_ADDR <= raw_ptr < n and (raw_ptr & 3) == 0):
+                invalid += 1
+                score -= 8
+                continue
+
+            score += 2
+            kind_score, kind, _info = self.classify_resource_candidate(raw_ptr)
+            if kind_score >= 0 and kind not in ("EMPTY", "INVALID"):
+                supported += 1
+                score += 4
+            elif kind == "INVALID":
+                score -= 1
+
+        if stride == 12:
+            score += id_like
+            if id_like > sample_count:
+                score += sample_count * 3
+        else:
+            score += dma_zero // 4
+
+        if nonempty > 0:
+            score += min(supported, 512)
+            score -= invalid * 2
+        return score
+
+    def detect_master_resource_stride(self, base: int, res_count: int, first_group_addr: int) -> int:
+        lvz = self.decomp
+        n = len(lvz)
+        if base <= 0 or base >= n or res_count <= 0:
+            return 8
+        table_limit = n
+        if first_group_addr > base:
+            table_limit = min(table_limit, int(first_group_addr))
+        space = max(0, table_limit - base)
+
+        candidates: List[Tuple[int, int]] = []
+        for stride in (12, 8):
+            if space >= res_count * stride:
+                candidates.append((self.score_resource_entry_stride(base, res_count, stride, table_limit), stride))
+        if not candidates:
+            if space >= res_count * 8:
+                return 8
+            if space >= res_count * 12:
+                return 12
+            return 8
+        candidates.sort(reverse=True)
+        return int(candidates[0][1])
+
     def parse_slave_groups_and_rescount(self):
         lvz = self.decomp
         n = len(lvz)
-        cursor = 0x24
+        master = self.parse_master_header()
+
         groups: List[SlaveGroup] = []
+        cursor = 0x24
         idx = 0
+
+        if master.magic == b"DLRW":
+            while cursor + 8 <= n:
+                addr = read_u32(lvz, cursor + 0)
+                group_type = read_u32(lvz, cursor + 4)
+                if not (0 < addr < n and (addr & 0x3) == 0 and addr + 0x20 <= n):
+                    break
+                tag = lvz[addr:addr + 4]
+                if tag not in (b"DLRW", b"xet\0"):
+                    break
+                tag_str, info, note = self._peek_global32(addr)
+                total = int(info.get("total", 0))
+                gcnt = int(info.get("gcnt", 0))
+                cont = int(info.get("cont", 0))
+                groups.append(SlaveGroup(
+                    idx,
+                    addr,
+                    str(tag_str),
+                    total,
+                    gcnt,
+                    cont,
+                    f"{note}; group_type=0x{group_type:08X}"
+                ))
+                idx += 1
+                cursor += 8
+
+            res_count = 0
+            if groups and cursor + 4 <= n:
+                res_count = read_u32(lvz, cursor)
+                cursor += 4
+            if res_count <= 0 or res_count > LVZ_MAX_RESOURCE_ROWS:
+                res_count = int(master.count_like)
+
+            first_group_addr = min((int(g.addr) for g in groups), default=0)
+            stride = self.detect_master_resource_stride(int(master.res_table_addr), int(res_count), int(first_group_addr))
+            self.master_resource_count = int(res_count)
+            self.master_resource_stride = int(stride)
+            self.master_group_table_end = int(cursor)
+            self.master_first_group_addr = int(first_group_addr)
+            self.master_game_hint = "vcs" if stride == 12 else "lcs"
+
+            if res_count > LVZ_MAX_RESOURCE_ROWS:
+                dbg(f"[lvz] WARNING: master resource count {res_count} exceeds parser limit; clamping to {LVZ_MAX_RESOURCE_ROWS}")
+                res_count = LVZ_MAX_RESOURCE_ROWS
+                self.master_resource_count = int(res_count)
+
+            dbg(
+                f"[lvz] master Resource[]: count={res_count} stride={stride} "
+                f"game_hint={self.master_game_hint} table=0x{int(master.res_table_addr):08X} "
+                f"groups_end=0x{self.master_group_table_end:08X} first_group=0x{first_group_addr:08X}"
+            )
+            return (groups, res_count, cursor)
+
         while cursor + 8 <= n:
             addr = read_u32(lvz, cursor + 0)
             resv = read_u32(lvz, cursor + 4)
@@ -280,67 +1209,333 @@ class read_lvz:
             idx += 1
             cursor += 8
 
-        res_count = 0
-        if cursor + 4 <= n:
+        res_count = int(master.count_like)
+        if res_count <= 0 and cursor + 4 <= n:
             res_count_u32 = read_u32(lvz, cursor)
             res_count = res_count_u32 & 0xFFFF
             cursor += 4
+        if res_count > LVZ_MAX_RESOURCE_ROWS:
+            dbg(f"[lvz] WARNING: resource count {res_count} exceeds parser limit; clamping to {LVZ_MAX_RESOURCE_ROWS}")
+            res_count = LVZ_MAX_RESOURCE_ROWS
+        self.master_resource_count = int(res_count)
+        self.master_resource_stride = 8
+        self.master_group_table_end = int(cursor)
+        self.master_first_group_addr = min((int(g.addr) for g in groups), default=0)
+        self.master_game_hint = "unknown"
         return (groups, res_count, cursor)
 
-    def _classify_entry_peek(self, res_addr: int):
+    def material_list_stream_has_unpack(self, addr: int, list_end: int, max_end: Optional[int] = None) -> bool:
+        lvz = self.decomp
+        n = len(lvz) if max_end is None else min(len(lvz), max(0, int(max_end)))
+        if list_end < addr or list_end > n:
+            return False
+        stream_guess = list_end
+        while stream_guess < n and lvz[stream_guess] == 0xAA and stream_guess - addr < 0x1000:
+            stream_guess += 1
+        stream_guess = align_down4(stream_guess)
+        unpack_bytes = struct.pack("<I", self.UNPACK)
+        return lvz.find(unpack_bytes, max(addr, stream_guess - 0x10), min(n, stream_guess + 0x100)) >= 0
+
+    def score_ps2_material_row_format(self, addr: int, count: int, size_bytes: int, row_len: int) -> int:
+        lvz = self.decomp
+        score = 0
+        material_count_to_test = min(max(0, count), 8)
+        off = addr + 4
+        for _ in range(material_count_to_test):
+            if off + row_len > len(lvz):
+                return -100000
+            try:
+                if row_len == 24:
+                    packet_raw = read_u32(lvz, off + 0)
+                    packet_size = packet_raw >> 1
+                    tex_id = read_u16(lvz, off + 4)
+                    u_scale = half_to_float(read_u16(lvz, off + 6))
+                    v_scale = half_to_float(read_u16(lvz, off + 8))
+                    flags2 = read_u16(lvz, off + 10)
+                    if packet_raw == 0 or packet_size > 0x40000:
+                        score -= 10
+                    else:
+                        score += 12
+                    if tex_id != 0xFFFF:
+                        score += 2
+                    if math.isfinite(u_scale) and math.isfinite(v_scale) and abs(u_scale) <= 256.0 and abs(v_scale) <= 256.0:
+                        score += 10
+                        if abs(u_scale) >= 0.00001 or abs(v_scale) >= 0.00001:
+                            score += 4
+                    else:
+                        score -= 40
+                    if flags2 in (0x0000, 0x0040, 0x3C00, 0x4000) or (flags2 & 0xC000) in (0, 0x4000):
+                        score += 1
+                else:
+                    tex_id = read_u16(lvz, off + 0)
+                    packet_raw = read_u16(lvz, off + 2)
+                    packet_size = packet_raw & 0x7FFF
+                    u_scale = half_to_float(read_u16(lvz, off + 4))
+                    v_scale = half_to_float(read_u16(lvz, off + 6))
+                    flags2 = read_u16(lvz, off + 8)
+                    if packet_size > 0 and packet_size <= 0x8000:
+                        score += 8
+                    else:
+                        score -= 6
+                    if tex_id != 0xFFFF:
+                        score += 2
+                    if math.isfinite(u_scale) and math.isfinite(v_scale) and abs(u_scale) <= 256.0 and abs(v_scale) <= 256.0:
+                        score += 6
+                        if abs(u_scale) >= 0.00001 or abs(v_scale) >= 0.00001:
+                            score += 2
+                    else:
+                        score -= 30
+                    if flags2 in (0x0000, 0x0040, 0x3C00, 0x4000) or (flags2 & 0xC000) in (0, 0x4000):
+                        score += 1
+            except Exception:
+                return -100000
+            off += row_len
+        return score
+
+    def detect_mdl_material_list_format(self, addr: int, max_end: Optional[int] = None) -> Optional[Dict[str, object]]:
+        lvz = self.decomp
+        n = len(lvz) if max_end is None else min(len(lvz), max(0, int(max_end)))
+        if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr + 8 > n or (addr & 0x3) != 0:
+            return None
+        if lvz[addr:addr + 4] in (b"DLRW", b"xet\0"):
+            return None
+
+        candidates: List[Dict[str, object]] = []
+
+        count16 = read_u16(lvz, addr + 0)
+        size16 = read_u16(lvz, addr + 2)
+        if 0 < count16 <= 512 and 0 <= size16 <= 0x8000 and addr + 4 + size16 <= n:
+            for tag, row_len, base_score in (("ps2_vcs", 24, 30), ("ps2_lcs", 22, 10)):
+                if size16 < count16 * row_len:
+                    continue
+                list_end = addr + 4 + size16
+                if not self.material_list_stream_has_unpack(addr, list_end, max_end=n):
+                    continue
+                score = base_score + self.score_ps2_material_row_format(addr, count16, size16, row_len)
+                candidates.append({
+                    "format_tag": tag,
+                    "count": int(count16),
+                    "size_bytes": int(size16),
+                    "row_len": int(row_len),
+                    "header_len": 4,
+                    "list_end": int(list_end),
+                    "score": int(score),
+                })
+
+        count32 = read_u32(lvz, addr + 0)
+        unk_float = 0.0
+        try:
+            unk_float = struct.unpack_from("<f", lvz, addr + 4)[0]
+        except Exception:
+            unk_float = 0.0
+        if 0 < count32 <= 1024 and math.isfinite(float(unk_float)):
+            for tag, row_len, base_score in (("psp_wrld_24", 24, 20), ("psp_wrld_10", 10, 12)):
+                list_end = addr + 8 + (int(count32) * row_len)
+                if list_end > n:
+                    continue
+                material_score = 0
+                total_vertices = 0
+                ok = True
+                test_count = min(int(count32), 16)
+                for mi in range(test_count):
+                    roff = addr + 8 + mi * row_len
+                    tex_id = read_u16(lvz, roff + 0)
+                    count_raw = read_u16(lvz, roff + 2)
+                    vertex_count = count_raw & 0x7FFF
+                    u_scale = half_to_float(read_u16(lvz, roff + 4)) if row_len >= 8 else 1.0
+                    v_scale = half_to_float(read_u16(lvz, roff + 6)) if row_len >= 8 else 1.0
+                    if vertex_count <= 0 or vertex_count > 8192:
+                        ok = False
+                        break
+                    if not (math.isfinite(u_scale) and math.isfinite(v_scale) and abs(u_scale) <= 256.0 and abs(v_scale) <= 256.0):
+                        ok = False
+                        break
+                    if tex_id != 0xFFFF:
+                        material_score += 2
+                    total_vertices += vertex_count
+                if not ok:
+                    continue
+                full_vertex_total = 0
+                for mi in range(min(int(count32), 1024)):
+                    roff = addr + 8 + mi * row_len
+                    full_vertex_total += read_u16(lvz, roff + 2) & 0x7FFF
+                    if full_vertex_total > LVZ_MAX_MDL_VERTICES_PER_OBJECT:
+                        break
+                geo_start = align_up4(list_end)
+                while geo_start < n and lvz[geo_start] == 0xAA and geo_start - addr < 0x1000:
+                    geo_start += 1
+                geo_start = align_up4(geo_start)
+                if full_vertex_total <= 0 or geo_start + (full_vertex_total * 10) > n:
+                    continue
+                candidates.append({
+                    "format_tag": tag,
+                    "count": int(count32),
+                    "size_bytes": int(count32) * row_len,
+                    "row_len": int(row_len),
+                    "header_len": 8,
+                    "list_end": int(list_end),
+                    "score": int(base_score + material_score + (8 if row_len == 24 and abs(float(unk_float)) > 0.0 else 0)),
+                })
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: int(item.get("score", 0)), reverse=True)
+        return candidates[0]
+
+    def looks_like_mdl_material_list_candidate(self, addr: int) -> bool:
+        return self.detect_mdl_material_list_format(addr) is not None
+
+    def looks_like_direct_texture_candidate(self, addr: int) -> bool:
         lvz = self.decomp
         n = len(lvz)
-        if res_addr == 0:
-            info = {"reason": "ptr_is_zero"}
-            if n >= 8:
-                info["u16_pair"] = (read_u16(lvz, 0), read_u16(lvz, 2))
-                info["u32_pair"] = (read_u32(lvz, 0), read_u32(lvz, 4))
-            return ("EMPTY", info)
-        if res_addr < 0 or res_addr + 8 > n:
-            return ("INVALID", {"why": "out_of_range"})
+        if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr + (LVZ_DIRECT_TEXTURE_HEADER_BYTES + LVZ_DIRECT_TEXTURE_PALETTE_BYTES) > n or (addr & 0x3) != 0:
+            return False
+        if read_u32(lvz, addr + 0) != 0xCCCCCCCC:
+            return False
 
-        a16 = read_u16(lvz, res_addr + 0)
-        b16 = read_u16(lvz, res_addr + 2)
-        a32 = read_u32(lvz, res_addr + 0)
-        b32 = read_u32(lvz, res_addr + 4)
+        width_half = read_u16(lvz, addr + 4)
+        format_flags = read_u16(lvz, addr + 6)
+        data_pointer = read_u32(lvz, addr + 8)
+        raster_flags = read_u32(lvz, addr + 12)
 
-        if a16 == 0:
-            kind = "UNK_FAC0"
-        elif a16 <= 100:
-            kind = "MDL"
-        else:
-            kind = "TEX_REF"
+        if width_half not in (4, 8, 16, 32, 64, 128, 256, 512):
+            return False
 
+        low_flag = format_flags & 0x00FF
+        high_flag = format_flags & 0xFF00
+        if low_flag not in (0x25, 0x45) or high_flag not in (0xC000, 0xCF00):
+            return False
+        if data_pointer not in (addr + LVZ_DIRECT_TEXTURE_HEADER_BYTES, 0):
+            if not (addr < data_pointer < n and (data_pointer & 0x3) == 0):
+                return False
+        logw = raster_flags & 0x3F
+        logh = (raster_flags >> 6) & 0x3F
+        depth = (raster_flags >> 12) & 0x3F
+        mipmaps = (raster_flags >> 20) & 0x0F
+        if logw > 12 or logh > 12 or depth not in (4, 8, 32) or mipmaps > 8:
+            return False
+        if depth == 4 and width_half and (1 << logw) not in (int(width_half), int(width_half) * 2):
+            return False
+        return True
+
+    def looks_like_texture_ref_candidate(self, addr: int) -> bool:
+        lvz = self.decomp
+        n = len(lvz)
+        if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr + 8 > n or (addr & 0x3) != 0:
+            return False
+        ref_addr = read_u32(lvz, addr + 0)
+        if ref_addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or ref_addr >= n or (ref_addr & 0x3) != 0:
+            return False
+
+        if lvz[ref_addr:ref_addr + 4] in (b"DLRW", b"xet\0"):
+            return False
+        return True
+
+    def classify_resource_candidate(self, addr: int) -> Tuple[int, str, Dict]:
+        lvz = self.decomp
+        n = len(lvz)
+        if addr in (0, 0xFFFFFFFF):
+            return (0, "EMPTY", {"reason": "null_or_minus_one"})
+        if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr + 8 > n or (addr & 0x3) != 0:
+            return (-100, "INVALID", {"why": "candidate_out_of_range_or_unaligned"})
+        if lvz[addr:addr + 4] in (b"DLRW", b"xet\0"):
+            return (-50, "INVALID", {"why": "candidate_points_to_preface"})
+
+        a16 = read_u16(lvz, addr + 0)
+        b16 = read_u16(lvz, addr + 2)
+        a32 = read_u32(lvz, addr + 0)
+        b32 = read_u32(lvz, addr + 4)
         info = {"u16_pair": (a16, b16), "u32_pair": (a32, b32)}
-        if kind == "UNK_FAC0":
-            info["unk_fac0"] = b16
-        if kind == "TEX_REF":
+
+        if self.looks_like_mdl_material_list_candidate(addr):
+            return (100, "MDL", info)
+        if self.looks_like_direct_texture_candidate(addr):
+            info["direct_texture"] = True
+            info["width_half"] = read_u16(lvz, addr + 4)
+            info["texture_flags"] = read_u16(lvz, addr + 6)
+            info["data_addr"] = read_u32(lvz, addr + 8)
+            info["texture_meta"] = read_u32(lvz, addr + 12)
+            info["raster_flags"] = read_u32(lvz, addr + 12)
+            return (90, "TEX", info)
+        if self.looks_like_texture_ref_candidate(addr):
             info["ref_addr"] = a32
-            info["embedded_res_id"] = b32  
-        return (kind, info)
+            info["embedded_res_id"] = b32
+            return (80, "TEX_REF", info)
+        if a16 == 0:
+            info["unk_fac0"] = b16
+            return (10, "UNK_FAC0", info)
+        return (-10, "INVALID", {**info, "why": "not_a_supported_lvz_resource"})
+
+    def choose_resource_table_pointer(self, dword0: int, dword1: int) -> Tuple[int, str, Dict, int]:
+        candidates = []
+        for slot, addr in ((0, dword0), (1, dword1)):
+            score, kind, info = self.classify_resource_candidate(addr)
+            candidates.append((score, slot, addr, kind, info))
+        candidates.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+        score, slot, addr, kind, info = candidates[0]
+        if score >= 0:
+            return addr, kind, info, slot
+        if dword0 in (0, 0xFFFFFFFF) and dword1 in (0, 0xFFFFFFFF):
+            return 0, "EMPTY", {"reason": "empty_resource_table_row", "u16_pair": (None, None), "u32_pair": (None, None)}, -1
+        return addr, kind, info, slot
 
     def walk_master_resource_table(self, res_table_addr: int, res_count: int) -> List[Dict]:
         lvz = self.decomp
         rows: List[Dict] = []
         n = len(lvz)
-        base = res_table_addr
-        if base <= 0 or base + (res_count * 8) > n:
-            max_rows = max(0, (n - base) // 8)
+        base = int(res_table_addr)
+        if base <= 0 or base >= n:
+            dbg(f"[lvz] WARNING: resource table address 0x{base:08X} is outside LVZ bounds.")
+            return rows
+
+        stride = int(self.master_resource_stride or 0)
+        if stride not in (8, 12):
+            stride = self.detect_master_resource_stride(base, int(res_count), int(self.master_first_group_addr or 0))
+            self.master_resource_stride = stride
+            self.master_game_hint = "vcs" if stride == 12 else "lcs"
+
+        table_limit = n
+        if self.master_first_group_addr and self.master_first_group_addr > base:
+            table_limit = min(table_limit, int(self.master_first_group_addr))
+
+        if base + (int(res_count) * stride) > table_limit:
+            max_rows = max(0, (table_limit - base) // stride)
             if res_count > max_rows:
-                dbg(f"[lvz] WARNING: res_count={res_count} exceeds file bounds; clamping to {max_rows}")
+                dbg(f"[lvz] WARNING: res_count={res_count} exceeds Resource[] table bounds for stride={stride}; clamping to {max_rows}")
                 res_count = max_rows
+        if res_count > LVZ_MAX_RESOURCE_ROWS:
+            dbg(f"[lvz] WARNING: res_count={res_count} exceeds parser limit; clamping to {LVZ_MAX_RESOURCE_ROWS}")
+            res_count = LVZ_MAX_RESOURCE_ROWS
+
+        dbg(f"[lvz] walking Resource[] rows: table=0x{base:08X} count={res_count} stride={stride} game_hint={self.master_game_hint}")
+
         off = base
-        for i in range(res_count):
-            res_addr = read_u32(lvz, off + 0)
-            reserved = read_u32(lvz, off + 4)
-            kind, info = self._classify_entry_peek(res_addr)
+        for i in range(int(res_count)):
+            raw_ptr = read_u32(lvz, off + 0)
+            dma_ptr = read_u32(lvz, off + 4) if off + 8 <= n else 0
+            resource_id_field = read_u32(lvz, off + 8) if stride == 12 and off + 12 <= n else None
+
+            score, kind, info = self.classify_resource_candidate(raw_ptr)
+            if raw_ptr in (0, 0xFFFFFFFF):
+                kind = "EMPTY"
+                info = {"reason": "null_or_minus_one", "u16_pair": (None, None), "u32_pair": (0, 0)}
+            elif score < 0 and not (LVZ_MIN_RESOURCE_CANDIDATE_ADDR <= raw_ptr < n and (raw_ptr & 3) == 0):
+                kind = "INVALID"
+
             a16, b16 = info.get("u16_pair", (None, None))
             a32, b32 = info.get("u32_pair", (None, None))
             row: Dict = {
-                "index": i,                 
+                "index": i,
                 "table_off": off,
-                "res_addr": res_addr,
-                "reserved": reserved,
+                "resource_stride": stride,
+                "raw_dword0": raw_ptr,
+                "raw_dword1": dma_ptr,
+                "raw_dword2": resource_id_field,
+                "pointer_slot": 0,
+                "res_addr": raw_ptr,
+                "reserved": dma_ptr,
+                "dma_ptr": dma_ptr,
+                "resource_id_field": resource_id_field,
                 "kind": kind,
                 "peek_u16": (a16, b16),
                 "peek_u32": (a32, b32),
@@ -349,17 +1544,45 @@ class read_lvz:
                 row["unk_fac0"] = info.get("unk_fac0")
             if kind == "EMPTY":
                 row["empty_reason"] = info.get("reason", "unknown")
+            if kind == "INVALID":
+                row["invalid_reason"] = info.get("why", "unknown")
+            if kind == "TEX":
+                row["res_id"] = i
+                row["direct_texture"] = True
+                row["width_half"] = info.get("width_half")
+                row["texture_flags"] = info.get("texture_flags")
+                row["data_addr"] = info.get("data_addr")
+                row["texture_meta"] = info.get("texture_meta")
+                row["raster_flags"] = info.get("raster_flags")
             if kind == "TEX_REF":
                 row["ref_addr"] = info.get("ref_addr")
-                row["res_id"] = i  
+                row["res_id"] = i
                 row["embedded_res_id"] = info.get("embedded_res_id")
             rows.append(row)
-            off += 8
-        return rows
+            off += stride
 
-    #######################################################
-    # ===== Image logic (kept INTACT): palette, swizzle, PoT =====
-    #######################################################
+        valid_resource_addrs = sorted(set(
+            int(row["res_addr"]) for row in rows
+            if isinstance(row.get("res_addr"), int)
+            and LVZ_MIN_RESOURCE_CANDIDATE_ADDR <= int(row["res_addr"]) < n
+            and (int(row["res_addr"]) & 3) == 0
+            and self.decomp[int(row["res_addr"]):int(row["res_addr"]) + 4] not in (b"DLRW", b"xet\0")
+        ))
+        for row in rows:
+            addr = int(row.get("res_addr", 0) or 0)
+            end = n
+            for next_addr in valid_resource_addrs:
+                if next_addr > addr:
+                    end = next_addr
+                    break
+            if base > addr:
+                end = min(end, base)
+            row["res_end"] = end
+            if addr > 0 and end > addr:
+                row["res_size_guess"] = end - addr
+            else:
+                row["res_size_guess"] = 0
+        return rows
 
     @staticmethod
     def expand_nibbles_lo_first(b: bytes) -> np.ndarray:
@@ -510,7 +1733,7 @@ class read_lvz:
                 if w > 0 and h > 0 and (w * h) == total_pixels:
                     return (w, h)
 
-        dim_pool = [16, 32, 64, 128, 256, 512, 1024] 
+        dim_pool = [16, 32, 64, 128, 256, 512, 1024]
         cands: List[Tuple[int, int]] = []
         for w in dim_pool:
             if total_pixels % w != 0:
@@ -542,11 +1765,23 @@ class read_lvz:
                                    use_swizzle: bool,
                                    sizes_hint: Optional[str],
                                    alpha_scale: str,
-                                   name_override: Optional[str] = None) -> Dict:
+                                   name_override: Optional[str] = None,
+                                   fixed_size: Optional[Tuple[int, int]] = None,
+                                   round_to_power_of_two: bool = True) -> Dict:
         index, palette, pal_off, pal_sz, tag = self.palette_candidate_single(blob, palette_mode, palette_offset, palette_size)
         if self.debug_print:
             dbg(f"[palette] using {tag}  index_len={len(index)}  pal_sz={pal_sz}")
-        w, h = self.choose_single_size_for_4bpp(len(index), sizes_hint, prefer_square=True)
+        if fixed_size is not None:
+            w, h = int(fixed_size[0]), int(fixed_size[1])
+            if w <= 0 or h <= 0 or (w * h) > len(index) * 2:
+                raise ValueError(f"fixed texture size {w}x{h} does not fit index bytes {len(index)}")
+        else:
+            w, h = self.choose_single_size_for_4bpp(len(index), sizes_hint, prefer_square=True)
+        if w > LVZ_MAX_TEXTURE_DIMENSION or h > LVZ_MAX_TEXTURE_DIMENSION or (w * h) > LVZ_MAX_TEXTURE_PIXELS:
+            raise ValueError(
+                f"refusing inferred texture size {w}x{h} from index_len={len(index)}; "
+                "the TEX_REF span is probably not one texture blob"
+            )
         if self.debug_print:
             dbg(f"[size] chosen (pre-round): {w}x{h} (pixels={w*h}, index_bytes={len(index)})")
         expanded = self.expand_nibbles_lo_first(index)
@@ -557,13 +1792,19 @@ class read_lvz:
         if use_swizzle:
             slab = self.unswizzle8_ps2_linearized(slab, w, h)
         idx2d = slab.reshape(h, w)
-        w2 = self.nearest_pow2(w)
-        h2 = self.nearest_pow2(h)
-        if (w2, h2) != (w, h):
-            if self.debug_print:
-                dbg(f"[pow2] rounding to nearest per-dimension: ({w}x{h}) → ({w2}x{h2})")
-            idx2d = self.resize_indices_to_dims(idx2d, w2, h2)
-            w, h = w2, h2
+        if round_to_power_of_two:
+            w2 = self.nearest_pow2(w)
+            h2 = self.nearest_pow2(h)
+            if (w2, h2) != (w, h):
+                if w2 > LVZ_MAX_TEXTURE_DIMENSION or h2 > LVZ_MAX_TEXTURE_DIMENSION or (w2 * h2) > LVZ_MAX_TEXTURE_PIXELS:
+                    raise ValueError(
+                        f"refusing rounded texture size {w2}x{h2}; "
+                        "the TEX_REF span is probably not one texture blob"
+                    )
+                if self.debug_print:
+                    dbg(f"[pow2] rounding to nearest per-dimension: ({w}x{h}) → ({w2}x{h2})")
+                idx2d = self.resize_indices_to_dims(idx2d, w2, h2)
+                w, h = w2, h2
         idx2d = np.flipud(idx2d)
         pal_arr = np.asarray(palette, dtype=np.uint8)
         pal_arr = self.apply_ps2_alpha_scale(pal_arr, do_scale=(alpha_scale == "ps2"))
@@ -573,86 +1814,271 @@ class read_lvz:
         mat = self.create_material_from_image(img, asset_name)
         return {"material": mat, "size": (w, h), "palette_tag": tag}
 
-    #######################################################
-    # Texture decode
-    #######################################################
+    def direct_texture_raster_info_from_blob(self, blob: bytes) -> Dict[str, int]:
+        if len(blob) < LVZ_DIRECT_TEXTURE_HEADER_BYTES + LVZ_DIRECT_TEXTURE_PALETTE_BYTES:
+            raise ValueError("direct texture blob is shorter than its 16-byte header and 64-byte palette")
+        raster_flags = read_u32(blob, 12)
+        logw = raster_flags & 0x3F
+        logh = (raster_flags >> 6) & 0x3F
+        depth = (raster_flags >> 12) & 0x3F
+        mipmaps = (raster_flags >> 20) & 0x0F
+        swizzle_mask = (raster_flags >> 24) & 0xFF
+        if logw > 12 or logh > 12 or depth not in (4, 8, 32):
+            raise ValueError(f"unsupported direct texture raster flags 0x{raster_flags:08X}")
+        return {
+            "flags": int(raster_flags),
+            "width": int(1 << logw),
+            "height": int(1 << logh),
+            "depth": int(depth),
+            "mipmaps": int(mipmaps),
+            "swizzle_mask": int(swizzle_mask),
+        }
+
+    def direct_texture_dimensions_from_blob(self, blob: bytes) -> Tuple[int, int]:
+        info = self.direct_texture_raster_info_from_blob(blob)
+        width = int(info["width"])
+        height = int(info["height"])
+        if width <= 0 or height <= 0 or width > LVZ_MAX_TEXTURE_DIMENSION or height > LVZ_MAX_TEXTURE_DIMENSION:
+            raise ValueError(f"unsupported direct texture dimensions {width}x{height}")
+        return width, height
+
+    def direct_texture_payload_from_blob(self, blob: bytes, width: int, height: int) -> bytes:
+        info = self.direct_texture_raster_info_from_blob(blob)
+        depth = int(info["depth"])
+        mipmaps = max(1, int(info["mipmaps"]))
+        if depth != 4:
+            raise ValueError(f"only 4bpp direct LVZ textures are decoded here right now; got depth={depth}")
+
+        level_w = int(width)
+        level_h = int(height)
+        image_bytes_total = 0
+        level0_bytes = (level_w * level_h * depth + 7) // 8
+        for _ in range(mipmaps):
+            image_bytes_total += (max(1, level_w) * max(1, level_h) * depth + 7) // 8
+            level_w = max(1, level_w // 2)
+            level_h = max(1, level_h // 2)
+
+        src_index_start = LVZ_DIRECT_TEXTURE_HEADER_BYTES
+        src_index_end = src_index_start + level0_bytes
+        palette_start = LVZ_DIRECT_TEXTURE_HEADER_BYTES + image_bytes_total
+
+        if src_index_end > len(blob):
+            raise ValueError("direct texture base mip is truncated")
+
+        if palette_start + LVZ_DIRECT_TEXTURE_PALETTE_BYTES <= len(blob):
+            palette = blob[palette_start:palette_start + LVZ_DIRECT_TEXTURE_PALETTE_BYTES]
+        elif src_index_end + LVZ_DIRECT_TEXTURE_PALETTE_BYTES <= len(blob):
+            palette = blob[src_index_end:src_index_end + LVZ_DIRECT_TEXTURE_PALETTE_BYTES]
+        else:
+            palette = blob[-LVZ_DIRECT_TEXTURE_PALETTE_BYTES:]
+
+        return blob[src_index_start:src_index_end] + palette
 
     def decode_textures(self, rows: List[Dict]) -> int:
-        tex_rows = [r for r in rows if r["kind"] == "TEX_REF"]
-        if not tex_rows:
-            dbg("[tex] no TEX_REF rows")
+        direct_rows = [r for r in rows if r.get("kind") == "TEX"]
+        tex_ref_rows = [r for r in rows if r.get("kind") == "TEX_REF"]
+        if not direct_rows and not tex_ref_rows:
+            dbg("[tex] no TEX/TEX_REF rows")
             return 0
 
-        dbg(f"[tex] TEX_REF rows: {len(tex_rows)}")
-        tex_sorted = sorted(
-            [{"i": r["index"], "ref_addr": r.get("ref_addr", -1), "res_id": r.get("res_id", -1),
-              "embedded": r.get("embedded_res_id", None)} for r in tex_rows],
-            key=lambda d: d["ref_addr"]
-        )
-        uniq = []
-        last = None
-        for t in tex_sorted:
-            ra = t["ref_addr"]
-            if ra != last and isinstance(ra, int) and 0 <= ra < len(self.decomp):
-                uniq.append(t)
-                last = ra
-
+        dbg(f"[tex] direct TEX rows: {len(direct_rows)}  TEX_REF rows: {len(tex_ref_rows)}")
         decoded = 0
-        for idx, r in enumerate(uniq):
-            start = r["ref_addr"]
-            end = uniq[idx+1]["ref_addr"] if idx+1 < len(uniq) else len(self.decomp)
-            if end <= start or end - start < 64:
-                continue
-            blob = self.decomp[start:end]
 
-            res_index = r["res_id"]  
+        for row in sorted(direct_rows, key=lambda r: int(r.get("res_id", r.get("index", -1)))):
+            res_index = int(row.get("res_id", row.get("index", -1)))
+            start = int(row.get("res_addr", 0) or 0)
+            end = int(row.get("res_end", len(self.decomp)) or len(self.decomp))
+            if end <= start:
+                continue
+            blob_len = end - start
+            if blob_len < LVZ_DIRECT_TEXTURE_HEADER_BYTES + LVZ_DIRECT_TEXTURE_PALETTE_BYTES:
+                continue
+            if blob_len > LVZ_MAX_TEXTURE_BLOB_BYTES:
+                dbg(
+                    f"[tex] skip direct TEX RES={res_index} LVZ+0x{start:08X}: "
+                    f"span 0x{blob_len:X} is too large for one protected texture decode"
+                )
+                continue
+
             material_name = f"{self.stem}{res_index:0d}"
             try:
+                full_blob = self.decomp[start:end]
+                raster_info = self.direct_texture_raster_info_from_blob(full_blob)
+                width, height = int(raster_info["width"]), int(raster_info["height"])
+                payload = self.direct_texture_payload_from_blob(full_blob, width, height)
+                texture_uses_swizzle = bool(self.use_swizzle and (int(raster_info.get("swizzle_mask", 0)) & 1))
                 result = self.decode_blob_4bpp_lo_single(
-                    blob=blob,
+                    blob=payload,
                     out_stem=material_name,
                     palette_mode="tail64",
                     palette_offset=None,
                     palette_size=None,
-                    use_swizzle=self.use_swizzle,
+                    use_swizzle=texture_uses_swizzle,
                     sizes_hint=None,
                     alpha_scale="ps2",
-                    name_override=material_name
+                    name_override=material_name,
+                    fixed_size=(width, height),
+                    round_to_power_of_two=False,
                 )
                 mat = result["material"]
+                try:
+                    mat["blds_kind"] = "TEX"
+                    mat["blds_res_index"] = int(res_index)
+                    mat["blds_texture_res_index"] = int(res_index)
+                    mat["blds_lvz_ref_addr"] = int(start)
+                    mat["blds_lvz_texture_blob_len"] = int(blob_len)
+                    mat["blds_lvz_texture_direct"] = True
+                    mat["blds_lvz_texture_header_len"] = int(LVZ_DIRECT_TEXTURE_HEADER_BYTES)
+                    mat["blds_lvz_texture_width_half"] = int(row.get("width_half", 0) or 0)
+                    mat["blds_lvz_texture_flags"] = int(row.get("texture_flags", 0) or 0)
+                    mat["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
+                    mat["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
+                    if getattr(result.get("material"), "node_tree", None) is not None:
+                        for node in result["material"].node_tree.nodes:
+                            if getattr(node, "type", None) == 'TEX_IMAGE' and getattr(node, "image", None) is not None:
+                                node.image["blds_kind"] = "TEX"
+                                node.image["blds_res_index"] = int(res_index)
+                                node.image["blds_texture_res_index"] = int(res_index)
+                                node.image["blds_lvz_ref_addr"] = int(start)
+                                node.image["blds_lvz_texture_blob_len"] = int(blob_len)
+                                node.image["blds_lvz_texture_direct"] = True
+                                node.image["blds_lvz_texture_header_len"] = int(LVZ_DIRECT_TEXTURE_HEADER_BYTES)
+                                node.image["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
+                                node.image["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
+                                mat["blds_texture_image_name"] = node.image.name
+                                break
+                except Exception:
+                    pass
                 self.material_by_res_index[res_index] = mat
                 decoded += 1
                 if self.debug_print:
-                    if r["embedded"] is not None:
-                        dbg(f"[tex] {material_name}: material='{mat.name}' size={result['size']} RES(index)={res_index} embedded=0x{r['embedded']:08X}")
-                    else:
-                        dbg(f"[tex] {material_name}: material='{mat.name}' size={result['size']} RES(index)={res_index}")
+                    dbg(
+                        f"[tex] {material_name}: direct material='{mat.name}' "
+                        f"size={result['size']} RES={res_index} "
+                        f"hdr_width_half={row.get('width_half')} flags=0x{int(row.get('texture_flags', 0) or 0):04X} "
+                        f"raster=0x{int(raster_info.get('flags', 0)):08X} swiz={int(texture_uses_swizzle)}"
+                    )
             except Exception as e:
-                dbg(f"[tex] {material_name}: decode error: {e}")
+                dbg(f"[tex] {material_name}: direct decode error: {e}")
+                if res_index not in self.material_by_res_index:
+                    mat = bpy.data.materials.new(material_name)
+                    mat.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+                    mat["blds_kind"] = "TEX_PLACEHOLDER"
+                    mat["blds_res_index"] = int(res_index)
+                    mat["blds_texture_res_index"] = int(res_index)
+                    mat["blds_lvz_ref_addr"] = int(start)
+                    mat["blds_lvz_texture_blob_len"] = int(blob_len)
+                    mat["blds_lvz_texture_direct"] = True
+                    self.material_by_res_index[res_index] = mat
+
+        if tex_ref_rows:
+            tex_sorted = sorted(
+                [{"i": r["index"], "ref_addr": r.get("ref_addr", -1), "res_id": r.get("res_id", -1),
+                  "embedded": r.get("embedded_res_id", None)} for r in tex_ref_rows],
+                key=lambda d: d["ref_addr"]
+            )
+            uniq = []
+            seen_ref_addrs = set()
+            for t in tex_sorted:
+                ra = t["ref_addr"]
+                if not isinstance(ra, int) or not (0 <= ra < len(self.decomp)):
+                    continue
+                if ra in seen_ref_addrs:
+                    continue
+                seen_ref_addrs.add(ra)
+                uniq.append(t)
+
+            for idx, r in enumerate(uniq):
+                start = r["ref_addr"]
+                end = uniq[idx+1]["ref_addr"] if idx+1 < len(uniq) else len(self.decomp)
+                blob_len = end - start
+                if end <= start or blob_len < 64:
+                    continue
+                if blob_len > LVZ_MAX_TEXTURE_BLOB_BYTES:
+                    dbg(
+                        f"[tex] skip RES(index)={r.get('res_id')} LVZ+0x{start:08X}: "
+                        f"span 0x{blob_len:X} is too large for one protected texture decode"
+                    )
+                    continue
+                blob = self.decomp[start:end]
+
+                res_index = r["res_id"]
+                material_name = f"{self.stem}{res_index:0d}"
+                try:
+                    result = self.decode_blob_4bpp_lo_single(
+                        blob=blob,
+                        out_stem=material_name,
+                        palette_mode="tail64",
+                        palette_offset=None,
+                        palette_size=None,
+                        use_swizzle=self.use_swizzle,
+                        sizes_hint=None,
+                        alpha_scale="ps2",
+                        name_override=material_name,
+                    )
+                    mat = result["material"]
+                    try:
+                        mat["blds_kind"] = "TEX"
+                        mat["blds_res_index"] = int(res_index)
+                        mat["blds_texture_res_index"] = int(res_index)
+                        mat["blds_lvz_ref_addr"] = int(start)
+                        mat["blds_lvz_texture_blob_len"] = int(end - start)
+                        if getattr(result.get("material"), "node_tree", None) is not None:
+                            for node in result["material"].node_tree.nodes:
+                                if getattr(node, "type", None) == 'TEX_IMAGE' and getattr(node, "image", None) is not None:
+                                    node.image["blds_kind"] = "TEX"
+                                    node.image["blds_res_index"] = int(res_index)
+                                    node.image["blds_texture_res_index"] = int(res_index)
+                                    node.image["blds_lvz_ref_addr"] = int(start)
+                                    node.image["blds_lvz_texture_blob_len"] = int(end - start)
+                                    mat["blds_texture_image_name"] = node.image.name
+                                    break
+                    except Exception:
+                        pass
+                    self.material_by_res_index[res_index] = mat
+                    decoded += 1
+                    if self.debug_print:
+                        if r["embedded"] is not None:
+                            dbg(f"[tex] {material_name}: material='{mat.name}' size={result['size']} RES(index)={res_index} embedded=0x{r['embedded']:08X}")
+                        else:
+                            dbg(f"[tex] {material_name}: material='{mat.name}' size={result['size']} RES(index)={res_index}")
+                except Exception as e:
+                    dbg(f"[tex] {material_name}: decode error: {e}")
+                    if res_index not in self.material_by_res_index:
+                        mat = bpy.data.materials.new(material_name)
+                        mat.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+                        mat["blds_kind"] = "TEX_PLACEHOLDER"
+                        mat["blds_res_index"] = int(res_index)
+                        mat["blds_texture_res_index"] = int(res_index)
+                        mat["blds_lvz_ref_addr"] = int(start)
+                        mat["blds_lvz_texture_blob_len"] = int(end - start)
+                        self.material_by_res_index[res_index] = mat
         dbg(f"[tex] total decoded: {decoded}")
         return decoded
-
-    #######################################################
-    # MDL parse + mesh build
-    #######################################################
 
     def _read_vec3_i16_norm(self, buf: bytes, off: int) -> Tuple[float,float,float]:
         x = read_i16(buf, off + 0); y = read_i16(buf, off + 2); z = read_i16(buf, off + 4)
         return (x / 32767.5, y / 32767.5, z / 32767.5)
 
-    def _read_uv_u8_div128(self, buf: bytes, off: int) -> Tuple[float,float]:
-        u = buf[off + 0]; v = buf[off + 1]
-        return (u / 128.0, v / 128.0)
+    def _read_uv_u8_div255(self, buf: bytes, off: int) -> Tuple[float,float]:
+        u = buf[off + 0]
+        v = buf[off + 1]
+        return (u / 255.0, v / 255.0)
 
-    def _decode_rgba4444(self, v16: int) -> Tuple[int,int,int,int]:
-        r = ((v16 >> 12) & 0xF) * 17
-        g = ((v16 >> 8)  & 0xF) * 17
-        b = ((v16 >> 4)  & 0xF) * 17
-        a = ( v16        & 0xF) * 17
+    def _decode_rgba5551(self, v16: int) -> Tuple[int,int,int,int]:
+        r = (v16 & 0x1F) * 255 // 0x1F
+        g = ((v16 >> 5) & 0x1F) * 255 // 0x1F
+        b = ((v16 >> 10) & 0x1F) * 255 // 0x1F
+        a = 255 if (v16 & 0x8000) else 0
         return (r, g, b, a)
 
-    def _find_unpack_near(self, buf: bytes, off: int, window: int = 8) -> int:
+    def _decode_rgba4444(self, v16: int) -> Tuple[int,int,int,int]:
+        return self._decode_rgba5551(v16)
+
+    def _find_unpack_near(self, buf: bytes, off: int, window: int = 8, max_end: Optional[int] = None) -> int:
         n = len(buf)
+        if max_end is not None:
+            n = min(n, max(0, int(max_end)))
         start = max(0, off - window)
         end = min(n, off + window + 4)
         for p in range(start, end):
@@ -660,39 +2086,86 @@ class read_lvz:
                 return p
         raise ValueError(f"UNPACK header not found near 0x{off:08X}")
 
-    def parse_mdl_material_list(self, base: int) -> MDLMaterialList:
+    def parse_mdl_material_list(self, base: int, max_end: Optional[int] = None) -> MDLMaterialList:
         lvz = self.decomp
         n = len(lvz)
-        if base + 4 > n:
-            raise ValueError("MDL material list header out of range.")
-        count = read_u16(lvz, base + 0)
-        size_bytes = read_u16(lvz, base + 2)
-        off = base + 4
+        if max_end is not None:
+            n = min(n, max(0, int(max_end)))
+        detected = self.detect_mdl_material_list_format(base, max_end=n)
+        if detected is None:
+            if base + 4 > n:
+                raise ValueError("MDL material list header out of range.")
+            count = read_u16(lvz, base + 0)
+            size_bytes = read_u16(lvz, base + 2)
+            raise ValueError(f"unsupported or implausible WRLD material list at 0x{base:08X}: count16={count} size16={size_bytes}")
+
+        format_tag = str(detected["format_tag"])
+        count = int(detected["count"])
+        size_bytes = int(detected["size_bytes"])
+        row_len = int(detected["row_len"])
+        header_len = int(detected["header_len"])
+        list_end = int(detected["list_end"])
+        off = base + header_len
         materials: List[MDLMaterial] = []
-        bytes_limit = min(n, base + 4 + size_bytes)
+
         for mi in range(count):
-            need = off + 22
-            if need > n:
-                dbg(f"[mdl] material {mi}: truncated at LVZ end (need up to 0x{need:08X})")
+            if off + row_len > n or off + row_len > list_end:
+                dbg(f"[mdl] material {mi}: truncated before declared list end (need up to 0x{off + row_len:08X})")
                 break
-            if off >= bytes_limit:
-                dbg(f"[mdl] reached declared size_bytes at material {mi}; stopping")
-                break
-            texture_id = read_u16(lvz, off + 0)
-            tri_raw    = read_u16(lvz, off + 2)
-            u_half     = read_u16(lvz, off + 4)
-            v_half     = read_u16(lvz, off + 6)
-            flags2     = read_u16(lvz, off + 8)
-            b0 = read_i16(lvz, off + 10)
-            b1 = read_i16(lvz, off + 12)
-            b2 = read_i16(lvz, off + 14)
-            b3 = read_i16(lvz, off + 16)
-            b4 = read_i16(lvz, off + 18)
-            b5 = read_i16(lvz, off + 20)
-            tri_strip_size = (tri_raw & 0x7FFF)
-            backface_cull  = (tri_raw & 0x8000) != 0
-            u_scale = half_to_float(u_half)
-            v_scale = half_to_float(v_half)
+
+            if format_tag == "ps2_vcs":
+                packet_raw = read_u32(lvz, off + 0)
+                tri_strip_size = packet_raw >> 1
+                backface_cull = (packet_raw & 1) != 0
+                texture_id = read_u16(lvz, off + 4)
+                u_scale = half_to_float(read_u16(lvz, off + 6))
+                v_scale = half_to_float(read_u16(lvz, off + 8))
+                flags2 = read_u16(lvz, off + 10)
+                b0 = read_i16(lvz, off + 12)
+                b1 = read_i16(lvz, off + 14)
+                b2 = read_i16(lvz, off + 16)
+                b3 = read_i16(lvz, off + 18)
+                b4 = read_i16(lvz, off + 20)
+                b5 = read_i16(lvz, off + 22)
+            elif format_tag == "ps2_lcs":
+                texture_id = read_u16(lvz, off + 0)
+                packet_raw = read_u16(lvz, off + 2)
+                tri_strip_size = packet_raw & 0x7FFF
+                backface_cull = (packet_raw & 0x8000) != 0
+                u_scale = half_to_float(read_u16(lvz, off + 4))
+                v_scale = half_to_float(read_u16(lvz, off + 6))
+                flags2 = read_u16(lvz, off + 8)
+                b0 = read_i16(lvz, off + 10)
+                b1 = read_i16(lvz, off + 12)
+                b2 = read_i16(lvz, off + 14)
+                b3 = read_i16(lvz, off + 16)
+                b4 = read_i16(lvz, off + 18)
+                b5 = read_i16(lvz, off + 20)
+            elif format_tag in ("psp_wrld_10", "psp_wrld_24"):
+                texture_id = read_u16(lvz, off + 0)
+                packet_raw = read_u16(lvz, off + 2)
+                tri_strip_size = packet_raw & 0x7FFF
+                backface_cull = (packet_raw & 0x8000) != 0
+                u_scale = half_to_float(read_u16(lvz, off + 4)) if row_len >= 8 else 1.0
+                v_scale = half_to_float(read_u16(lvz, off + 6)) if row_len >= 8 else 1.0
+                flags2 = read_u16(lvz, off + 8) if row_len >= 10 else 0
+                if row_len >= 24:
+                    b0 = read_i16(lvz, off + 12)
+                    b1 = read_i16(lvz, off + 14)
+                    b2 = read_i16(lvz, off + 16)
+                    b3 = read_i16(lvz, off + 18)
+                    b4 = read_i16(lvz, off + 20)
+                    b5 = read_i16(lvz, off + 22)
+                else:
+                    b0 = b1 = b2 = b3 = b4 = b5 = 0
+            else:
+                raise ValueError(f"unknown material list format {format_tag}")
+
+            if not math.isfinite(u_scale) or abs(u_scale) > 4096.0:
+                u_scale = 1.0
+            if not math.isfinite(v_scale) or abs(v_scale) > 4096.0:
+                v_scale = 1.0
+
             materials.append(MDLMaterial(
                 texture_id=texture_id,
                 tri_strip_size=tri_strip_size,
@@ -700,18 +2173,23 @@ class read_lvz:
                 u_scale=u_scale,
                 v_scale=v_scale,
                 flags2=flags2,
-                bbox6_i16=(b0,b1,b2,b3,b4,b5)
+                bbox6_i16=(b0, b1, b2, b3, b4, b5),
+                row_format=format_tag,
+                packet_raw=int(packet_raw),
             ))
-            off += 22
-        aa_tail, new_off = self._scan_aa_tail(off)
-        next_guess = align_down4(new_off)
+            off += row_len
+
+        aa_tail, new_off = self._scan_aa_tail(list_end)
+        next_guess = align_up4(new_off)
         return MDLMaterialList(
             count=count,
             size_bytes=size_bytes,
             materials=materials,
-            bytes_read=off - base,
+            bytes_read=list_end - base,
             aa_tail=aa_tail,
-            next_off=next_guess
+            next_off=next_guess,
+            format_tag=format_tag,
+            row_len=row_len,
         )
 
     def _scan_aa_tail(self, off: int) -> Tuple[bytes, int]:
@@ -721,12 +2199,16 @@ class read_lvz:
             i += 1
         return (lvz[off:i], i)
 
-    def parse_one_batch_noskip(self, buf: bytes, pos: int) -> Tuple[TriStrip, int]:
+    def parse_one_batch_noskip(self, buf: bytes, pos: int, max_end: Optional[int] = None) -> Tuple[TriStrip, int]:
         n = len(buf)
-        pos = self._find_unpack_near(buf, align_down4(pos))
+        if max_end is not None:
+            n = min(n, max(0, int(max_end)))
+        pos = self._find_unpack_near(buf, align_down4(pos), max_end=n)
         if pos + 20 > n:
             raise ValueError("Batch header truncated.")
         nvert_all = read_u32(buf, pos + 16) & 0x7FFF
+        if nvert_all <= 0 or nvert_all > LVZ_MAX_MDL_VERTICES_PER_BATCH:
+            raise ValueError(f"Refusing implausible batch vertex count {nvert_all} at 0x{pos:08X}")
         nvert_eff = nvert_all
         w = pos + 20
 
@@ -758,7 +2240,7 @@ class read_lvz:
         uvs: List[Tuple[float,float]] = []
         for i in range(nvert_eff):
             off = w + i * 2
-            uvs.append(self._read_uv_u8_div128(buf, off))
+            uvs.append(self._read_uv_u8_div255(buf, off))
         w += need_bytes_uv
         w = align_up4(w)
 
@@ -772,7 +2254,7 @@ class read_lvz:
         for i in range(nvert_eff):
             c16 = read_u16(buf, w + i * 2)
             cols_raw_u16.append(c16)
-            cols_rgba4444.append(self._decode_rgba4444(c16))
+            cols_rgba4444.append(self._decode_rgba5551(c16))
         w += need_bytes_col
         w = align_up4(w)
 
@@ -794,30 +2276,101 @@ class read_lvz:
         )
         return strip, w
 
-    def parse_mdl_stream_after_list(self, start_off: int, max_groups: int = 4096) -> Tuple[List[MDLStripGroup], int]:
+    def parse_mdl_stream_after_list(self, start_off: int, max_groups: int = LVZ_MAX_MDL_BATCHES_PER_RESOURCE, max_end: Optional[int] = None) -> Tuple[List[MDLStripGroup], int]:
         buf = self.decomp
         groups: List[MDLStripGroup] = []
+        parse_end = len(buf) if max_end is None else min(len(buf), max(0, int(max_end)))
+        if start_off >= parse_end:
+            return groups, start_off
         try:
-            off = self._find_unpack_near(buf, start_off)
+            off = self._find_unpack_near(buf, start_off, max_end=parse_end)
         except Exception as e:
             dbg(f"[splits] UNPACK not found near 0x{start_off:08X}: {e}")
             return groups, start_off
-        n = len(buf)
+        total_vertices = 0
         for _ in range(max_groups):
-            if off >= n:
+            if off >= parse_end:
                 break
             try:
-                strip, next_off = self.parse_one_batch_noskip(buf, off)
+                strip, next_off = self.parse_one_batch_noskip(buf, off, max_end=parse_end)
             except Exception as e:
                 dbg(f"[splits] stop at 0x{off:08X}: {e}")
                 break
+            total_vertices += int(strip.count)
+            if total_vertices > LVZ_MAX_MDL_VERTICES_PER_OBJECT:
+                dbg(
+                    f"[splits] stop at 0x{off:08X}: object vertex limit "
+                    f"{LVZ_MAX_MDL_VERTICES_PER_OBJECT} exceeded"
+                )
+                break
             groups.append(MDLStripGroup(strips=[strip], bytes_read=(next_off - off), start_off=off, end_off=next_off))
             try:
-                off = self._find_unpack_near(buf, next_off)
+                off = self._find_unpack_near(buf, next_off, max_end=parse_end)
             except Exception:
                 off = next_off
                 break
+        if len(groups) >= max_groups:
+            dbg(f"[splits] stopped after max_groups={max_groups}")
         return groups, off
+
+    def parse_psp_wrld_stream_after_list(self, mlist: MDLMaterialList, max_end: Optional[int] = None) -> Tuple[List[MDLStripGroup], int]:
+        buf = self.decomp
+        parse_end = len(buf) if max_end is None else min(len(buf), max(0, int(max_end)))
+        off = align_up4(int(mlist.next_off))
+        groups: List[MDLStripGroup] = []
+        total_vertices = 0
+
+        for material in mlist.materials:
+            vertex_count = int(material.tri_strip_size)
+            if vertex_count <= 0:
+                continue
+            if vertex_count > LVZ_MAX_MDL_VERTICES_PER_BATCH:
+                dbg(f"[psp-wrld] stop at 0x{off:08X}: implausible vertex count {vertex_count}")
+                break
+            need = vertex_count * 10
+            if off + need > parse_end:
+                dbg(f"[psp-wrld] stop at 0x{off:08X}: vertex payload truncated ({need} bytes)")
+                break
+
+            verts: List[Tuple[float, float, float]] = []
+            uvs: List[Tuple[float, float]] = []
+            cols_raw_u16: List[int] = []
+            cols_rgba: List[Tuple[int, int, int, int]] = []
+            for vi in range(vertex_count):
+                voff = off + vi * 10
+                u = buf[voff + 0] / 255.0
+                v = buf[voff + 1] / 255.0
+                color = read_u16(buf, voff + 2)
+                x = read_i16(buf, voff + 4) / 32768.0
+                y = read_i16(buf, voff + 6) / 32768.0
+                z = read_i16(buf, voff + 8) / 32768.0
+                verts.append((x, y, z))
+                uvs.append((u * (material.u_scale if material.u_scale != 0.0 else 1.0), v * (material.v_scale if material.v_scale != 0.0 else 1.0)))
+                cols_raw_u16.append(color)
+                cols_rgba.append(self._decode_rgba5551(color))
+
+            strip = TriStrip(
+                count=vertex_count,
+                verts=verts,
+                uvs=uvs,
+                cols_raw_u16=cols_raw_u16,
+                cols_rgba4444=cols_rgba,
+                material_res_index=int(material.texture_id),
+                u_scale=material.u_scale,
+                v_scale=material.v_scale,
+            )
+            groups.append(MDLStripGroup(strips=[strip], bytes_read=need, start_off=off, end_off=off + need))
+            total_vertices += vertex_count
+            if total_vertices > LVZ_MAX_MDL_VERTICES_PER_OBJECT:
+                dbg(f"[psp-wrld] object vertex limit {LVZ_MAX_MDL_VERTICES_PER_OBJECT} exceeded")
+                break
+            off += need
+        return groups, off
+
+    def parse_mdl_geometry_after_list(self, mlist: MDLMaterialList, max_end: Optional[int] = None) -> Tuple[List[MDLStripGroup], int]:
+        if str(getattr(mlist, "format_tag", "")).startswith("psp_wrld"):
+            return self.parse_psp_wrld_stream_after_list(mlist, max_end=max_end)
+        return self.parse_mdl_stream_after_list(mlist.next_off, max_end=max_end)
 
     def assign_materials_by_strip_bytes(self, mlist: MDLMaterialList, groups: List[MDLStripGroup]):
 
@@ -899,7 +2452,7 @@ class read_lvz:
         mesh_name = f"{self.stem}{res_index:0d}"
         me = bpy.data.meshes.new(mesh_name)
         me.from_pydata(vertices, [], faces)
-        me.use_auto_smooth = True
+        setMeshAutoSmooth(me, True)
         me.validate(clean_customdata=False)
         me.update()
 
@@ -934,31 +2487,39 @@ class read_lvz:
         for row in mdl_rows:
             res_index = row["index"]
             res_addr  = row["res_addr"]
+            res_end = int(row.get("res_end", len(self.decomp)) or len(self.decomp))
             try:
-                mlist = self.parse_mdl_material_list(res_addr)
+                mlist = self.parse_mdl_material_list(res_addr, max_end=res_end)
             except Exception as e:
                 dbg(f"[mdl {res_index}] material list error at 0x{res_addr:08X}: {e}")
                 continue
 
-            dbg(f"[mdl {res_index}] list: count={mlist.count} size_bytes={mlist.size_bytes} bytes_read={mlist.bytes_read} aa_tail={len(mlist.aa_tail)} next=0x{mlist.next_off:08X}")
+            dbg(f"[mdl {res_index}] list: format={mlist.format_tag} row_len={mlist.row_len} count={mlist.count} size_bytes={mlist.size_bytes} bytes_read={mlist.bytes_read} aa_tail={len(mlist.aa_tail)} next=0x{mlist.next_off:08X} end=0x{res_end:08X}")
             for i, m in enumerate(mlist.materials):
                 dbg(f"  mat[{i:02d}] texRES={m.texture_id} strip_size={m.tri_strip_size} cull={int(m.backface_cull)} us={m.u_scale:.4f} vs={m.v_scale:.4f} flags2=0x{m.flags2:04X} bbox={m.bbox6_i16}")
 
-            groups, after = self.parse_mdl_stream_after_list(mlist.next_off)
-            dbg(f"[mdl {res_index}] batches={len(groups)} stream_end=0x{after:08X}")
+            groups, after = self.parse_mdl_geometry_after_list(mlist, max_end=res_end)
+            dbg(f"[mdl {res_index}] batches={len(groups)} stream_end=0x{after:08X} bounded_end=0x{res_end:08X}")
 
             self.assign_materials_by_strip_bytes(mlist, groups)
 
+            verbose_vertices_left = LVZ_MAX_VERBOSE_VERTEX_LOGS_PER_MDL
             for gi, g in enumerate(groups):
                 for si, s in enumerate(g.strips):
                     k = s.count
                     dbg(f"[mdl {res_index}] dump: group={gi} strip={si} count={k} matRES={s.material_res_index} us={s.u_scale:.4f} vs={s.v_scale:.4f}")
+                    if verbose_vertices_left <= 0:
+                        continue
                     for vi in range(k):
+                        if verbose_vertices_left <= 0:
+                            dbg(f"    ... vertex dump capped at {LVZ_MAX_VERBOSE_VERTEX_LOGS_PER_MDL} vertices for this MDL")
+                            break
                         px, py, pz = s.verts[vi]
                         tu, tv     = s.uvs[vi]
                         c16        = s.cols_raw_u16[vi] if vi < len(s.cols_raw_u16) else 0
                         r,gc,b,a   = s.cols_rgba4444[vi] if vi < len(s.cols_rgba4444) else (0,0,0,0)
                         dbg(f"    v[{vi:04d}] pos=({px:.6f},{py:.6f},{pz:.6f}) uv=({tu:.6f},{tv:.6f}) col16=0x{c16:04X} rgba4444=({r},{gc},{b},{a})")
+                        verbose_vertices_left -= 1
 
             obj, face_ranges = self._build_mesh_from_mdl_groups(res_index, groups)
             if obj is not None:
@@ -967,6 +2528,15 @@ class read_lvz:
                 if mlist.materials:
                     for m in mlist.materials:
                         mat = self.material_by_res_index.get(m.texture_id)
+                        if mat is None:
+                            mat_name = f"{self.stem}{int(m.texture_id):0d}"
+                            mat = bpy.data.materials.new(mat_name)
+                            mat.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+                            mat["blds_kind"] = "TEX_PLACEHOLDER"
+                            mat["blds_res_index"] = int(m.texture_id)
+                            mat["blds_texture_res_index"] = int(m.texture_id)
+                            mat["blds_reason"] = "placeholder created from WRLD material texture id"
+                            self.material_by_res_index[int(m.texture_id)] = mat
                         if mat is not None:
                             if mat.name not in [mm.name for mm in obj.data.materials]:
                                 obj.data.materials.append(mat)
@@ -996,86 +2566,541 @@ class read_lvz:
         dbg(f"[done] total MDL objects created: {built_cnt}")
         return built_by_res
 
-#######################################################
-# read_img: IMG responsibilities only
-#######################################################
-
 class read_img:
     def __init__(self, img_bytes: bytes, lvz_bytes: bytes):
         self.img_bytes = img_bytes
         self.lvz_bytes = lvz_bytes
+        self.is_ver2_archive = is_ver2_img_archive(img_bytes)
+        self.ver2_entries = parse_ver2_img_directory(img_bytes) if self.is_ver2_archive else []
+
+    def find_sector_row_directories_from_lvz(self) -> List[Dict[str, int]]:
+        lvz = self.lvz_bytes
+        n = len(lvz)
+        rows: List[Dict[str, int]] = []
+        if n < 0x24 or lvz[:4] != b"DLRW":
+            return rows
+
+        cursor = 0x24
+        row_index = 0
+        while cursor + 8 <= n:
+            header_addr = read_u32(lvz, cursor + 0)
+            start_off = read_u32(lvz, cursor + 4)
+            if not (0 < header_addr < n and (header_addr & 0x3) == 0 and header_addr + 0x20 <= n):
+                break
+            if lvz[header_addr:header_addr + 4] != b"DLRW":
+                break
+            rows.append({
+                "row_index": int(row_index),
+                "header_addr": int(header_addr),
+                "start_off": int(start_off),
+            })
+            row_index += 1
+            cursor += 8
+        return rows
+
+    def detect_sector_game_hint(self) -> str:
+        return detect_world_game_from_sector_row_count(len(self.find_sector_row_directories_from_lvz()), "vcs")
+
+    def sector_pass_names(self) -> Tuple[str, ...]:
+        return IMG_PASS_NAMES_LCS if self.detect_sector_game_hint() == "lcs" else IMG_PASS_NAMES_VCS
+
+    def find_sector_container_records_from_lvz(self) -> List[Dict[str, int]]:
+        lvz = self.lvz_bytes
+        rows = self.find_sector_row_directories_from_lvz()
+        if len(rows) < 2:
+            return []
+
+        game_hint = detect_world_game_from_sector_row_count(len(rows), "vcs")
+        records: List[Dict[str, int]] = []
+        sector_index = 0
+        for row_index in range(len(rows) - 1):
+            row = rows[row_index]
+            next_row = rows[row_index + 1]
+            first_header = int(row["header_addr"])
+            next_header = int(next_row["header_addr"])
+            if next_header <= first_header:
+                continue
+            header_count = (next_header - first_header) // 0x20
+            if header_count <= 0:
+                continue
+            sector_y = int(row_index)
+            start_x = int(row.get("start_off", 0))
+            for header_index in range(header_count):
+                header_addr = first_header + header_index * 0x20
+                if header_addr + 0x20 > len(lvz):
+                    break
+                if lvz[header_addr:header_addr + 4] != b"DLRW":
+                    break
+                file_size = read_u32(lvz, header_addr + 0x08)
+                data_size = read_u32(lvz, header_addr + 0x0C)
+                reloc_tab = read_u32(lvz, header_addr + 0x10)
+                num_relocs = read_u32(lvz, header_addr + 0x14)
+                global_tab = read_u32(lvz, header_addr + 0x18)
+                if file_size < 0x20:
+                    continue
+                sector_x = start_x + header_index
+                origin = sector_origin_for_xy(game_hint, sector_x, sector_y)
+                records.append({
+                    "sector_index": int(sector_index),
+                    "row_index": int(row_index),
+                    "sector_x": int(sector_x),
+                    "sector_y": int(sector_y),
+                    "header_addr": int(header_addr),
+                    "cont": int(global_tab),
+                    "file_size": int(file_size),
+                    "data_size": int(data_size),
+                    "reloc_tab": int(reloc_tab),
+                    "num_relocs": int(num_relocs),
+                    "end": int(global_tab + file_size - 0x20),
+                    "origin": origin,
+                    "game_hint": game_hint,
+                })
+                sector_index += 1
+        return records
+
+    def get_pass_pointer_count_for_sector(self, sector_record: Dict[str, int]) -> int:
+        img = self.img_bytes
+        cont = int(sector_record.get("cont", -1))
+        entry_end = int(sector_record.get("end", len(img)))
+        game_hint = str(sector_record.get("game_hint", self.detect_sector_game_hint()))
+        count = 8 if game_hint == "lcs" else 9
+        if cont < 0 or cont + 0x08 + count * 4 > len(img):
+            return 0
+        ptrs = [read_u32(img, cont + 0x08 + i * 4) for i in range(count)]
+        if any(p < 0x20 for p in ptrs):
+            return 0
+        if any((p & 3) != 0 for p in ptrs):
+            return 0
+        if any(ptrs[i] > ptrs[i + 1] for i in range(len(ptrs) - 1)):
+            return 0
+        if any(cont + p - 0x20 > entry_end for p in ptrs):
+            return 0
+        return count
+
+    def sector_instance_spans(self, sector_record: Dict[str, int]):
+        img = self.img_bytes
+        cont = int(sector_record.get("cont", -1))
+        entry_end = min(len(img), int(sector_record.get("end", len(img))))
+        if cont < 0 or cont + 0x30 > len(img) or entry_end <= cont:
+            return []
+        pass_count = self.get_pass_pointer_count_for_sector(sector_record)
+        if pass_count <= 1:
+            return []
+        pass_ptrs = [read_u32(img, cont + 0x08 + i * 4) for i in range(pass_count)]
+        pass_names = IMG_PASS_NAMES_LCS if str(sector_record.get("game_hint", "vcs")) == "lcs" else IMG_PASS_NAMES_VCS
+        spans = []
+        total_rows = 0
+        for pass_index in range(pass_count - 1):
+            start_ptr = int(pass_ptrs[pass_index])
+            stop_ptr = int(pass_ptrs[pass_index + 1])
+            if stop_ptr <= start_ptr:
+                continue
+            start = max(cont, cont + start_ptr - 0x20)
+            stop = min(entry_end, cont + stop_ptr - 0x20)
+            if stop <= start:
+                continue
+            row_count = (stop - start) // 0x50
+            if row_count <= 0:
+                continue
+            total_rows += row_count
+            if total_rows > LVZ_MAX_IMG_ROWS_PER_CONTAINER:
+                allowed = max(0, LVZ_MAX_IMG_ROWS_PER_CONTAINER - (total_rows - row_count))
+                stop = start + allowed * 0x50
+            pass_name = pass_names[pass_index] if pass_index < len(pass_names) else f"PASS_{pass_index}"
+            spans.append((pass_index, pass_name, start, stop, pass_ptrs))
+            if total_rows >= LVZ_MAX_IMG_ROWS_PER_CONTAINER:
+                break
+        return spans
+
+    def collect_sector_overlay_resources(self, sector_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None) -> List[Dict[str, int]]:
+        img = self.img_bytes
+        if sector_records is None:
+            sector_records = self.find_sector_container_records_from_lvz()
+        overlays: List[Dict[str, int]] = []
+        for sector in sector_records:
+            cont = int(sector.get("cont", -1))
+            end = min(len(img), int(sector.get("end", len(img))))
+            if cont < 0 or cont + 8 > len(img) or end <= cont:
+                continue
+            resources_ptr = read_u32(img, cont + 0x00)
+            num_resources = read_u16(img, cont + 0x04)
+            if num_resources <= 0 or num_resources > 4096:
+                continue
+            list_start = cont + int(resources_ptr) - 0x20
+            if list_start < cont or list_start + num_resources * 8 > end:
+                continue
+            for resource_index in range(num_resources):
+                row_off = list_start + resource_index * 8
+                res_id_signed = struct.unpack_from("<i", img, row_off + 0x00)[0]
+                if res_id_signed < 0:
+                    continue
+                res_id = int(res_id_signed)
+                if max_resource_id is not None and res_id >= int(max_resource_id):
+                    continue
+                raw_ptr = read_u32(img, row_off + 0x04)
+                raw_off = cont + int(raw_ptr) - 0x20
+                if raw_off < cont or raw_off + 4 > end:
+                    continue
+                overlays.append({
+                    "sector_index": int(sector.get("sector_index", -1)),
+                    "row_index": int(sector.get("row_index", -1)),
+                    "sector_x": int(sector.get("sector_x", 0)),
+                    "sector_y": int(sector.get("sector_y", 0)),
+                    "cont": cont,
+                    "sector_end": end,
+                    "resource_index": int(resource_index),
+                    "res_id": res_id,
+                    "raw_ptr": int(raw_ptr),
+                    "raw_off": int(raw_off),
+                })
+        return overlays
+
+    def enumerate_sector_details(self, max_resource_id: Optional[int] = None, include_lod: bool = False, dedupe_visible: bool = True):
+        img = self.img_bytes
+        details = []
+        stats = {
+            "sector_records": 0,
+            "candidate_rows": 0,
+            "valid_rows": 0,
+            "kept_rows": 0,
+            "skipped_lod_rows": 0,
+            "skipped_duplicate_rows": 0,
+        }
+        seen_keys = set()
+        sector_records = self.find_sector_container_records_from_lvz()
+        stats["sector_records"] = len(sector_records)
+        for sector in sector_records:
+            cont = int(sector.get("cont", -1))
+            origin = tuple(sector.get("origin", (0.0, 0.0, 0.0)))
+            for pass_index, pass_name, start, stop, pass_ptrs in self.sector_instance_spans(sector):
+                off = start
+                while off + 0x50 <= stop:
+                    stats["candidate_rows"] += 1
+                    if not looks_like_img_instance_row(img, off, max_resource_id=max_resource_id):
+                        off += 0x50
+                        continue
+                    stats["valid_rows"] += 1
+                    ipl_raw = read_u16(img, off + 0x00)
+                    ipl_id = int(ipl_raw & 0x7FFF)
+                    res_id = read_u16(img, off + 0x02)
+                    if (not include_lod) and str(pass_name) in IMG_LOD_PASS_NAMES:
+                        stats["skipped_lod_rows"] += 1
+                        off += 0x50
+                        continue
+                    dedupe_key = (ipl_id, int(res_id))
+                    if dedupe_visible and dedupe_key in seen_keys:
+                        stats["skipped_duplicate_rows"] += 1
+                        off += 0x50
+                        continue
+                    seen_keys.add(dedupe_key)
+                    sx = half_to_float(read_u16(img, off + 0x04))
+                    sy = half_to_float(read_u16(img, off + 0x06))
+                    sz = half_to_float(read_u16(img, off + 0x08))
+                    sr = half_to_float(read_u16(img, off + 0x0A))
+                    m = struct.unpack_from("<16f", img, off + 0x10)
+                    s0 = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
+                    s1 = math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])
+                    s2 = math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])
+                    details.append((
+                        int(res_id), cont, off - cont, int(ipl_raw), ipl_id,
+                        sx, sy, sz, sr, s0, s1, s2, m,
+                        int(pass_index), str(pass_name), int(sector.get("sector_index", -1)),
+                        int(sector.get("sector_x", 0)), int(sector.get("sector_y", 0)), origin,
+                    ))
+                    stats["kept_rows"] += 1
+                    off += 0x50
+        details.sort(key=lambda t: (int(t[15]), int(t[13]), int(t[2])))
+        self.last_sector_walk_stats = stats
+        return details
+
+    def write_sector_csvs(self, lvz_path: str, details, enable_unique: bool):
+        all_rows = [(int(d[1]), int(d[2]), int(d[3]), int(d[4]), int(d[0])) for d in details]
+        out_csv = str(Path(lvz_path).with_suffix("")) + "_all_res_ids.csv"
+        try:
+            with open(out_csv, "w", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                w.writerow(["index", "sector", "sector_x", "sector_y", "pass", "cont_hex", "off_hex", "ipl_raw", "ipl_id", "res_id"])
+                for i, d in enumerate(details):
+                    w.writerow([i, int(d[15]), int(d[16]), int(d[17]), str(d[14]), f"0x{int(d[1]):08X}", f"0x{int(d[2]):08X}", f"0x{int(d[3]):04X}", int(d[4]), int(d[0])])
+            dbg(f"[ids] wrote {len(details)} filtered visible rows → {out_csv}")
+        except Exception as e:
+            dbg(f"[ids] failed to write CSV: {e}")
+        if enable_unique:
+            try:
+                out_csv_unique = str(Path(lvz_path).with_suffix("")) + "_all_res_ids_unique.csv"
+                seen = set()
+                unique_details = []
+                for d in details:
+                    key = (int(d[4]), int(d[0]))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    unique_details.append(d)
+                with open(out_csv_unique, "w", newline="", encoding="utf-8") as f2:
+                    w2 = csv.writer(f2)
+                    w2.writerow(["index", "sector", "sector_x", "sector_y", "pass", "cont_hex", "off_hex", "ipl_raw", "ipl_id", "res_id"])
+                    for i, d in enumerate(unique_details):
+                        w2.writerow([i, int(d[15]), int(d[16]), int(d[17]), str(d[14]), f"0x{int(d[1]):08X}", f"0x{int(d[2]):08X}", f"0x{int(d[3]):04X}", int(d[4]), int(d[0])])
+                dbg(f"[ids] wrote {len(unique_details)} unique filtered rows → {out_csv_unique}")
+            except Exception as e:
+                dbg(f"[ids] failed to write UNIQUE CSV: {e}")
+        return all_rows
+
+    def build_sector_transforms_map_and_log(self, details, enable_unique_log: bool) -> Dict[int, Matrix]:
+        transforms_by_res: Dict[int, Matrix] = {}
+        if not enable_unique_log:
+            for d in details:
+                res_id = int(d[0])
+                if res_id not in transforms_by_res:
+                    transforms_by_res[res_id] = matrix_from_16_floats_row_major_values_with_origin(d[12], d[18])
+            return transforms_by_res
+        seen = set()
+        kept = 0
+        dbg("— UNIQUE VISIBLE RES IDs: pass + sector + xyzr + scales + matrix + world pos —")
+        for d in details:
+            res_id, cont, rel_off, ipl_raw, ipl_id, sx, sy, sz, sr, s0, s1, s2, m = d[:13]
+            if res_id in seen:
+                continue
+            seen.add(res_id)
+            kept += 1
+            origin = d[18]
+            posx, posy, posz = (m[12] + origin[0], m[13] + origin[1], m[14] + origin[2])
+            dbg(f"  RES={res_id} sector={int(d[15])} xy=({int(d[16])},{int(d[17])}) pass={d[14]} @ IMG+0x{cont:08X}+0x{rel_off:08X}  IPLraw=0x{ipl_raw:04X}  IPLid={ipl_id}")
+            dbg(f"     sphere=({sx:.6f},{sy:.6f},{sz:.6f}, r={sr:.6f}) scale=({s0:.6f},{s1:.6f},{s2:.6f}) sector_origin=({origin[0]:.6f},{origin[1]:.6f},{origin[2]:.6f})")
+            dbg(f"     pos=({posx:.6f},{posy:.6f},{posz:.6f})")
+            transforms_by_res[res_id] = matrix_from_16_floats_row_major_values_with_origin(m, origin)
+        dbg(f"[ids] unique visible printed: {kept}")
+        return transforms_by_res
+
+    def find_parent_container_records_from_lvz(self) -> List[Dict[str, int]]:
+        lvz = self.lvz_bytes
+        n = len(lvz)
+        records: List[Dict[str, int]] = []
+        if n < 0x24 or lvz[:4] != b"DLRW":
+            return records
+
+        cursor = 0x24
+        group_index = 0
+        while cursor + 8 <= n:
+            group_addr = read_u32(lvz, cursor + 0)
+            group_type = read_u32(lvz, cursor + 4)
+            if not (0 < group_addr < n and (group_addr & 0x3) == 0 and group_addr + 0x20 <= n):
+                break
+            tag = lvz[group_addr:group_addr + 4]
+            if tag not in (b"DLRW", b"xet\0"):
+                break
+
+            records.append({
+                "group_index": group_index,
+                "group_type": int(group_type),
+                "child_index": 0,
+                "lvz_addr": int(group_addr),
+                "tag_u32": read_u32(lvz, group_addr + 0x00),
+                "wrld_type": read_u32(lvz, group_addr + 0x04),
+                "total": read_u32(lvz, group_addr + 0x08),
+                "g0": read_u32(lvz, group_addr + 0x0C),
+                "g1": read_u32(lvz, group_addr + 0x10),
+                "gcnt": read_u32(lvz, group_addr + 0x14),
+                "cont": read_u32(lvz, group_addr + 0x18),
+            })
+            group_index += 1
+            cursor += 8
+        return records
+
+    def find_nested_container_records_from_lvz(self) -> List[Dict[str, int]]:
+
+        lvz = self.lvz_bytes
+        n = len(lvz)
+        records: List[Dict[str, int]] = []
+        for parent in self.find_parent_container_records_from_lvz():
+            group_addr = int(parent["lvz_addr"])
+            group_type = int(parent["group_type"])
+            group_count = int(parent.get("gcnt", 0))
+            if group_count <= 0 or group_count > LVZ_MAX_RESOURCE_ROWS:
+                group_count = 1
+            for child_index in range(group_count):
+                child_addr = group_addr + (child_index * 0x20)
+                if child_addr + 0x20 > n:
+                    break
+                child_tag = lvz[child_addr:child_addr + 4]
+                if child_tag not in (b"DLRW", b"xet\0"):
+                    break
+                records.append({
+                    "group_index": int(parent["group_index"]),
+                    "group_type": group_type,
+                    "child_index": child_index,
+                    "lvz_addr": int(child_addr),
+                    "tag_u32": read_u32(lvz, child_addr + 0x00),
+                    "wrld_type": read_u32(lvz, child_addr + 0x04),
+                    "total": read_u32(lvz, child_addr + 0x08),
+                    "g0": read_u32(lvz, child_addr + 0x0C),
+                    "g1": read_u32(lvz, child_addr + 0x10),
+                    "gcnt": read_u32(lvz, child_addr + 0x14),
+                    "cont": read_u32(lvz, child_addr + 0x18),
+                })
+        return records
+
+    def find_top_level_container_records_from_lvz(self) -> List[Dict[str, int]]:
+        return self.find_parent_container_records_from_lvz()
+
+    def find_top_level_conts_from_lvz(self) -> List[int]:
+        records = self.find_parent_container_records_from_lvz()
+        return sorted(set(int(record["cont"]) for record in records))
+
+    def detect_platform_from_lvz_groups(self) -> str:
+        records = self.find_parent_container_records_from_lvz()
+        group_types = sorted(set(int(record.get("group_type", 0)) for record in records))
+        nonzero = [value for value in group_types if value != 0]
+        if any(value >= 0x0D for value in nonzero):
+            return "PS2"
+        if any(value in (0x02, 0x03) for value in nonzero):
+            return "PSP"
+        return "PS2"
 
     def find_conts(self) -> List[int]:
-        lvz = self.lvz_bytes
-        conts: List[int] = []
-        i = 0; n = len(lvz)
-        while True:
-            j = lvz.find(b"DLRW", i)
-            if j < 0:
-                break
-            if (j & 3) == 0 and j + 32 <= n:
-                conts.append(read_u32(lvz, j + 0x18))
-            i = j + 1
-        conts = sorted(set(conts))
-        if 0 not in conts:
-            conts = [0] + conts
-        return conts
 
-    def _img_sky_span(self, cont: int):
+        conts = self.find_top_level_conts_from_lvz()
+        if conts:
+            if self.is_ver2_archive:
+                conts = [c for c in conts if find_ver2_entry_for_abs_offset(self.ver2_entries, c) is not None]
+            else:
+                conts = [c for c in conts if 0 <= c < len(self.img_bytes)]
+            if 0 not in conts and not self.is_ver2_archive:
+                conts = [0] + conts
+            return sorted(set(conts))
+
+        if self.is_ver2_archive:
+            return []
+        return [0] if self.img_bytes else []
+
+    def build_cont_next_map(self, conts: List[int]) -> Dict[int, Optional[int]]:
+        ordered = sorted(set(int(c) for c in conts if c is not None))
+        out: Dict[int, Optional[int]] = {}
+        for i, cont in enumerate(ordered):
+            out[cont] = ordered[i + 1] if i + 1 < len(ordered) else None
+        return out
+
+    def detect_pass_pointer_count(self, cont: int, entry_end: int) -> int:
         img = self.img_bytes
-        start = cont + 0x30
-        if cont < 0 or start >= len(img):
-            return None
-        sky = [read_u32(img, cont + 0x08 + i * 4) for i in range(8)]
-        nz = [v for v in sky if v]
-        if not nz:
-            return None
-        stop = cont + max(nz)
-        stop = min(stop, len(img))
-        return (start, stop, sky)
 
-    def enumerate_all_rows(self, conts: List[int]):
+        candidates = []
+        for count in (9, 8):
+            if cont + 0x08 + count * 4 > len(img):
+                continue
+            ptrs = [read_u32(img, cont + 0x08 + i * 4) for i in range(count)]
+            if any(p < 0x20 for p in ptrs):
+                continue
+            if any((p & 3) != 0 for p in ptrs):
+                continue
+            if any(ptrs[i] > ptrs[i + 1] for i in range(len(ptrs) - 1)):
+                continue
+            if any(cont + p - 0x20 > entry_end for p in ptrs):
+                continue
+            span_bytes = max(0, ptrs[-1] - ptrs[0])
+            if span_bytes > 0 and span_bytes % 0x10 == 0:
+                candidates.append((count, ptrs))
+        if not candidates:
+            return 0
+        return candidates[0][0]
+
+    def _img_instance_spans(self, cont: int, next_cont: Optional[int] = None):
+        img = self.img_bytes
+        if cont < 0 or cont + 0x30 > len(img):
+            return []
+        entry_end = len(img)
+        if next_cont is not None and next_cont > cont:
+            entry_end = min(entry_end, int(next_cont))
+        if self.is_ver2_archive:
+            entry = find_ver2_entry_for_abs_offset(self.ver2_entries, cont)
+            if entry is None:
+                return []
+            entry_end = min(entry_end, int(entry["end"]))
+
+        pass_count = self.detect_pass_pointer_count(cont, entry_end)
+        if pass_count <= 1:
+            return []
+        pass_ptrs = [read_u32(img, cont + 0x08 + i * 4) for i in range(pass_count)]
+        spans = []
+        total_rows = 0
+        for pass_index in range(pass_count - 1):
+            start_ptr = int(pass_ptrs[pass_index])
+            stop_ptr = int(pass_ptrs[pass_index + 1])
+            if stop_ptr <= start_ptr:
+                continue
+            start = cont + start_ptr - 0x20
+            stop = cont + stop_ptr - 0x20
+            start = max(cont, start)
+            stop = min(stop, entry_end)
+            if stop <= start:
+                continue
+            row_count = (stop - start) // 0x50
+            if row_count <= 0:
+                continue
+            total_rows += row_count
+            if total_rows > LVZ_MAX_IMG_ROWS_PER_CONTAINER:
+                dbg(
+                    f"[img] WARNING: container 0x{cont:08X} declares too many instance rows; "
+                    f"clamping to {LVZ_MAX_IMG_ROWS_PER_CONTAINER}"
+                )
+                allowed = max(0, LVZ_MAX_IMG_ROWS_PER_CONTAINER - (total_rows - row_count))
+                stop = start + allowed * 0x50
+            spans.append((pass_index, start, stop, pass_ptrs))
+            if total_rows >= LVZ_MAX_IMG_ROWS_PER_CONTAINER:
+                break
+        return spans
+
+    def _img_sky_span(self, cont: int, next_cont: Optional[int] = None):
+        spans = self._img_instance_spans(cont, next_cont)
+        if not spans:
+            return None
+        start = min(span[1] for span in spans)
+        stop = max(span[2] for span in spans)
+        return (start, stop, spans[0][3])
+
+    def enumerate_all_rows(self, conts: List[int], max_resource_id: Optional[int] = None):
         rows: List[Tuple[int,int,int,int,int]] = []
         ENTRY = 0x50
         img = self.img_bytes
+        next_by_cont = self.build_cont_next_map(conts)
         for cont in conts:
-            span = self._img_sky_span(cont)
-            if not span:
-                continue
-            start, stop, sky = span
-            off = start
-            while off + ENTRY <= stop:
-                ipl_raw = read_u16(img, off + 0x00)
-                res_id  = read_u16(img, off + 0x02)
-                rows.append((cont, off - cont, ipl_raw, (ipl_raw & 0x7FFF), res_id))
-                off += ENTRY
+            spans = self._img_instance_spans(cont, next_by_cont.get(cont))
+            for pass_index, start, stop, pass_ptrs in spans:
+                off = start
+                while off + ENTRY <= stop:
+                    if looks_like_img_instance_row(img, off, max_resource_id=max_resource_id):
+                        ipl_raw = read_u16(img, off + 0x00)
+                        res_id  = read_u16(img, off + 0x02)
+                        rows.append((cont, off - cont, ipl_raw, (ipl_raw & 0x7FFF), res_id))
+                    off += ENTRY
         rows.sort(key=lambda t: (t[0], t[1]))
         return rows
 
-    def enumerate_details(self, conts: List[int]):
+    def enumerate_details(self, conts: List[int], max_resource_id: Optional[int] = None):
         rows = []
         ENTRY = 0x50
         img = self.img_bytes
+        next_by_cont = self.build_cont_next_map(conts)
         for cont in conts:
-            span = self._img_sky_span(cont)
-            if not span:
-                continue
-            start, stop, sky = span
-            off = start
-            while off + ENTRY <= stop:
-                ipl_raw = read_u16(img, off + 0x00)
-                ipl_id  = (ipl_raw & 0x7FFF)
-                res_id  = read_u16(img, off + 0x02)
-                sx = half_to_float(read_u16(img, off + 0x04))
-                sy = half_to_float(read_u16(img, off + 0x06))
-                sz = half_to_float(read_u16(img, off + 0x08))
-                sr = half_to_float(read_u16(img, off + 0x0A))
-                m  = struct.unpack_from("<16f", img, off + 0x10)
-                s0 = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
-                s1 = math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])
-                s2 = math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])
-                rows.append((res_id, cont, off - cont, ipl_raw, ipl_id, sx, sy, sz, sr, s0, s1, s2, m))
-                off += ENTRY
+            spans = self._img_instance_spans(cont, next_by_cont.get(cont))
+            for pass_index, start, stop, pass_ptrs in spans:
+                off = start
+                while off + ENTRY <= stop:
+                    if not looks_like_img_instance_row(img, off, max_resource_id=max_resource_id):
+                        off += ENTRY
+                        continue
+                    ipl_raw = read_u16(img, off + 0x00)
+                    ipl_id  = (ipl_raw & 0x7FFF)
+                    res_id  = read_u16(img, off + 0x02)
+                    sx = half_to_float(read_u16(img, off + 0x04))
+                    sy = half_to_float(read_u16(img, off + 0x06))
+                    sz = half_to_float(read_u16(img, off + 0x08))
+                    sr = half_to_float(read_u16(img, off + 0x0A))
+                    m  = struct.unpack_from("<16f", img, off + 0x10)
+                    s0 = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
+                    s1 = math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])
+                    s2 = math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])
+                    rows.append((res_id, cont, off - cont, ipl_raw, ipl_id, sx, sy, sz, sr, s0, s1, s2, m))
+                    off += ENTRY
         rows.sort(key=lambda t: (t[1], t[2]))
         return rows
 
@@ -1111,12 +3136,7 @@ class read_img:
                 if res_id in seen:
                     continue
                 seen.add(res_id)
-                transforms_by_res[res_id] = Matrix((
-                    (m[0], m[1], m[2],  m[3]),
-                    (m[4], m[5], m[6],  m[7]),
-                    (m[8], m[9], m[10], m[11]),
-                    (m[12],m[13],m[14],m[15]),
-                ))
+                transforms_by_res[res_id] = matrix_from_16_floats_row_major_values(m)
             return transforms_by_res
 
         seen_res = set()
@@ -1136,200 +3156,7 @@ class read_img:
             dbg(f"          [{m[12]:.6f},{m[13]:.6f},{m[14]:.6f},{m[15]:.6f}]]")
             dbg(f"     pos=({posx:.6f},{posy:.6f},{posz:.6f})")
 
-            transforms_by_res[res_id] = Matrix((
-                (m[0], m[1], m[2],  m[3]),
-                (m[4], m[5], m[6],  m[7]),
-                (m[8], m[9], m[10], m[11]),
-                (m[12],m[13],m[14],m[15]),
-            ))
+            transforms_by_res[res_id] = matrix_from_16_floats_row_major_values(m)
         dbg(f"[ids] unique printed: {kept}")
         return transforms_by_res
 
-#######################################################
-class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
-    """Import a Rockstar Leeds LevelZlib & IMG Archive"""
-    bl_idname = "import_scene.leeds_lvz_img"
-    bl_label = "Import LVZ + IMG Archive"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    filename_ext = ".lvz"
-
-    use_swizzle: BoolProperty(
-        name="PS2 swizzle",
-        default=True
-    )
-    csv_dedup_res_ids: BoolProperty(
-        name="CSV unique + log detailed blocks",
-        default=True
-    )
-    apply_img_transforms: BoolProperty(
-        name="Apply IMG transforms to MDL objects",
-        default=True
-    )
-    debug_print: BoolProperty(
-        name="Debug print",
-        default=True
-    )
-    write_debug_log: BoolProperty(
-        name="Write debug log next to LVZ",
-        default=True
-    )
-
-    filter_glob: StringProperty(
-        default="*.lvz;*.LVZ",
-        options={'HIDDEN'},
-        maxlen=255,
-    )
-
-    def execute(self, context):
-        lvz_path = self.filepath
-        if not lvz_path:
-            self.report({'ERROR'}, "No LVZ selected.")
-            return {'CANCELLED'}
-
-        stem = Path(lvz_path).stem
-        log_path = str(Path(lvz_path).with_suffix("")) + "_blds_import.log" if self.write_debug_log else None
-        global DEBUG
-        DEBUG = DebugOut(self.debug_print, self.write_debug_log, log_path)
-
-        t0 = time.time()
-        lvz_bytes_in = Path(lvz_path).read_bytes()
-        decomp, was_cmp = safe_decompress(lvz_bytes_in)
-
-        dbg("===== LVZ Walk + IMG Match/Apply =====")
-        dbg(f"LVZ: {lvz_path}")
-        dbg(f"[io] LVZ bytes in: {len(lvz_bytes_in)}  decomp: {len(decomp)} ({'compressed' if was_cmp else 'raw'})")
-        dbg("")
-
-        lvz = read_lvz(
-            decomp_bytes=decomp,
-            stem=stem,
-            use_swizzle=self.use_swizzle,
-            debug_print=self.debug_print
-        )
-        try:
-            mast = lvz.parse_master_header()
-            groups_hdr, res_count, _ = lvz.parse_slave_groups_and_rescount()
-        except Exception as e:
-            self.report({'ERROR'}, f"Failed to parse LVZ: {e}")
-            return {'CANCELLED'}
-
-        dbg("— Slave Group Table —")
-        dbg(f"  groups: {len(groups_hdr)}")
-        for g in groups_hdr:
-            dbg(f"  [sg {g.index:03d}] LVZ+0x{g.addr:08X} tag='{g.tag}' size={g.total} gcnt={g.gcnt} contIMG=0x{g.cont:08X} — {g.note}")
-        dbg(f"  resource count: {res_count}")
-        dbg("")
-
-        rows = lvz.walk_master_resource_table(mast.res_table_addr, res_count)
-        dbg("— Master Resource Table (first 300) —")
-        for r in rows[:min(len(rows), 300)]:
-            a16, b16 = r["peek_u16"]; a32, b32 = r["peek_u32"]
-            extra = []
-            if r["kind"] == "UNK_FAC0" and "unk_fac0" in r: extra.append(f"unk_fac0={r['unk_fac0']}")
-            if r["kind"] == "EMPTY" and "empty_reason" in r: extra.append(f"reason={r['empty_reason']}")
-            if r["kind"] == "TEX_REF":
-                extra.append(f"ref_addr=0x{r['ref_addr']:08X}")
-                extra.append(f"RES(index)={r['index']}")
-                if "embedded_res_id" in r and r["embedded_res_id"] is not None:
-                    extra.append(f"embedded=0x{r['embedded_res_id']:08X}")
-            dbg(f"[res {r['index']:5d}] table@0x{r['table_off']:08X} → res@0x{r['res_addr']:08X} "
-                f"kind={r['kind']} u16,u16=({a16},{b16}) u32,u32=(0x{(a32 if a32 is not None else 0):08X},0x{(b32 if b32 is not None else 0):08X}) {' '.join(extra)}")
-        dbg("")
-
-        img_bytes = None; img_name = None
-        try:
-            lvz_p = Path(lvz_path)
-            cands = [lvz_p.with_suffix(".IMG"), lvz_p.with_suffix(".img"), lvz_p.with_suffix(".img.zip")]
-            for cand in cands:
-                if cand.exists():
-                    if cand.suffix.lower() == ".zip":
-                        with zipfile.ZipFile(cand, 'r') as zf:
-                            nm = None
-                            for nm0 in zf.namelist():
-                                if nm0.lower().endswith(".img"):
-                                    nm = nm0; break
-                            if nm is None and zf.namelist():
-                                nm = zf.namelist()[0]
-                            img_bytes = zf.read(nm)
-                            img_name = str(cand.name)
-                    else:
-                        img_bytes = cand.read_bytes()
-                        img_name = cand.name
-                    break
-            if img_bytes:
-                dbg(f"— IMG Read — source: {img_name} bytes={len(img_bytes)}")
-            else:
-                dbg("[img] IMG not found next to LVZ; IMG-based features will be skipped")
-        except Exception as eimg:
-            dbg(f"[img] failed to read IMG: {eimg}")
-
-        lvz.decode_textures(rows)
-
-        transforms_by_res: Dict[int, Matrix] = {}
-        if img_bytes:
-            img = read_img(img_bytes=img_bytes, lvz_bytes=decomp)
-            conts = img.find_conts()
-            dbg(f"[img] DLRW prefaces in LVZ → conts: {len(conts)} (includes master=0)")
-            all_rows = img.enumerate_all_rows(conts)
-            details  = img.enumerate_details(conts)
-            transforms_by_res = img.build_transforms_map_and_log(details, enable_unique_log=self.csv_dedup_res_ids)
-            dbg(f"[img] total IMG rows walked: {len(all_rows)}")
-            dbg("— ALL RESOURCE IDs (IMG walk order) —")
-            for i, (cont, rel_off, ipl_raw, ipl_id, res_id) in enumerate(all_rows):
-                dbg(f"{i:04d}: {res_id}")
-
-            if self.csv_dedup_res_ids:
-                seen = set(); unique_rows = []
-                for row in all_rows:
-                    rid = row[4]
-                    if rid not in seen:
-                        seen.add(rid)
-                        unique_rows.append(row)
-            else:
-                unique_rows = []
-            img.write_csvs(lvz_path, all_rows, unique_rows, enable_unique=self.csv_dedup_res_ids)
-        else:
-            dbg("[img] IMG rows not enumerated because IMG is missing")
-
-        built_by_res = lvz.build_mdl_objects(rows)
-
-        if self.apply_img_transforms and transforms_by_res:
-            applied = 0
-            for res_id, M in transforms_by_res.items():
-                obj = built_by_res.get(res_id)
-                if obj is None:
-                    continue
-                try:
-                    obj.matrix_world = M
-                    applied += 1
-                    dbg(f"[apply] RES={res_id} → object '{obj.name}' matrix_world set.")
-                except Exception as e:
-                    dbg(f"[apply] RES={res_id} apply failed: {e}")
-            dbg(f"[apply] transforms applied: {applied} (of {len(transforms_by_res)})")
-        elif self.apply_img_transforms:
-            dbg("[apply] no IMG transforms available to apply")
-
-        dbg(f"\n[total] finished in {time.time() - t0:.2f}s")
-        if DEBUG is not None:
-            DEBUG.flush()
-        return {'FINISHED'}
-
-#######################################################
-classes = (IMPORT_SCENE_OT_stories_lvz,)
-
-def menu_func_import(self, context):
-    self.layout.operator(IMPORT_SCENE_OT_stories_lvz.bl_idname, text="R* Leeds: LeVelZlib IMG Archive")
-
-def register():
-    for c in classes:
-        bpy.utils.register_class(c)
-    bpy.types.TOPBAR_MT_file_import.append(menu_func_import)
-
-def unregister():
-    bpy.types.TOPBAR_MT_file_import.remove(menu_func_import)
-    for c in reversed(classes):
-        bpy.utils.unregister_class(c)
-
-if __name__ == "__main__":
-    register()

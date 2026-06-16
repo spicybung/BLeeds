@@ -1,20 +1,4 @@
-# BLeeds - R* Leeds texture reader for CHK/XTX/TEX
-# Author: spicybung
-# Years: 2025 -
-#
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-#
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-#
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import os
 import struct
 from dataclasses import dataclass
@@ -22,23 +6,9 @@ from typing import List, Dict, Tuple, Optional, Sequence
 
 import numpy as np
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .CHK/XTX/TEX - dictionaries for LCS/VCS/CW/MH2 textures      #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
-# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (.xtx, .tex)
-# - Mod resources/cool stuff:
-# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (extract textures)
-# • https://gtaforums.com/topic/518948-rel-gta-stories-texture-explorer-20/ (view/explore textures)
-# • https://www.dixmor-hospital.com/mhs/index.php (Manhunt 2)
-
-
-#######################################################
 def read_u32(data: bytes, offset: int) -> int:
 
     return struct.unpack_from('<I', data, offset)[0]
-
 
 def read_cstr(data: bytes, offset: int, length: int) -> str:
 
@@ -48,15 +18,9 @@ def read_cstr(data: bytes, offset: int, length: int) -> str:
         end = len(s)
     return s[:end].decode('ascii', 'replace')
 
-
-###############################################################################
-# PSP unswizzling routines (4‑bit, 8‑bit and 32‑bit)
-###############################################################################
-
-
 def unswizzle_psp_4bit(src: bytes, w: int, h: int) -> bytes:
 
-    min_width = 32  
+    min_width = 32
     bufw = w if w >= min_width else min_width
     stride = bufw // 2
     dest = bytearray(stride * h)
@@ -79,10 +43,8 @@ def unswizzle_psp_4bit(src: bytes, w: int, h: int) -> bytes:
         out[dst_offset:dst_offset + (w // 2)] = dest[src_offset:src_offset + (w // 2)]
     return bytes(out)
 
-
 def unswizzle_psp_8bit(src: bytes, w: int, h: int) -> bytes:
-    """Unscramble a swizzled 8‑bpp texture using the PSP algorithm."""
-    min_width = 16  
+    min_width = 16
     bufw = w if w >= min_width else min_width
     stride = bufw
     dest = bytearray(stride * h)
@@ -105,9 +67,7 @@ def unswizzle_psp_8bit(src: bytes, w: int, h: int) -> bytes:
         out[dst_offset:dst_offset + w] = dest[src_offset:src_offset + w]
     return bytes(out)
 
-
 def unswizzle_psp_32bit(src: bytes, w: int, h: int) -> bytes:
-    """Unscramble a swizzled 32‑bit texture using the PSP algorithm."""
     min_width = 4
     bufw = w if w >= min_width else min_width
     stride = bufw * 4
@@ -131,7 +91,6 @@ def unswizzle_psp_32bit(src: bytes, w: int, h: int) -> bytes:
         out[dst_offset:dst_offset + w * 4] = dest[src_offset:src_offset + w * 4]
     return bytes(out)
 
-
 def expand_nibbles_lo_first(data: bytes) -> np.ndarray:
 
     out = np.empty(len(data) * 2, dtype=np.uint8)
@@ -139,12 +98,6 @@ def expand_nibbles_lo_first(data: bytes) -> np.ndarray:
         out[2 * i] = value & 0x0F
         out[2 * i + 1] = (value >> 4) & 0x0F
     return out
-
-
-###############################################################################
-# PS2 unswizzling and CLUT conversion routines
-###############################################################################
-
 
 def swizzle_ps2(x: int, y: int, logw: int) -> int:
 
@@ -154,11 +107,11 @@ def swizzle_ps2(x: int, y: int, logw: int) -> int:
     n = ((y >> 1) & 1) | (((x >> 3) & 1) << 1)
     return n | (nx << 2) | (ny << (logw - 1 + 2))
 
-
 def unswizzle_ps2_indices(idx: np.ndarray, w: int, h: int) -> np.ndarray:
 
     total = w * h
     dst = np.empty(total, dtype=np.uint8)
+
     logw = 0
     tmp = 1
     while tmp < w:
@@ -169,23 +122,15 @@ def unswizzle_ps2_indices(idx: np.ndarray, w: int, h: int) -> np.ndarray:
             dst[y * w + x] = idx[swizzle_ps2(x, y, logw) % len(idx)]
     return dst
 
-
 def convert_clut_ps2(data: np.ndarray) -> None:
-   
+
     mapping = [0x00, 0x10, 0x08, 0x18]
     for i in range(len(data)):
         v = int(data[i])
         data[i] = (v & ~0x18) | mapping[(v & 0x18) >> 3]
 
-
-###############################################################################
-# Header structures for PSP and PS2
-###############################################################################
-
-
 @dataclass
 class PspTexHeader:
-    """Represents a 16‑byte PSP texture header in a CHK container."""
 
     unknown0: int
     raster_offset: int
@@ -198,18 +143,14 @@ class PspTexHeader:
 
     @property
     def width(self) -> int:
-        """Return the texture width calculated from ``width_pow2``."""
         return 1 << self.width_pow2 if self.width_pow2 < 32 else 0
 
     @property
     def height(self) -> int:
-        """Return the texture height calculated from ``height_pow2``."""
         return 1 << self.height_pow2 if self.height_pow2 < 32 else 0
-
 
 @dataclass
 class Ps2TexHeader:
-    """Represents a 16‑byte PS2 texture header in a CHK container."""
 
     reserved0: int
     reserved1: int
@@ -244,12 +185,6 @@ class Ps2TexHeader:
     def height(self) -> int:
         return 1 << self.height_pow2 if self.height_pow2 < 32 else 0
 
-
-###############################################################################
-# Parsing functions
-###############################################################################
-
-
 def parse_psp_header(data: bytes, offset: int) -> Optional[PspTexHeader]:
 
     if offset <= 0 or offset + 16 > len(data):
@@ -280,7 +215,6 @@ def parse_psp_header(data: bytes, offset: int) -> Optional[PspTexHeader]:
         tail=tail,
     )
 
-
 def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
 
     if offset <= 0 or offset + 16 > len(data):
@@ -292,12 +226,15 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
     reserved1 = read_u32(hdr, 4)
     raster_offset = read_u32(hdr, 8)
     flags = read_u32(hdr, 12)
+
     w_pow2_std = (flags >> 20) & 0x3F
     h_pow2_std = (flags >> 26) & 0x3F
     bpp_std = (flags >> 14) & 0x3F
     width_std = 1 << w_pow2_std if w_pow2_std < 32 else 0
     height_std = 1 << h_pow2_std if h_pow2_std < 32 else 0
+
     use_alt = False
+
     h_pow2_alt = flags & 0x3F
     w_pow2_alt = (flags >> 6) & 0x3F
     bpp_alt = (flags >> 12) & 0x3F
@@ -306,9 +243,11 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
     swizzle_alt = (flags >> 24) & 0xFF
     width_alt = 1 << w_pow2_alt if w_pow2_alt < 32 else 0
     height_alt = 1 << h_pow2_alt if h_pow2_alt < 32 else 0
+
     std_invalid = (width_std == 0 or height_std == 0 or width_std > 4096 or height_std > 4096)
     alt_valid_dims = (width_alt > 0 and height_alt > 0 and width_alt <= 4096 and height_alt <= 4096)
     alt_bpp_reasonable = bpp_alt in (4, 8, 16, 32)
+
     if (
         std_invalid or
         (width_std <= 8 and height_std <= 8) or
@@ -316,6 +255,7 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
     ) and alt_valid_dims and alt_bpp_reasonable:
         use_alt = True
     if use_alt:
+
         canonical_flags = (
             (swizzle_alt & 0xFF)
             | ((mip_alt & 0xF) << 8)
@@ -327,6 +267,7 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
         flags = canonical_flags
         width_std = width_alt
         height_std = height_alt
+
     if width_std == 0 or height_std == 0 or width_std > 4096 or height_std > 4096:
         return None
     return Ps2TexHeader(
@@ -336,18 +277,10 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
         flags=flags,
     )
 
-
-###############################################################################
-# Container parsing and traversal
-###############################################################################
-
-
 def slot_base_from_slot_ptr(slot_ptr: int) -> int:
-    """Convert a container slot pointer to its base address."""
     if slot_ptr <= 0:
         return 0
     return max(0, slot_ptr - 8)
-
 
 def parse_container(data: bytes, base: int) -> Optional[Dict[str, int]]:
 
@@ -366,12 +299,6 @@ def parse_container(data: bytes, base: int) -> Optional[Dict[str, int]]:
         'prev_slot': prev_slot,
         'name': name,
     }
-
-
-###############################################################################
-# Decoding functions for PSP and PS2 textures
-###############################################################################
-
 
 def decode_psp_texture(
     data: bytes,
@@ -397,6 +324,7 @@ def decode_psp_texture(
     if offset + base_bytes > len(data):
         return None
     raw = data[offset:offset + base_bytes]
+
     if thdr.swizzle_width:
         if bpp == 4:
             unswizzled = unswizzle_psp_4bit(raw, w, h)
@@ -419,8 +347,10 @@ def decode_psp_texture(
     pal = palette_override
     if pal is None:
         if bpp == 4:
+
             pal_size = 16 * 4
         elif bpp == 8:
+
             pal_size = 256 * 4
         else:
             pal_size = 0
@@ -440,12 +370,14 @@ def decode_psp_texture(
                 pal = None
     rgba = np.empty((h, w, 4), dtype=np.uint8)
     if pal:
+
         for i, v in enumerate(idx[:pixel_count]):
             y = i // w
             x = i % w
             col = pal[int(v) % len(pal)]
             rgba[y, x] = col
     else:
+
         max_idx = int(idx.max()) if len(idx) > 0 else 0
         scale = 255.0 / max_idx if max_idx > 0 else 0.0
         for i, v in enumerate(idx[:pixel_count]):
@@ -454,7 +386,6 @@ def decode_psp_texture(
             gval = int(v * scale + 0.5)
             rgba[y, x] = (gval, gval, gval, 255)
     return rgba
-
 
 def decode_ps2_texture(
     data: bytes,
@@ -513,6 +444,7 @@ def decode_ps2_texture(
         if thdr.swizzle_mask & 1:
             idx = unswizzle_ps2_indices(idx, w, h)
     elif bpp == 8:
+
         idx = np.frombuffer(raw, dtype=np.uint8).copy()
         if thdr.swizzle_mask & 1:
             idx = unswizzle_ps2_indices(idx, w, h)
@@ -545,10 +477,4 @@ def decode_ps2_texture(
             val = int(idx[i] * scale + 0.5)
             rgba[y, x] = (val, val, val, 255)
     return rgba
-
-
-###############################################################################
-# Main decoding logic for Blender
-###############################################################################
-
 

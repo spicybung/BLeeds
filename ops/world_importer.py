@@ -1,27 +1,10 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 -
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import bpy
 import numpy as np
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 from ..leedsLib import world
-
 
 def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
 
@@ -32,37 +15,35 @@ def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.ty
     img.pack()
     return img
 
-
 def create_material_from_image(img: bpy.types.Image, mat_name: str) -> bpy.types.Material:
 
     mat = bpy.data.materials.new(mat_name)
     mat.use_nodes = True
     nt = mat.node_tree
+
     for node in list(nt.nodes):
         nt.nodes.remove(node)
     out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (300, 0)
     principled = nt.nodes.new("ShaderNodeBsdfPrincipled"); principled.location = (0, 0)
     tex = nt.nodes.new("ShaderNodeTexImage"); tex.location = (-300, 0); tex.image = img
     nt.links.new(tex.outputs["Color"], principled.inputs["Base Color"])
+
     if img.has_data and "Alpha" in tex.outputs and "Alpha" in principled.inputs:
         nt.links.new(tex.outputs["Alpha"], principled.inputs["Alpha"])
         mat.blend_method = 'BLEND'
     nt.links.new(principled.outputs["BSDF"], out.inputs["Surface"])
     return mat
 
-
 def get_or_create_collection(name: str) -> bpy.types.Collection:
-    """Return an existing collection or create one under the scene root."""
     if name in bpy.data.collections:
         return bpy.data.collections[name]
     coll = bpy.data.collections.new(name)
     bpy.context.scene.collection.children.link(coll)
     return coll
 
-
 def classify_entries(entries: list) -> None:
-    """Label resource entries as ``TEX_REF`` or ``MDL`` according to heuristics."""
     for e in entries:
+
         if e.b16 == 0 and e.a16 != 0:
             e.kind = "TEX_REF"
             e.ref_addr = e.a32
@@ -72,13 +53,13 @@ def classify_entries(entries: list) -> None:
             e.note = "mdl_or_other"
             e.mdl_info = None
 
-
 def decode_textures_for_entries(data: bytes, header: world.WorldHeader, entries: list, stem: str) -> None:
 
     n = len(data)
     tex_entries = [e for e in entries if e.kind == "TEX_REF" and 0 < getattr(e, 'ref_addr', 0) < n]
     if not tex_entries:
         return
+
     uniq = []
     seen = set()
     for e in sorted(tex_entries, key=lambda e: e.ref_addr):
@@ -100,6 +81,7 @@ def decode_textures_for_entries(data: bytes, header: world.WorldHeader, entries:
         blob = data[start:next_start]
         index = blob[:-64]
         palette = blob[-64:]
+
         pal = [tuple(palette[i:i + 4]) for i in range(0, 64, 4)]
         try:
             w, h = world.choose_single_size_for_4bpp(len(index))
@@ -117,6 +99,7 @@ def decode_textures_for_entries(data: bytes, header: world.WorldHeader, entries:
         if (w2, h2) != (w, h):
             idx2d = world.resize_indices_to_dims(idx2d, w2, h2)
             w, h = w2, h2
+
         idx2d = np.flipud(idx2d)
         pal_arr = np.asarray(pal, dtype=np.uint8)
         pal_arr = world.apply_ps2_alpha_scale(pal_arr, do_scale=True)
@@ -125,6 +108,7 @@ def decode_textures_for_entries(data: bytes, header: world.WorldHeader, entries:
         img = image_from_rgba_uint8(rgba, name, w, h)
         mat = create_material_from_image(img, name)
         decoded[addr] = (img, mat, (w, h))
+
     for e in tex_entries:
         res = decoded.get(e.ref_addr)
         if res:
@@ -132,7 +116,6 @@ def decode_textures_for_entries(data: bytes, header: world.WorldHeader, entries:
             e.note += f"|decoded {e.tex_size}"
         else:
             e.note += "|decode_fail"
-
 
 def build_mdl_objects(entries: list, resources: list, stem: str, collection: bpy.types.Collection = None, max_pairs_per_mdl: int = 4) -> None:
 
@@ -157,6 +140,7 @@ def build_mdl_objects(entries: list, resources: list, stem: str, collection: bpy
         parent["wrld_b32"] = int(e.b32)
         collection.objects.link(parent)
         total += 1
+
         for idx, (tex_id, unknown) in enumerate(info['pairs'][:max_pairs_per_mdl]):
             child_name = f"{parent_name}_tex{tex_id:04d}_{idx}"
             child = bpy.data.objects.new(child_name, None)
@@ -172,18 +156,10 @@ def build_mdl_objects(entries: list, resources: list, stem: str, collection: bpy
             total += 1
     world.dbg(f"[mdl] created {total} objects in collection '{collection.name}'")
 
-
 def build_mdl_geometry(entries: list, data: bytes, stem: str, collection: bpy.types.Collection = None) -> None:
-    """Parse MDL blobs into meshes and link them into a collection.
-
-    Each MDL entry is decompressed and parsed using ``world.MDLParser``.
-    Materials are assigned via ``parser.material_by_res_index``.  The
-    resulting mesh object is linked into ``collection`` (or
-    ``WRLD_GEO_<stem>`` if not provided), and statistics are saved
-    into the entry's ``mdl_info`` for logging.
-    """
     if collection is None:
         collection = get_or_create_collection(f"WRLD_GEO_{stem}")
+
     mat_map: Dict[int, bpy.types.Material] = {e.res_id: e.material for e in entries if getattr(e, 'material', None) is not None}
     total = 0
     for e in entries:
@@ -230,9 +206,7 @@ def build_mdl_geometry(entries: list, data: bytes, stem: str, collection: bpy.ty
     if total > 0:
         world.dbg(f"[mdl] built {total} geometry objects in collection '{collection.name}'")
 
-
 def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
-    """Extract hexdumps and initial texture pairs from MDL entries."""
     n = len(data)
     for e in entries:
         if e.kind != "MDL":
@@ -268,7 +242,6 @@ def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
             "pairs": pairs,
         }
 
-
 def log_and_import(path: str, decode_textures: bool = True, write_log: bool = True, build_models: bool = True) -> None:
     data = Path(path).read_bytes()
     header = world.parse_world_header(data)
@@ -276,14 +249,18 @@ def log_and_import(path: str, decode_textures: bool = True, write_log: bool = Tr
     entries = world.parse_resource_table(data, header, ext)
     classify_entries(entries)
     stem = Path(path).stem
+
     if decode_textures:
         decode_textures_for_entries(data, header, entries, stem)
+
     analyze_mdl_entries(data, entries)
+
     if build_models:
         try:
             build_mdl_geometry(entries, data, stem)
         except Exception as ex:
             world.dbg(f"[mdl] error while building MDL geometry: {ex}")
+
     lines: List[str] = []
     lines.append(f"[wrld] loading '{path}' ({len(data)} bytes)")
     lines.append(

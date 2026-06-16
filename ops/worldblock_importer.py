@@ -1,20 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 - 
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import os
 import struct
 import traceback
@@ -26,9 +10,7 @@ from bpy_extras.io_utils import ImportHelper
 
 from ..leedsLib.worldblock import read_chinatown as RC
 
-#######################################################
 def ensure_bytes(file_bytes):
-    """Ensure we always end up with a bytes object for parsing."""
     if isinstance(file_bytes, (bytes, bytearray, memoryview)):
         return bytes(file_bytes)
     if isinstance(file_bytes, str):
@@ -38,15 +20,7 @@ def ensure_bytes(file_bytes):
         f"file_bytes must be bytes/bytearray/memoryview or a path str, not {type(file_bytes).__name__}"
     )
 
-#######################################################
 class worldblock_importer:
-    """
-    Helper for building a single CW mesh from a WBL GeometryMesh header.
-
-    This is intentionally low-level so it can be called either from the
-    dedicated WBL import operator below, or from other modules that
-    need to build meshes from embedded CW geometry.
-    """
 
     @staticmethod
     def build_wbl(
@@ -140,9 +114,7 @@ class worldblock_importer:
 
         return obj
 
-
 class IMPORT_OT_wbl(Operator, ImportHelper):
-    """Import Chinatown Wars worldblock sectors (.wbl)."""
 
     bl_idname = "import_scene.cw_worldblock"
     bl_label = "R* Leeds: Worldblock (.wbl)"
@@ -165,6 +137,7 @@ class IMPORT_OT_wbl(Operator, ImportHelper):
 
         for fp in filepaths:
             try:
+
                 RC.import_wbl(fp, context)
             except Exception as exc:
                 tb = traceback.format_exc()
@@ -174,14 +147,11 @@ class IMPORT_OT_wbl(Operator, ImportHelper):
 
         return {"FINISHED"}
 
-#######################################################
 def register():
     bpy.utils.register_class(IMPORT_OT_wbl)
 
-
 def unregister():
     bpy.utils.unregister_class(IMPORT_OT_wbl)
-
 
 if __name__ == "__main__":
     register()

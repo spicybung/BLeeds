@@ -1,20 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 - 
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import traceback
 import os
 import struct
@@ -27,8 +11,6 @@ from bpy.props import StringProperty, CollectionProperty, BoolProperty
 from ..leedsLib.worldblock import read_chinatown as RC
 from ..ops.worldblock_importer import worldblock_importer
 
-
-#######################################################
 def _ensure_bytes(d):
     if isinstance(d, (bytes, bytearray, memoryview)):
         return bytes(d)
@@ -37,9 +19,7 @@ def _ensure_bytes(d):
             return fh.read()
     raise TypeError(f"a bytes-like object is required, not '{type(d).__name__}'")
 
-#######################################################
 class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
-    """Import a Rockstar Leeds Worldblock"""
     bl_idname = "import_scene.cw_wbl"
     bl_label = "Import Worldblock"
     filename_ext = ".wbl"
@@ -73,6 +53,7 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
             logf = open(RC.get_debug_logfile(filepath), "w", encoding="utf-8")
             RC.dprint(f"==== DEBUG LOG START {datetime.datetime.now()} ====", logf)
         try:
+
             with open(filepath, "rb") as fh:
                 file_bytes = fh.read()
             b = _ensure_bytes(file_bytes)
@@ -269,7 +250,7 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
 
                 base = len(wv)
                 for i in range(vertex_count):
-                    idx = vert_offset + i 
+                    idx = vert_offset + i
                     wv.append(all_verts[idx])
                     u_norm, v_norm = all_uvs[idx]
                     u_final = u_norm + translationFactor * uv_mul
@@ -302,7 +283,6 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
         mat_bank.append_all_to_mesh(mesh)
         obj = bpy.data.objects.new(mesh.name, mesh)
         coll.objects.link(obj)
-
 
 class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.cw_wbl"
@@ -358,19 +338,15 @@ class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
             self.report({'ERROR'}, str(e))
             return {'CANCELLED'}
 
-#######################################################
 classes = (IMPORT_OT_CW_wbl, EXPORT_OT_CW_wbl)
-
 
 def register():
     for c in classes:
         bpy.utils.register_class(c)
 
-
 def unregister():
     for c in reversed(classes):
         bpy.utils.unregister_class(c)
-
 
 if __name__ == "__main__":
     register()

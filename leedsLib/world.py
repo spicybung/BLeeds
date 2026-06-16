@@ -1,20 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 - 
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
+from __future__ import annotations
 import struct
 import math
 
@@ -23,42 +7,20 @@ from dataclasses import dataclass
 import numpy as np
 
 import bpy
+from ..compat import setMeshAutoSmooth
 from mathutils import Matrix
 
-from pathlib import Path 
+from pathlib import Path
 
 import zlib
 from typing import List, Tuple, Dict, Optional
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .wrld's - the file format for GTA Stories world sectors      #
-#   TODO: .BSP worlds maybe?                                                        # 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/IMG_archive
-# • https://web.archive.org/web/20180402031926/http://gtamodding.ru/wiki/IMG
-# • https://web.archive.org/web/20180406213309/http://gtamodding.ru/wiki/LVZ
-# • https://web.archive.org/web/20180729202923/http://gtamodding.ru/wiki/WRLD (*Russian*)
-# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (*Russian* - WRLD textures)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesview/worldstream.cpp
-# • https://web-archive-org.translate.goog/web/20180810183857/http://gtamodding.ru/wiki/LVZ?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# • https://web-archive-org.translate.goog/web/20180807031320/http://www.gtamodding.ru/wiki/IMG?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto)
-# • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto - WRLD textures)
-# - Mod resources/cool stuff:
-# • https://gtaforums.com/topic/285544-gtavcslcs-modding/ (includes unimg.exe for Stories)
-# • https://github.com/electronicarts/RenderWare3Docs/blob/master/whitepapers/worlds.pdf (Leeds Worlds are based on RW Worlds)
-# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .MDL's, .WRLD's, .BSP's... )
-# • https://vk.com/video143954957_456239416 (Russian - Leeds Worlds explained)
-
-
-#######################################################
 def dbg(msg: str) -> None:
 
     try:
         print(msg)
     except Exception:
         pass
-
 
 def safe_decompress(data: bytes) -> bytes:
 
@@ -115,7 +77,6 @@ class MDLStripGroup:
 
 class MDLParser:
 
-    # VIF
     UNPACK = 0x6C018000
     STMASK = 0x20000000
     STROW  = 0x30000000
@@ -249,6 +210,7 @@ class MDLParser:
             verts.append(self.read_vec3_i16_norm(buf, off))
         w += need_bytes_pos
         w = (w + 3) & ~3
+
         if read_u32(buf, w) != self.STMASK:
             raise ValueError(f"Expected STMASK before texcoords at 0x{w:08X}")
         w += 8
@@ -268,6 +230,7 @@ class MDLParser:
             uvs.append(self.read_uv_u8_div128(buf, off))
         w += need_bytes_uv
         w = (w + 3) & ~3
+
         h_col = read_u32(buf, w)
         if (h_col & 0xFF004000) != 0x6F000000:
             raise ValueError(f"Unexpected colour header 0x{h_col:08X} at 0x{w:08X}")
@@ -283,6 +246,7 @@ class MDLParser:
             cols_rgba4444.append(self.decode_rgba4444(c16))
         w += need_bytes_col
         w = (w + 3) & ~3
+
         if read_u32(buf, w) != self.MSCAL:
             if w + 4 <= n and read_u32(buf, w + 4) == self.MSCAL:
                 w += 4
@@ -328,6 +292,7 @@ class MDLParser:
 
         if not mlist.materials or not groups:
             return
+
         flat: List[Tuple[TriStrip, int, int]] = []
         gstart = min(g.start_off for g in groups)
         for g in groups:
@@ -396,9 +361,10 @@ class MDLParser:
         mesh_name = f"{self.stem}_mdl{res_index}"
         me = bpy.data.meshes.new(mesh_name)
         me.from_pydata(vertices, [], faces)
-        me.use_auto_smooth = True
+        setMeshAutoSmooth(me, True)
         me.validate(clean_customdata=False)
         me.update()
+
         if uvs_list:
             uv_layer = me.uv_layers.new(name="UVMap")
             uv_data = uv_layer.data
@@ -409,6 +375,7 @@ class MDLParser:
                         u, v = uvs_list[vi]
                         uv_data[li + j].uv = (u, v)
         obj = bpy.data.objects.new(mesh_name, me)
+
         resid_to_slot: Dict[int, int] = {}
         for fr in face_ranges:
             mat_resid = fr[2]
@@ -417,6 +384,7 @@ class MDLParser:
                 if mat is not None:
                     obj.data.materials.append(mat)
                     resid_to_slot[mat_resid] = len(obj.data.materials) - 1
+
         if face_ranges:
             polys = obj.data.polygons
             for (pstart, pcount, mat_resid) in face_ranges:
@@ -441,47 +409,30 @@ class MDLParser:
                 mscal_count += 1
         return unpack_count, mscal_count
 
-# -----------------------------------------------------------------------------
-# Helper functions for reading binary data
-# -----------------------------------------------------------------------------
-
 def read_u16(data: bytes, offset: int) -> int:
     return struct.unpack_from("<H", data, offset)[0]
-
 
 def read_i16(data: bytes, offset: int) -> int:
     return struct.unpack_from("<h", data, offset)[0]
 
-
 def read_u32(data: bytes, offset: int) -> int:
     return struct.unpack_from("<I", data, offset)[0]
-
 
 def read_f32(data: bytes, offset: int) -> float:
     return struct.unpack_from("<f", data, offset)[0]
 
-
 def half_to_float(h: int) -> float:
-    """Convert a 16‑bit half precision float into a Python float."""
     return float(np.frombuffer(struct.pack("<H", h & 0xFFFF), dtype=np.float16)[0])
 
-
 def hexdump_bytes(b: bytes, max_len: int = 32) -> str:
-    """Return a string of hex bytes for logging."""
     n = min(len(b), max_len)
     return " ".join(f"{x:02X}" for x in b[:n])
 
-
-# -----------------------------------------------------------------------------
-# Image decoding
-# -----------------------------------------------------------------------------
 def expand_nibbles_lo_first(b: bytes) -> np.ndarray:
-    """Expand 4bpp (low nibble first) into 8bpp index array."""
     arr = np.frombuffer(b, dtype=np.uint8)
     lo = arr & 0x0F
     hi = arr >> 4
     return np.vstack([lo, hi]).T.reshape(-1)
-
 
 def log2_pow2(n: int) -> int:
     l = 0
@@ -489,7 +440,6 @@ def log2_pow2(n: int) -> int:
     while (1 << l) < v:
         l += 1
     return l
-
 
 def swizzle_ps2_addr(x: int, y: int, logw: int) -> int:
 
@@ -502,7 +452,6 @@ def swizzle_ps2_addr(x: int, y: int, logw: int) -> int:
     n = (Y1) | (X3 << 1)
     return (n | (nx << 2) | (ny << (logw - 1 + 2)))
 
-
 def unswizzle8_ps2_linearized(src: np.ndarray, w: int, h: int) -> np.ndarray:
 
     dst = np.empty(w * h, dtype=np.uint8)
@@ -513,7 +462,6 @@ def unswizzle8_ps2_linearized(src: np.ndarray, w: int, h: int) -> np.ndarray:
             dst[y * w + x] = src[s % src.size]
     return dst
 
-
 def apply_ps2_alpha_scale(palette_rgba: np.ndarray, do_scale: bool) -> np.ndarray:
     if not do_scale:
         return palette_rgba
@@ -522,7 +470,6 @@ def apply_ps2_alpha_scale(palette_rgba: np.ndarray, do_scale: bool) -> np.ndarra
     a = (a * 255 + 64) // 128
     pal[:, 3] = np.clip(a, 0, 255).astype(np.uint8)
     return pal
-
 
 def nearest_pow2(n: int) -> int:
 
@@ -533,7 +480,6 @@ def nearest_pow2(n: int) -> int:
     lower = 1 << (n.bit_length() - 1)
     upper = lower << 1
     return upper if (n - lower) > (upper - n) else lower
-
 
 def resize_indices_to_dims(idx2d: np.ndarray, new_w: int, new_h: int) -> np.ndarray:
 
@@ -552,7 +498,6 @@ def resize_indices_to_dims(idx2d: np.ndarray, new_w: int, new_h: int) -> np.ndar
         pad_w = new_w - w
         idx2d = np.pad(idx2d, ((0, 0), (0, pad_w)), mode='edge')
     return idx2d
-
 
 def choose_single_size_for_4bpp(index_len_bytes: int) -> tuple:
 
@@ -579,41 +524,38 @@ def choose_single_size_for_4bpp(index_len_bytes: int) -> tuple:
     if squares:
         squares.sort(key=lambda wh: abs(wh[0] - int(math.sqrt(total_pixels))))
         return squares[0]
+
     candidates.sort(key=lambda wh: (abs(wh[0] - wh[1]), -wh[0]))
     return candidates[0]
-
 
 def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
 
     img = bpy.data.images.new(name=name, width=w, height=h, alpha=True, float_buffer=False)
+
     flat = (rgba.astype(np.float32) / 255.0).reshape(-1, 4)
     img.pixels = flat.flatten().tolist()
     img.alpha_mode = 'STRAIGHT'
     img.pack()
     return img
 
-
 def create_material_from_image(img: bpy.types.Image, mat_name: str) -> bpy.types.Material:
 
     mat = bpy.data.materials.new(mat_name)
     mat.use_nodes = True
     nt = mat.node_tree
+
     for n in list(nt.nodes):
         nt.nodes.remove(n)
     out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (300, 0)
     principled = nt.nodes.new("ShaderNodeBsdfPrincipled"); principled.location = (0, 0)
     tex = nt.nodes.new("ShaderNodeTexImage"); tex.location = (-300, 0); tex.image = img
     nt.links.new(tex.outputs["Color"], principled.inputs["Base Color"])
+
     if img.has_data and "Alpha" in tex.outputs and "Alpha" in principled.inputs:
         nt.links.new(tex.outputs["Alpha"], principled.inputs["Alpha"])
         mat.blend_method = 'BLEND'
     nt.links.new(principled.outputs["BSDF"], out.inputs["Surface"])
     return mat
-
-
-# -----------------------------------------------------------------------------
-# Data classes for WRLD parsing
-# -----------------------------------------------------------------------------
 
 @dataclass
 class WorldHeader:
@@ -626,14 +568,12 @@ class WorldHeader:
     continuation: int
     reserved: int
 
-
 @dataclass
 class ExtendedHeader:
     res_table_addr: int
     res_count: int
     unknown_count: int
     sky_offsets: list
-
 
 @dataclass
 class ResourceEntry:
@@ -653,7 +593,6 @@ class ResourceEntry:
     note: str = ""
     mdl_info: dict | None = None
 
-
 def parse_world_header(data: bytes) -> WorldHeader:
     return WorldHeader(
         magic=data[0:4],
@@ -666,14 +605,12 @@ def parse_world_header(data: bytes) -> WorldHeader:
         reserved=read_u32(data, 28),
     )
 
-
 def parse_extended_header(data: bytes) -> ExtendedHeader:
     res_table_addr = read_u32(data, 0x20)
     res_count = read_u16(data, 0x24)
     unknown_count = read_u16(data, 0x26)
     sky_offsets = [read_u32(data, 0x28 + i * 4) for i in range(8)]
     return ExtendedHeader(res_table_addr, res_count, unknown_count, sky_offsets)
-
 
 def parse_resource_table(data: bytes, header: WorldHeader, ext: ExtendedHeader) -> list:
 
@@ -721,9 +658,7 @@ def parse_resource_table(data: bytes, header: WorldHeader, ext: ExtendedHeader) 
         )
     return entries
 
-
 def classify_entries(entries: list) -> None:
-    """Classify each entry as MDL or TEX_REF according to heuristics."""
     for e in entries:
         if e.b16 == 0 and e.a16 != 0:
             e.kind = "TEX_REF"
@@ -734,7 +669,6 @@ def classify_entries(entries: list) -> None:
             e.note = "mdl_or_other"
             e.mdl_info = None
 
-
 def decode_textures_for_entries(data: bytes, header: WorldHeader, entries: list, stem: str) -> None:
 
     return None
@@ -744,19 +678,10 @@ def get_or_create_collection(name: str) -> bpy.types.Collection:
     dbg(f"[world] get_or_create_collection called for '{name}', but this function is now in world_importer")
     return None
 
-# -----------------------------------------------------------------------------
-# MDL object builder
-# -----------------------------------------------------------------------------
-
 def build_mdl_objects(entries: list, resources: list, stem: str, collection: bpy.types.Collection = None, max_pairs_per_mdl: int = 4) -> None:
 
     dbg("[world] build_mdl_objects stub invoked; use world_importer for object creation")
     return None
-
-
-# -----------------------------------------------------------------------------
-# MDL geometry builder
-# -----------------------------------------------------------------------------
 
 def build_mdl_geometry(entries: list, data: bytes, stem: str, collection: bpy.types.Collection = None) -> None:
 
@@ -785,7 +710,7 @@ def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
             count = max_pairs
         count = min(count, max_pairs)
         pairs = []
- 
+
         for i in range(count):
             pos = start + 4 + i * 4
             if pos + 4 > n or pos + 4 > end:
@@ -802,7 +727,6 @@ def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
             "pairs": pairs,
         }
 
-#######################################################
 def log_and_import(path: str, decode_textures: bool = True, write_log: bool = True, build_models: bool = True) -> None:
 
     data = Path(path).read_bytes()
