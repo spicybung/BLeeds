@@ -47,4 +47,4 @@ This project is licensed under the GPL 3.0 License - see the [LICENSE](LICENSE) 
 - Special thanks to the Blender community and contributors.
 - The GTA modding community.
 - The GTA Mods Wiki & GTAModding Wiki(RIP)for being a huge considerate help in figuring things, such as data structures, out.
-- Daniel Sayanov, for his great help, knowledge in R* Leeds formats, as well as inspiration.
+- Daniel Sayanov, for his great help, knowledge in R* Leeds formats, as well as inspiration & motivation.
