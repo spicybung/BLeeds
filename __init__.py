@@ -80,7 +80,7 @@ def register_bleeds_mdl_object_props():
 
     if not hasattr(bpy.types.Object, "bleeds_model_game"):
         bpy.types.Object.bleeds_model_game = EnumProperty(
-            name="3D Models",
+            name="Models",
             description="Leeds 3D model family",
             items=[
                 ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),

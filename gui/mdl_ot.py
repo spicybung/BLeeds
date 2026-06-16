@@ -215,7 +215,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     )
 
     export_game: EnumProperty(
-        name="3D Models",
+        name="Models",
         description="Target Leeds 3D model family",
         items=(
             ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),

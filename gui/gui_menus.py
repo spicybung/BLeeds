@@ -79,7 +79,7 @@ class CW_MT_ExportChoice(Menu):
         layout = self.layout
         layout.operator(
             "export_scene.bleeds_stories_mdl",
-            text="R* Leeds: 3D Model (.mdl)",
+            text="R* Leeds: Model (.mdl)",
         )
         layout.operator(
             "export_scene.leeds_lvz_img",
