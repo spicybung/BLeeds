@@ -102,11 +102,11 @@ class TOPBAR_MT_file_import_bleeds(Menu):
         layout = self.layout
         layout.operator(
             "import_scene.bleeds_stories_mdl",
-            text="R* Leeds: 3D Model (.mdl)",
+            text="R* Leeds: Model (.mdl)",
         )
         layout.operator(
             "import_scene.leeds_anim",
-            text="R* Leeds: Ped Animation (.anim)",
+            text="R* Leeds: Animation (.anim)",
         )
         layout.operator(
             "import_scene.col2_leeds",
