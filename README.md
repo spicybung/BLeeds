@@ -44,7 +44,7 @@ Contributions are welcome! If you have suggestions, bug reports, or want to cont
 This project is licensed under the GPL 3.0 License - see the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
-- Special thanks to the Blender community and contributors.
+- Special thanks to the Blender community and contributors, for their open-source efforts.
 - The GTA modding community.
 - The GTA Mods Wiki & GTAModding Wiki(RIP)for being a huge considerate help in figuring things, such as data structures, out.
 - The_Hero(apa) for their incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
