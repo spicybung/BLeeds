@@ -22,8 +22,8 @@ The following is a list of file formats that are currently supported by the addo
 - [X] Map files (.wrld, .wbl)*
   - [X] Import
   - [x] Export *
-- [X] Animation files
-  - [X] Import *
+- [X] Animation files (.anim)*
+  - [X] Import 
   - [ ] Export
 
 * all of the above are currently experimental, meaning not all files have been tested yet.
