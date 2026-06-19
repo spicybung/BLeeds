@@ -39,6 +39,10 @@ The following is a list of file formats that are currently supported by the addo
 
 Contributions are welcome! If you have suggestions, bug reports, or want to contribute code, please check out the [Contributing Guidelines](CONTRIBUTING.md).
 
+## Documentation
+
+For documentation, visit the [Wiki](https://github.com/spicybung/bLeeds/wiki).
+
 ## License
 
 This project is licensed under the GPL 3.0 License - see the [LICENSE](LICENSE) file for details.
