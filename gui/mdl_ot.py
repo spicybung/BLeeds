@@ -19,8 +19,9 @@ from ..ops import mdl_importer
 from ..leedsLib import mdl as mdl_core
 from ..ops import tex_importer
 
+import os
 import bpy
-from bpy.types import Operator
+from bpy.types import Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import (
     IntProperty,
@@ -28,6 +29,7 @@ from bpy.props import (
     StringProperty,
     BoolProperty,
     EnumProperty,
+    CollectionProperty,
 )
 
 def resolve_export_defaults_from_root(context: bpy.types.Context) -> tuple[str, bool]:
@@ -66,7 +68,7 @@ def resolve_export_defaults_from_root(context: bpy.types.Context) -> tuple[str, 
 
 class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
     bl_idname = "import_scene.bleeds_stories_mdl"
-    bl_label = "Import SimpleModel"
+    bl_label = "Import Leeds MDL"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".mdl"
@@ -76,37 +78,52 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         maxlen=255,
     )
 
+    files: CollectionProperty(
+        name="Selected MDL files",
+        type=OperatorFileListElement,
+        options={"HIDDEN"},
+    )
+
+    directory: StringProperty(
+        name="Directory",
+        subtype="DIR_PATH",
+        options={"HIDDEN"},
+    )
+
     import_game: EnumProperty(
         name="Type",
         description="Leeds game family to import",
         items=(
+            ("AUTO", "Auto", "Auto-detect from the MDL header"),
             ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),
             ("VCS", "VCS", "Grand Theft Auto: Vice City Stories"),
             ("MH2", "MH2", "Manhunt 2"),
         ),
-        default="VCS",
+        default="AUTO",
     )
 
     platform: EnumProperty(
         name="Platform",
         description="Platform this Stories MDL was built for",
         items=(
+            ("AUTO", "Auto", "Auto-detect PS2 or PSP from the MDL header"),
             ("PS2", "PS2", "PlayStation 2 (Liberty City Stories / Vice City Stories)"),
             ("PSP", "PSP", "PlayStation Portable (Liberty City Stories / Vice City Stories)"),
         ),
-        default="PS2",
+        default="AUTO",
     )
 
     mdl_type: EnumProperty(
         name="Model Type",
         description="Whether this MDL is a ped/actor or a prop",
         items=(
+            ("AUTO", "Auto", "Auto-detect SimpleModel / PedModel / CutsceneModel / VehicleModel"),
             ("SIM", "SimpleModel", "Simple / prop model without bones"),
             ("PED", "PedModel / Actor", "Pedestrian / actor model with bones"),
             ("CUT", "CutsceneModel / Actor", "Cutscene / actor model with bones"),
             ("VEH", "VehicleModel", "Vehicle model"),
         ),
-        default="SIM",
+        default="AUTO",
     )
 
     import_texture: BoolProperty(
@@ -151,56 +168,129 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
         col.prop(self, "import_texture")
 
-    def execute(self, context):
-        filepath = self.filepath
-        collection_name = self.collection_name
+    def gatherImportFilepaths(self):
+        paths = []
+        directory = str(getattr(self, "directory", "") or "")
 
         try:
-            if self.import_game == "MH2":
-                mdl_core.import_mh2(
-                    path=filepath,
-                    context=context,
-                    collection_name=(collection_name or None),
-                )
-                self.report({"INFO"}, f"Imported MH2 MDL: {filepath}")
-                return {"FINISHED"}
+            selected_files = list(getattr(self, "files", []) or [])
+        except Exception:
+            selected_files = []
 
-            created_objects = mdl_importer.import_stories_mdl(
-                context=context,
-                filepath=filepath,
-                platform=self.platform,
-                mdl_type=self.mdl_type,
-                collection_name=collection_name,
-                create_armature=self.create_armature,
-                link_to_scene=self.link_to_scene,
-            )
+        if selected_files and directory:
+            for item in selected_files:
+                name = str(getattr(item, "name", "") or "")
+                if name:
+                    paths.append(os.path.join(directory, name))
 
-            if self.import_texture:
-                texture_platform = "ps2" if self.platform == "PS2" else "psp"
-                texture_path, texture_images, texture_matched, _texture_missing = tex_importer.import_sidecar_texture_for_mdl(
-                    mdl_path=filepath,
-                    imported_objects=created_objects,
-                    platform=texture_platform,
-                )
-                if texture_path is None:
-                    self.report({"WARNING"}, "Import Texture enabled, but no same-name .xtx/.chk/.tex was found beside the MDL.")
-                elif not texture_images:
-                    self.report({"WARNING"}, f"Import Texture enabled, but no textures decoded from: {texture_path}")
-                else:
-                    self.report({"INFO"}, f"Imported Leeds textures: {len(texture_images)} images, {texture_matched} materials matched.")
+        filepath = str(getattr(self, "filepath", "") or "")
+        if not paths and filepath:
+            if os.path.isdir(filepath):
+                for name in sorted(os.listdir(filepath)):
+                    if name.lower().endswith(".mdl"):
+                        paths.append(os.path.join(filepath, name))
+            else:
+                paths.append(filepath)
 
-            if created_objects:
-                for obj in created_objects:
-                    obj.select_set(True)
-                if created_objects[0] is not None:
-                    context.view_layer.objects.active = created_objects[0]
+        clean_paths = []
+        seen = set()
+        for path in paths:
+            if not path:
+                continue
+            norm = os.path.normpath(path)
+            key = os.path.normcase(norm)
+            if key in seen:
+                continue
+            seen.add(key)
+            clean_paths.append(norm)
+        return clean_paths
 
-            self.report({"INFO"}, f"Imported Stories MDL: {filepath}")
-            return {"FINISHED"}
+    def execute(self, context):
+        filepaths = self.gatherImportFilepaths()
+        collection_name = self.collection_name
 
-        except Exception as exc:
-            self.report({"ERROR"}, f"Failed to import MDL: {exc}")
+        if not filepaths:
+            self.report({"ERROR"}, "No MDL files selected.")
             return {"CANCELLED"}
+
+        missing_paths = [path for path in filepaths if not os.path.isfile(path)]
+        if missing_paths:
+            self.report({"ERROR"}, f"Selected path is not an MDL file: {missing_paths[0]}")
+            return {"CANCELLED"}
+
+        imported_count = 0
+        failed = []
+        all_created_objects = []
+
+        for filepath in filepaths:
+            try:
+                if self.import_game == "MH2":
+                    mdl_core.import_mh2(
+                        path=filepath,
+                        context=context,
+                        collection_name=(collection_name or None),
+                    )
+                    imported_count += 1
+                    continue
+
+                created_objects, detected = mdl_importer.import_stories_mdl_auto(
+                    context=context,
+                    filepath=filepath,
+                    import_game=self.import_game,
+                    platform=self.platform,
+                    mdl_type=self.mdl_type,
+                    collection_name=collection_name,
+                    create_armature=self.create_armature,
+                    link_to_scene=self.link_to_scene,
+                )
+
+                if self.import_texture:
+                    texture_platform = "ps2"
+                    if str(detected.get("platform", "PS2")).upper().strip() == "PSP":
+                        texture_platform = "psp"
+                    texture_path, texture_images, texture_matched, _texture_missing = tex_importer.import_sidecar_texture_for_mdl(
+                        mdl_path=filepath,
+                        imported_objects=created_objects,
+                        platform=texture_platform,
+                    )
+                    if texture_path is None:
+                        self.report({"WARNING"}, f"No same-name Leeds texture dictionary found beside: {os.path.basename(filepath)}")
+                    elif not texture_images:
+                        self.report({"WARNING"}, f"No textures decoded from: {texture_path}")
+                    else:
+                        self.report({"INFO"}, f"{os.path.basename(filepath)}: imported {len(texture_images)} texture images, {texture_matched} materials matched.")
+
+                all_created_objects.extend(created_objects)
+                imported_count += 1
+
+            except Exception as exc:
+                failed.append((filepath, str(exc)))
+
+        if all_created_objects:
+            try:
+                bpy.ops.object.select_all(action="DESELECT")
+            except Exception:
+                pass
+            for obj in all_created_objects:
+                try:
+                    obj.select_set(True)
+                except Exception:
+                    pass
+            try:
+                context.view_layer.objects.active = all_created_objects[-1]
+            except Exception:
+                pass
+
+        if failed:
+            first_path, first_error = failed[0]
+            if imported_count > 0:
+                self.report({"WARNING"}, f"Imported {imported_count} MDL(s), failed {len(failed)}. First failure: {os.path.basename(first_path)}: {first_error}")
+                return {"FINISHED"}
+            self.report({"ERROR"}, f"Failed to import MDL: {os.path.basename(first_path)}: {first_error}")
+            return {"CANCELLED"}
+
+        self.report({"INFO"}, f"Imported {imported_count} MDL(s).")
+        return {"FINISHED"}
 
 class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_stories_mdl"
@@ -215,7 +305,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     )
 
     export_game: EnumProperty(
-        name="Models",
+        name="3D Models",
         description="Target Leeds 3D model family",
         items=(
             ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),

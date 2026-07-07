@@ -27,7 +27,7 @@ from ..ops import lvz_img_importer
 class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_lvz_img"
     bl_label = "Import LVZ + IMG"
-    bl_options = {'REGISTER', 'UNDO'}
+    bl_options = {'REGISTER'}
 
     filename_ext = ".lvz"
 
@@ -39,9 +39,14 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         name="Apply IMG transforms to MDL objects",
         default=True
     )
+    import_img_container_mdls: BoolProperty(
+        name="Loose IMG container MDLs (debug)",
+        description="Raw LVZ-referenced IMG container payload parse for inspection only. Leave off for world import; structured IMG resource-table MDLs are still parsed and placed.",
+        default=False
+    )
     debug_print: BoolProperty(
         name="Debug print",
-        default=True
+        default=False
     )
     write_debug_log: BoolProperty(
         name="Write debug log next to LVZ",
@@ -54,6 +59,15 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         maxlen=255,
     )
 
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "csv_dedup_res_ids")
+        layout.prop(self, "apply_img_transforms")
+        layout.prop(self, "import_img_container_mdls")
+        layout.separator()
+        layout.prop(self, "debug_print")
+        layout.prop(self, "write_debug_log")
+
     def execute(self, context):
         return lvz_img_importer.import_lvz_img_archive(
             operator=self,
@@ -63,6 +77,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
             apply_img_transforms=self.apply_img_transforms,
             debug_print=self.debug_print,
             write_debug_log=self.write_debug_log,
+            import_img_container_mdls=self.import_img_container_mdls,
         )
 
 class EXPORT_SCENE_OT_stories_lvz_img(Operator, ExportHelper):

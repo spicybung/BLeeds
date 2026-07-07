@@ -24,6 +24,7 @@ import bpy
 from mathutils import Matrix, Vector
 
 from ..leedsLib import mdl as stories_mdl
+from ..leedsLib import lvz_img as embedded_mdl
 from ..compat import ensureMeshAttribute, getMeshAttribute, removeMeshAttribute, getOrCreateCornerColorLayer, setActiveObject, safeSelectObject
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
@@ -2458,6 +2459,590 @@ def build_stories_armature_from_frame_mats(
         print(f"Created armature '{armature_name}' with {len(bones_by_ptr)} bones")
 
     return armature_obj
+
+
+def readU32FromBytes(data: bytes, offset: int, default: int = 0) -> int:
+    if offset < 0 or offset + 4 > len(data):
+        return int(default)
+    return int(struct.unpack_from("<I", data, offset)[0])
+
+def isKnownStoriesTopMagic(value: int) -> bool:
+    known = {
+        0x00000002,
+        0x0000AA02,
+        0x01050001,
+        0x01000001,
+        0x0004AA01,
+        0x0000AA01,
+        0x00041601,
+        0x01F40400,
+    }
+    return int(value) in known
+
+def classifyStoriesTopMagic(value: int) -> Tuple[str, str, str]:
+    value = int(value)
+    if value in {0x01050001, 0x01000001}:
+        return ("LCS", "PS2", "ATOMIC")
+    if value in {0x0004AA01, 0x0000AA01}:
+        return ("VCS", "PS2", "ATOMIC")
+    if value == 0x0000AA02:
+        return ("VCS", "PS2", "CLUMP")
+    if value == 0x00000002:
+        return ("LCS", "PS2", "CLUMP")
+    if value in {0x00041601, 0x01F40400}:
+        return ("VCS", "PSP", "ATOMIC")
+    return ("", "", "")
+
+def probeStoriesHeaderForPlatform(data: bytes, platform: str) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "platform": str(platform).upper().strip(),
+        "top_level_ptr": 0,
+        "top_magic": 0,
+        "game": "",
+        "section_kind": "",
+        "allocated_memory": 0,
+        "possible_ptr": 0,
+        "ok": False,
+    }
+
+    if len(data) < 0x28 or data[:4] != b"ldm\x00":
+        return result
+
+    file_len_header = readU32FromBytes(data, 0x08)
+    file_len = len(data)
+    if 0 < file_len_header <= len(data):
+        file_len = int(file_len_header)
+
+    local_num_table = readU32FromBytes(data, 0x0C)
+    global_num_table = readU32FromBytes(data, 0x10)
+
+    is_psp = str(platform).upper().strip() == "PSP"
+    cursor = 0x14
+    if is_psp:
+        cursor -= 4
+
+    if global_num_table == local_num_table + 4:
+        pass
+    else:
+        cursor -= 4
+        cursor += 4
+        if is_psp:
+            cursor += 4
+
+    cursor += 4
+    cursor += 4
+    allocated_memory = readU32FromBytes(data, cursor)
+    cursor += 4
+    next_ptr_offset = cursor
+    possible_ptr = readU32FromBytes(data, cursor)
+
+    result["allocated_memory"] = int(allocated_memory)
+    result["possible_ptr"] = int(possible_ptr)
+
+    inline_magic = possible_ptr in {
+        0x00000002,
+        0x0000AA02,
+        0x01050001,
+        0x01000001,
+        0x0004AA01,
+        0x0000AA01,
+    }
+
+    top_level_ptr = 0
+    if next_ptr_offset == 0x20 and int(allocated_memory) == 0 and inline_magic:
+        top_level_ptr = next_ptr_offset
+    elif 0 <= possible_ptr <= file_len - 4 and isKnownStoriesTopMagic(readU32FromBytes(data, possible_ptr)):
+        top_level_ptr = possible_ptr
+    elif isKnownStoriesTopMagic(possible_ptr):
+        top_level_ptr = next_ptr_offset
+    elif 0 <= possible_ptr <= file_len - 4:
+        pointed_value = readU32FromBytes(data, possible_ptr)
+        if isKnownStoriesTopMagic(pointed_value):
+            top_level_ptr = possible_ptr
+
+    if not (0 <= top_level_ptr <= file_len - 4):
+        return result
+
+    top_magic = readU32FromBytes(data, top_level_ptr)
+    game, detected_platform, section_kind = classifyStoriesTopMagic(top_magic)
+    if not game:
+        return result
+
+    result.update({
+        "top_level_ptr": int(top_level_ptr),
+        "top_magic": int(top_magic),
+        "game": str(game),
+        "platform": str(detected_platform or platform).upper().strip(),
+        "section_kind": str(section_kind),
+        "ok": True,
+    })
+    return result
+
+
+def getOrCreateRawEmbeddedMdlCollection(context: bpy.types.Context, collection_name: str):
+    name = str(collection_name or "").strip()
+    if not name:
+        try:
+            return context.scene.collection
+        except Exception:
+            return bpy.context.scene.collection
+    try:
+        existing = bpy.data.collections.get(name)
+        if existing is not None:
+            return existing
+    except Exception:
+        existing = None
+    collection = bpy.data.collections.new(name)
+    try:
+        context.scene.collection.children.link(collection)
+    except Exception:
+        try:
+            bpy.context.scene.collection.children.link(collection)
+        except Exception:
+            pass
+    return collection
+
+def looksLikeRawEmbeddedStoriesMdl(data: bytes) -> bool:
+    if not data or len(data) < 0x20:
+        return False
+    if data[:4] == b"ldm\x00":
+        return False
+    parser = embedded_mdl.read_lvz(data, "Beach", False, False)
+    try:
+        mlist = parser.parse_mdl_material_list(0, max_end=len(data))
+        groups, after = parser.parse_mdl_geometry_after_list(mlist, max_end=len(data))
+        if not groups:
+            return False
+        vertex_count = 0
+        face_count = 0
+        for group in groups:
+            for strip in getattr(group, "strips", []) or []:
+                count = min(len(getattr(strip, "verts", []) or []), len(getattr(strip, "uvs", []) or []), int(getattr(strip, "count", 0) or 0))
+                if count >= 3:
+                    vertex_count += count
+                    face_count += count - 2
+        return vertex_count > 0 and face_count > 0
+    except Exception:
+        return False
+
+def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: str, groups, collection_name: str, detected: Dict[str, Any]) -> List[bpy.types.Object]:
+    name = os.path.splitext(os.path.basename(filepath))[0]
+    vertices: List[Tuple[float, float, float]] = []
+    uvs: List[Tuple[float, float]] = []
+    colors: List[Tuple[float, float, float, float]] = []
+    faces: List[Tuple[int, int, int]] = []
+    face_material_ids: List[int] = []
+    material_ids: List[int] = []
+
+    for group in groups:
+        for strip in getattr(group, "strips", []) or []:
+            count = min(len(getattr(strip, "verts", []) or []), len(getattr(strip, "uvs", []) or []), int(getattr(strip, "count", 0) or 0))
+            if count < 3:
+                continue
+            material_id = int(getattr(strip, "material_res_index", -1) or -1)
+            if material_id not in material_ids:
+                material_ids.append(material_id)
+            material_slot = material_ids.index(material_id)
+            base = len(vertices)
+            vertices.extend(list(strip.verts[:count]))
+            uvs.extend(list(strip.uvs[:count]))
+            raw_colors = list(getattr(strip, "cols_rgba4444", []) or [])
+            for i in range(count):
+                if i < len(raw_colors):
+                    r, g, b, a = raw_colors[i]
+                    colors.append((float(r) / 255.0, float(g) / 255.0, float(b) / 255.0, float(a) / 255.0))
+                else:
+                    colors.append((1.0, 1.0, 1.0, 1.0))
+            for i in range(count - 2):
+                if i & 1:
+                    faces.append((base + i + 1, base + i, base + i + 2))
+                else:
+                    faces.append((base + i, base + i + 1, base + i + 2))
+                face_material_ids.append(material_slot)
+
+    if not vertices or not faces:
+        raise RuntimeError(f"Raw embedded MDL produced no mesh: {os.path.basename(filepath)}")
+
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(vertices, [], faces)
+    setMeshAutoSmoothIfAvailable(mesh)
+    mesh.validate(clean_customdata=False)
+    mesh.update()
+
+    if uvs:
+        uv_layer = mesh.uv_layers.new(name="UVMap")
+        for polygon in mesh.polygons:
+            loop_start = polygon.loop_start
+            for loop_offset, vertex_index in enumerate(polygon.vertices):
+                if vertex_index < len(uvs):
+                    uv_layer.data[loop_start + loop_offset].uv = uvs[vertex_index]
+
+    if colors:
+        try:
+            color_layer = getOrCreateCornerColorLayer(mesh, "Color")
+            for polygon in mesh.polygons:
+                loop_start = polygon.loop_start
+                for loop_offset, vertex_index in enumerate(polygon.vertices):
+                    if vertex_index < len(colors):
+                        color_layer.data[loop_start + loop_offset].color = colors[vertex_index]
+        except Exception:
+            pass
+
+    obj = bpy.data.objects.new(name, mesh)
+    collection = getOrCreateRawEmbeddedMdlCollection(context, collection_name)
+    try:
+        collection.objects.link(obj)
+    except Exception:
+        bpy.context.scene.collection.objects.link(obj)
+
+    for material_id in material_ids:
+        mat_name = f"texRES_{material_id}" if material_id >= 0 else "texRES_none"
+        mat = MATERIAL_CACHE.get(mat_name)
+        if mat is None:
+            mat = bpy.data.materials.new(mat_name)
+            MATERIAL_CACHE[mat_name] = mat
+        obj.data.materials.append(mat)
+    for polygon_index, material_slot in enumerate(face_material_ids):
+        if polygon_index < len(obj.data.polygons):
+            obj.data.polygons[polygon_index].material_index = int(material_slot)
+
+    obj["bleeds_mdl_auto_detected"] = True
+    obj["bleeds_mdl_detected_game"] = str(detected.get("game", "VCS") or "VCS")
+    obj["bleeds_mdl_detected_platform"] = str(detected.get("platform", "PS2") or "PS2")
+    obj["bleeds_mdl_detected_type"] = "RAW_EMBEDDED_MDL"
+    obj["bleeds_mdl_raw_embedded"] = True
+    obj["bleeds_mdl_source_file"] = os.path.basename(filepath)
+    obj["blds_kind"] = "MDL"
+    try:
+        obj["blds_res_index"] = int("".join(ch for ch in name if ch.isdigit()) or -1)
+    except Exception:
+        obj["blds_res_index"] = -1
+    obj["blds_groups"] = int(len(groups))
+    obj["blds_faces"] = int(len(faces))
+    obj["blds_verts"] = int(len(vertices))
+    return [obj]
+
+def setMeshAutoSmoothIfAvailable(mesh: bpy.types.Mesh) -> None:
+    try:
+        from ..compat import setMeshAutoSmooth
+        setMeshAutoSmooth(mesh, True)
+    except Exception:
+        pass
+
+def importRawEmbeddedStoriesMdl(
+    context: bpy.types.Context,
+    filepath: str,
+    import_game: str,
+    platform: str,
+    collection_name: str,
+    link_to_scene: bool,
+) -> Tuple[List[bpy.types.Object], Dict[str, Any]]:
+    with open(filepath, "rb") as f:
+        data = f.read()
+    parser = embedded_mdl.read_lvz(data, os.path.splitext(os.path.basename(filepath))[0], False, False)
+    mlist = parser.parse_mdl_material_list(0, max_end=len(data))
+    groups, after = parser.parse_mdl_geometry_after_list(mlist, max_end=len(data))
+    parser.assign_materials_by_strip_bytes(mlist, groups)
+    vertex_count = 0
+    face_count = 0
+    for group in groups:
+        for strip in getattr(group, "strips", []) or []:
+            count = min(len(getattr(strip, "verts", []) or []), len(getattr(strip, "uvs", []) or []), int(getattr(strip, "count", 0) or 0))
+            if count >= 3:
+                vertex_count += count
+                face_count += count - 2
+    if vertex_count <= 0 or face_count <= 0:
+        raise RuntimeError(f"Raw embedded MDL produced no geometry: {os.path.basename(filepath)}")
+
+    detected = {
+        "game": str(import_game or "VCS").upper().strip() if str(import_game or "AUTO").upper().strip() != "AUTO" else "VCS",
+        "platform": str(platform or "PS2").upper().strip() if str(platform or "AUTO").upper().strip() != "AUTO" else "PS2",
+        "mdl_type": "RAW_EMBEDDED_MDL",
+        "format": str(getattr(mlist, "format_tag", "")),
+        "material_count": int(getattr(mlist, "count", 0) or 0),
+        "part_count": int(len(groups)),
+        "vertex_count": int(vertex_count),
+        "face_count": int(face_count),
+        "score": 200000 + int(vertex_count) + int(face_count),
+    }
+    objects = buildRawEmbeddedStoriesMdlMeshObject(context, filepath, groups, collection_name, detected)
+    print(
+        f"[mdl-auto] {os.path.basename(filepath)} -> raw embedded WRLD MDL "
+        f"format={detected['format']} verts={vertex_count} faces={face_count} materials={detected['material_count']}"
+    )
+    return objects, detected
+
+def probeStoriesMdlHeader(filepath: str) -> Dict[str, Any]:
+    with open(filepath, "rb") as f:
+        data = f.read()
+
+    if len(data) < 0x28 or data[:4] != b"ldm\x00":
+        raise ValueError("Invalid Stories MDL header")
+
+    probes = [probeStoriesHeaderForPlatform(data, "PS2"), probeStoriesHeaderForPlatform(data, "PSP")]
+    ok_probes = [probe for probe in probes if bool(probe.get("ok"))]
+    if ok_probes:
+        ok_probes.sort(key=lambda probe: 0 if probe.get("platform") == "PS2" else 1)
+        return ok_probes[0]
+
+    return {
+        "platform": "PS2",
+        "game": "",
+        "section_kind": "",
+        "top_level_ptr": 0,
+        "top_magic": 0,
+        "ok": False,
+    }
+
+def countStoriesContextGeometry(ctx: Any) -> Tuple[int, int, int, int]:
+    atomics = []
+    try:
+        atomics = list(getattr(ctx, "atomics", []) or [])
+    except Exception:
+        atomics = []
+    if not atomics:
+        try:
+            atomics = [getattr(ctx, "atomic", None)]
+        except Exception:
+            atomics = []
+
+    part_count = 0
+    vertex_count = 0
+    face_count = 0
+    material_count = 0
+
+    for atomic in atomics:
+        if atomic is None:
+            continue
+        ps2_geometry = getattr(atomic, "ps2_geometry", None)
+        if ps2_geometry is not None:
+            try:
+                materials = list(getattr(ps2_geometry, "materials", []) or [])
+                material_count += len(materials)
+            except Exception:
+                pass
+            try:
+                parts = list(getattr(ps2_geometry, "parts", []) or [])
+                part_count += len(parts)
+                for part in parts:
+                    vertex_count += len(getattr(part, "verts", []) or [])
+                    face_count += len(getattr(part, "faces", []) or [])
+            except Exception:
+                pass
+        psp_geometry = getattr(atomic, "psp_geometry", None)
+        if psp_geometry is not None:
+            try:
+                materials = list(getattr(psp_geometry, "materials", []) or [])
+                material_count += len(materials)
+            except Exception:
+                pass
+            try:
+                meshes = list(getattr(psp_geometry, "meshes", []) or [])
+                part_count += len(meshes)
+                for mesh in meshes:
+                    vertex_count += len(getattr(mesh, "verts", []) or [])
+                    face_count += len(getattr(mesh, "faces", []) or [])
+            except Exception:
+                pass
+
+    return (int(part_count), int(vertex_count), int(face_count), int(material_count))
+
+def scoreStoriesAutoContext(ctx: Any, platform: str, mdl_type: str, probe: Dict[str, Any]) -> int:
+    part_count, vertex_count, face_count, material_count = countStoriesContextGeometry(ctx)
+    score = 0
+    if vertex_count > 0:
+        score += 100000
+    if face_count > 0:
+        score += 100000
+    score += min(vertex_count, 50000)
+    score += min(face_count, 50000)
+    score += part_count * 50
+    score += material_count * 20
+
+    import_type = int(getattr(ctx, "import_type", 0) or 0)
+    detected_game = str(probe.get("game", "") or "").upper().strip()
+    if detected_game == "LCS" and import_type == 1:
+        score += 1000
+    if detected_game == "VCS" and import_type in {2, 3}:
+        score += 1000
+
+    section_kind = str(probe.get("section_kind", "") or "").upper().strip()
+    mdl_type_u = str(mdl_type or "").upper().strip()
+    if section_kind == "ATOMIC" and mdl_type_u == "SIM":
+        score += 500
+    if section_kind == "CLUMP" and mdl_type_u in {"PED", "CUT", "VEH"}:
+        score += 250
+    if str(platform).upper().strip() == str(probe.get("platform", "") or "").upper().strip():
+        score += 250
+
+    try:
+        atomic = getattr(ctx, "atomic", None)
+        geom_ptr = int(getattr(atomic, "geom_ptr", 0) or 0)
+        if 0 < geom_ptr < int(getattr(ctx, "file_len", 0) or 0):
+            score += 500
+    except Exception:
+        pass
+
+    return int(score)
+
+def buildStoriesAutoCandidates(filepath: str, import_game: str, platform: str, mdl_type: str) -> List[Tuple[str, str]]:
+    import_game_u = str(import_game or "AUTO").upper().strip()
+    platform_u = str(platform or "AUTO").upper().strip()
+    mdl_type_u = str(mdl_type or "AUTO").upper().strip()
+
+    probe = probeStoriesMdlHeader(filepath)
+    preferred_platform = str(probe.get("platform", "PS2") or "PS2").upper().strip()
+    section_kind = str(probe.get("section_kind", "") or "").upper().strip()
+
+    platforms = []
+    if platform_u in {"PS2", "PSP"}:
+        platforms = [platform_u]
+    else:
+        platforms = [preferred_platform]
+        for candidate_platform in ("PS2", "PSP"):
+            if candidate_platform not in platforms:
+                platforms.append(candidate_platform)
+
+    if mdl_type_u in {"SIM", "PED", "CUT", "VEH"}:
+        mdl_types = [mdl_type_u]
+    elif section_kind == "ATOMIC":
+        mdl_types = ["SIM", "PED", "CUT", "VEH"]
+    elif section_kind == "CLUMP":
+        mdl_types = ["PED", "CUT", "VEH", "SIM"]
+    else:
+        mdl_types = ["SIM", "PED", "CUT", "VEH"]
+
+    candidates: List[Tuple[str, str]] = []
+    for candidate_platform in platforms:
+        for candidate_type in mdl_types:
+            pair = (candidate_platform, candidate_type)
+            if pair not in candidates:
+                candidates.append(pair)
+
+    return candidates
+
+def detectStoriesMdlImportSettings(filepath: str, import_game: str = "AUTO", platform: str = "AUTO", mdl_type: str = "AUTO") -> Dict[str, Any]:
+    probe = probeStoriesMdlHeader(filepath)
+    candidates = buildStoriesAutoCandidates(filepath, import_game, platform, mdl_type)
+    failures = []
+    scored = []
+
+    for candidate_platform, candidate_type in candidates:
+        try:
+            reader = stories_mdl.read_stories(filepath, candidate_platform, candidate_type)
+            ctx = reader.read()
+            score = scoreStoriesAutoContext(ctx, candidate_platform, candidate_type, probe)
+            part_count, vertex_count, face_count, material_count = countStoriesContextGeometry(ctx)
+            scored.append({
+                "platform": candidate_platform,
+                "mdl_type": candidate_type,
+                "score": int(score),
+                "part_count": int(part_count),
+                "vertex_count": int(vertex_count),
+                "face_count": int(face_count),
+                "material_count": int(material_count),
+                "import_type": int(getattr(ctx, "import_type", 0) or 0),
+            })
+        except Exception as exc:
+            failures.append(f"{candidate_platform}/{candidate_type}: {exc}")
+
+    if not scored:
+        failure_text = "; ".join(failures[:6]) if failures else "no parser candidates were attempted"
+        raise RuntimeError(f"Auto MDL detection failed for {os.path.basename(filepath)}: {failure_text}")
+
+    scored.sort(key=lambda item: int(item.get("score", 0)), reverse=True)
+    best = scored[0]
+    if int(best.get("vertex_count", 0)) <= 0 and int(best.get("face_count", 0)) <= 0:
+        failure_text = "; ".join(failures[:4]) if failures else "all candidates produced empty geometry"
+        raise RuntimeError(f"Auto MDL detection produced no geometry for {os.path.basename(filepath)}: {failure_text}")
+
+    game = str(probe.get("game", "") or "").upper().strip()
+    if not game:
+        import_type = int(best.get("import_type", 0) or 0)
+        if import_type == 1:
+            game = "LCS"
+        elif import_type in {2, 3}:
+            game = "VCS"
+
+    result = dict(best)
+    result["game"] = game or str(import_game or "AUTO").upper().strip()
+    result["probe"] = dict(probe)
+    result["candidates"] = scored
+    return result
+
+def import_stories_mdl_auto(
+    context: bpy.types.Context,
+    filepath: str,
+    import_game: str,
+    platform: str,
+    mdl_type: str,
+    collection_name: str,
+    create_armature: bool,
+    link_to_scene: bool,
+) -> Tuple[List[bpy.types.Object], Dict[str, Any]]:
+    import_game_u = str(import_game or "AUTO").upper().strip()
+    platform_u = str(platform or "AUTO").upper().strip()
+    mdl_type_u = str(mdl_type or "AUTO").upper().strip()
+
+    try:
+        with open(filepath, "rb") as raw_probe_file:
+            raw_probe = raw_probe_file.read(0x4000)
+        if raw_probe[:4] != b"ldm\x00" and looksLikeRawEmbeddedStoriesMdl(raw_probe if len(raw_probe) < 0x4000 else open(filepath, "rb").read()):
+            return importRawEmbeddedStoriesMdl(
+                context=context,
+                filepath=filepath,
+                import_game=import_game_u,
+                platform=platform_u,
+                collection_name=collection_name,
+                link_to_scene=link_to_scene,
+            )
+    except Exception:
+        pass
+
+    if platform_u != "AUTO" and mdl_type_u != "AUTO":
+        detected = {
+            "game": import_game_u,
+            "platform": platform_u,
+            "mdl_type": mdl_type_u,
+            "score": 0,
+            "part_count": 0,
+            "vertex_count": 0,
+            "face_count": 0,
+            "material_count": 0,
+        }
+    else:
+        detected = detectStoriesMdlImportSettings(filepath, import_game=import_game_u, platform=platform_u, mdl_type=mdl_type_u)
+
+    detected_platform = str(detected.get("platform", platform_u if platform_u != "AUTO" else "PS2") or "PS2").upper().strip()
+    detected_mdl_type = str(detected.get("mdl_type", mdl_type_u if mdl_type_u != "AUTO" else "SIM") or "SIM").upper().strip()
+
+    created_objects = import_stories_mdl(
+        context=context,
+        filepath=filepath,
+        platform=detected_platform,
+        mdl_type=detected_mdl_type,
+        collection_name=collection_name,
+        create_armature=create_armature,
+        link_to_scene=link_to_scene,
+    )
+
+    for obj in created_objects:
+        try:
+            obj["bleeds_mdl_auto_detected"] = True
+            obj["bleeds_mdl_detected_game"] = str(detected.get("game", "") or "")
+            obj["bleeds_mdl_detected_platform"] = detected_platform
+            obj["bleeds_mdl_detected_type"] = detected_mdl_type
+            obj["bleeds_mdl_detected_score"] = int(detected.get("score", 0) or 0)
+        except Exception:
+            pass
+
+    print(
+        f"[mdl-auto] {os.path.basename(filepath)} -> "
+        f"game={detected.get('game', '') or '?'} platform={detected_platform} type={detected_mdl_type} "
+        f"verts={int(detected.get('vertex_count', 0) or 0)} faces={int(detected.get('face_count', 0) or 0)}"
+    )
+
+    return created_objects, detected
 
 def import_stories_mdl(
     context: bpy.types.Context,

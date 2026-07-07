@@ -16,6 +16,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import struct
+import os
 import zlib
 import time
 import math
@@ -65,20 +66,79 @@ class DebugOut:
         self.write_file = write_file
         self.file_path = file_path
         self._buf: List[str] = []
+        self._line_count = 0
+        self._fh = None
+        if self.write_file and self.file_path:
+            self._open_live_log()
+
+    def _open_live_log(self):
+        paths = []
+        if self.file_path:
+            paths.append(Path(self.file_path))
+            try:
+                paths.append(Path.cwd() / Path(self.file_path).name)
+            except Exception:
+                pass
+            try:
+                paths.append(Path.home() / "Desktop" / Path(self.file_path).name)
+            except Exception:
+                pass
+        tried = set()
+        for path in paths:
+            try:
+                path = Path(path)
+                key = str(path).lower()
+                if key in tried:
+                    continue
+                tried.add(key)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                self._fh = path.open("w", encoding="utf-8", buffering=1)
+                self.file_path = str(path)
+                return
+            except Exception as e:
+                print(f"[log] failed to open '{path}': {e}")
+        self.write_file = False
+        self._fh = None
 
     def log(self, msg: str):
         if self.enable_console:
             print(msg)
         if self.write_file:
-            self._buf.append(msg)
+            self._line_count += 1
+            if self._fh is not None:
+                try:
+                    self._fh.write(str(msg) + "\n")
+                    self._fh.flush()
+                except Exception as e:
+                    print(f"[log] live write failed '{self.file_path}': {e}")
+                    try:
+                        self._fh.close()
+                    except Exception:
+                        pass
+                    self._fh = None
+                    self._buf.append(msg)
+            else:
+                self._buf.append(msg)
 
     def flush(self):
         if not self.write_file or not self.file_path:
             return
         try:
+            if self._fh is not None:
+                self._fh.flush()
+                return
             Path(self.file_path).write_text("\n".join(self._buf), encoding="utf-8")
         except Exception as e:
             print(f"[log] failed to write '{self.file_path}': {e}")
+
+    def close(self):
+        self.flush()
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = None
 
 DEBUG: Optional[DebugOut] = None
 def dbg(msg: str):
@@ -92,6 +152,7 @@ LVZ_MAX_RESOURCE_ROWS = 200000
 LVZ_MAX_TEXTURE_BLOB_BYTES = (2 * 1024 * 1024) + 64
 LVZ_DIRECT_TEXTURE_HEADER_BYTES = 16
 LVZ_DIRECT_TEXTURE_PALETTE_BYTES = 64
+LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP = 1024
 LVZ_MAX_TEXTURE_DIMENSION = 2048
 LVZ_MAX_TEXTURE_PIXELS = LVZ_MAX_TEXTURE_DIMENSION * LVZ_MAX_TEXTURE_DIMENSION
 LVZ_MAX_IMG_ROWS_PER_CONTAINER = 200000
@@ -99,6 +160,10 @@ LVZ_MAX_MDL_BATCHES_PER_RESOURCE = 512
 LVZ_MAX_MDL_VERTICES_PER_BATCH = 8192
 LVZ_MAX_MDL_VERTICES_PER_OBJECT = 250000
 LVZ_MAX_VERBOSE_VERTEX_LOGS_PER_MDL = 512
+LVZ_UNPACK_SEARCH_WINDOW = 0x90
+LVZ_UNPACK_ALIGN_LOG_LIMIT = 120
+LVZ_UNPACK_NEXT_SELF_LOOP_LOG_LIMIT = 80
+LVZ_OVERLAY_RESOURCE_BOUND_LOG_LIMIT = 120
 LVZ_MIN_RESOURCE_CANDIDATE_ADDR = 0x40
 
 IMG_PASS_NAMES_VCS = (
@@ -120,6 +185,9 @@ IMG_PASS_NAMES_LCS = (
     "LIGHTS",
     "TRANSPARENT",
 )
+# V48 / V79 behavior restored:
+# LIGHTS is a WRLD IPL placement pass here, not a 2DFX table.  Dropping it
+# removes real mesh/light-card placements and creates visible holes.
 IMG_VISIBLE_PASS_NAMES_DEFAULT = {
     "UNDERWATER",
     "ROADS",
@@ -128,6 +196,8 @@ IMG_VISIBLE_PASS_NAMES_DEFAULT = {
     "LIGHTS",
     "TRANSPARENT",
 }
+IMG_MODEL_PASS_NAMES_DEFAULT = set(IMG_VISIBLE_PASS_NAMES_DEFAULT)
+IMG_NON_MODEL_PASS_NAMES = set()
 IMG_LOD_PASS_NAMES = {"SUPERLOD", "LOD"}
 
 def read_u32(b: bytes, o: int) -> int:
@@ -1273,9 +1343,75 @@ class read_lvz:
         stream_guess = list_end
         while stream_guess < n and lvz[stream_guess] == 0xAA and stream_guess - addr < 0x1000:
             stream_guess += 1
-        stream_guess = align_down4(stream_guess)
+        stream_guess = align_up4(stream_guess)
         unpack_bytes = struct.pack("<I", self.UNPACK)
         return lvz.find(unpack_bytes, max(addr, stream_guess - 0x10), min(n, stream_guess + 0x100)) >= 0
+
+    def expected_ps2_material_size16(self, count: int, row_len: int) -> int:
+        try:
+            total = (4 + (int(count) * int(row_len)) + 15) & ~15
+            return int(total - 4)
+        except Exception:
+            return -1
+
+    def _log_mdl_descriptor_alignment(self, requested_off: int, found_off: int):
+        if int(requested_off) == int(found_off):
+            return
+        try:
+            count = int(getattr(self, "_mdl_descriptor_align_log_count", 0))
+        except Exception:
+            count = 0
+        if count < 96:
+            try:
+                dbg(
+                    f"[descriptor-align] MDL descriptor pointer adjusted "
+                    f"0x{int(requested_off):08X}->0x{int(found_off):08X} "
+                    f"delta={int(found_off) - int(requested_off):+d}"
+                )
+            except Exception:
+                pass
+        elif count == 96:
+            try:
+                dbg("[descriptor-align] further MDL descriptor pointer adjustment logs suppressed")
+            except Exception:
+                pass
+        try:
+            setattr(self, "_mdl_descriptor_align_log_count", count + 1)
+        except Exception:
+            pass
+
+    def find_mdl_material_list_start_near(self, addr: int, max_end: Optional[int] = None) -> Optional[int]:
+        lvz = self.decomp
+        n = len(lvz) if max_end is None else min(len(lvz), max(0, int(max_end)))
+        try:
+            addr = int(addr)
+        except Exception:
+            return None
+        if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr + 8 > n:
+            return None
+
+        # Resource-table cursors in the IMG sometimes point at a tiny resource
+        # header before the material descriptor table.  Do not scan for UNPACK
+        # from that cursor.  First locate the descriptor table, then let the
+        # descriptor's own packet sizes bound the VIF stream.
+        preferred_deltas = (
+            0,
+            4, 8, 12, 16, 20, 24, 28, 32,
+            36, 40, 44, 48, 52, 56, 60, 64,
+            0x4C, 0x50, 0x54, 0x58, 0x5C, 0x60,
+            0x70, 0x80, 0x90, 0xA0, 0xB0, 0xC0,
+        )
+        seen = set()
+        for delta in preferred_deltas:
+            candidate = addr + int(delta)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or candidate + 8 > n or (candidate & 3) != 0:
+                continue
+            if self.detect_mdl_material_list_format(candidate, max_end=n) is not None:
+                return int(candidate)
+        return None
 
     def score_ps2_material_row_format(self, addr: int, count: int, size_bytes: int, row_len: int) -> int:
         lvz = self.decomp
@@ -1347,12 +1483,15 @@ class read_lvz:
         size16 = read_u16(lvz, addr + 2)
         if 0 < count16 <= 512 and 0 <= size16 <= 0x8000 and addr + 4 + size16 <= n:
             for tag, row_len, base_score in (("ps2_vcs", 24, 30), ("ps2_lcs", 22, 10)):
-                if size16 < count16 * row_len:
+                expected_size = self.expected_ps2_material_size16(count16, row_len)
+                if size16 != expected_size:
                     continue
                 list_end = addr + 4 + size16
                 if not self.material_list_stream_has_unpack(addr, list_end, max_end=n):
                     continue
                 score = base_score + self.score_ps2_material_row_format(addr, count16, size16, row_len)
+                if score < 20:
+                    continue
                 candidates.append({
                     "format_tag": tag,
                     "count": int(count16),
@@ -1424,7 +1563,7 @@ class read_lvz:
         return candidates[0]
 
     def looks_like_mdl_material_list_candidate(self, addr: int) -> bool:
-        return self.detect_mdl_material_list_format(addr) is not None
+        return self.find_mdl_material_list_start_near(addr) is not None
 
     def looks_like_direct_texture_candidate(self, addr: int) -> bool:
         lvz = self.decomp
@@ -1476,7 +1615,7 @@ class read_lvz:
         lvz = self.decomp
         n = len(lvz)
         if addr in (0, 0xFFFFFFFF):
-            return (0, "EMPTY", {"reason": "null_or_minus_one"})
+            return (0, "EMPTY", {"reason": "continues_in_img"})
         if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr + 8 > n or (addr & 0x3) != 0:
             return (-100, "INVALID", {"why": "candidate_out_of_range_or_unaligned"})
         if lvz[addr:addr + 4] in (b"DLRW", b"xet\0"):
@@ -1517,7 +1656,7 @@ class read_lvz:
         if score >= 0:
             return addr, kind, info, slot
         if dword0 in (0, 0xFFFFFFFF) and dword1 in (0, 0xFFFFFFFF):
-            return 0, "EMPTY", {"reason": "empty_resource_table_row", "u16_pair": (None, None), "u32_pair": (None, None)}, -1
+            return 0, "EMPTY", {"reason": "continues_in_img", "u16_pair": (None, None), "u32_pair": (None, None)}, -1
         return addr, kind, info, slot
 
     def walk_master_resource_table(self, res_table_addr: int, res_count: int) -> List[Dict]:
@@ -1559,7 +1698,7 @@ class read_lvz:
             score, kind, info = self.classify_resource_candidate(raw_ptr)
             if raw_ptr in (0, 0xFFFFFFFF):
                 kind = "EMPTY"
-                info = {"reason": "null_or_minus_one", "u16_pair": (None, None), "u32_pair": (0, 0)}
+                info = {"reason": "continues_in_img", "u16_pair": (None, None), "u32_pair": (0, 0)}
             elif score < 0 and not (LVZ_MIN_RESOURCE_CANDIDATE_ADDR <= raw_ptr < n and (raw_ptr & 3) == 0):
                 kind = "INVALID"
 
@@ -1855,6 +1994,50 @@ class read_lvz:
         mat = self.create_material_from_image(img, asset_name)
         return {"material": mat, "size": (w, h), "palette_tag": tag}
 
+    def decode_blob_8bpp_single(self,
+                                blob: bytes,
+                                out_stem: str,
+                                use_swizzle: bool,
+                                alpha_scale: str,
+                                name_override: Optional[str] = None,
+                                fixed_size: Optional[Tuple[int, int]] = None) -> Dict:
+        if len(blob) < LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP:
+            raise ValueError("8bpp direct texture blob is shorter than its 256-color palette")
+        index = blob[:-LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP]
+        pal = blob[-LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP:]
+        palette = [tuple(pal[i:i+4]) for i in range(0, LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP, 4)]
+        tag = "pal_tail1024"
+        if self.debug_print:
+            dbg(f"[palette] using {tag}  index_len={len(index)}  pal_sz={LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP}")
+
+        if fixed_size is not None:
+            w, h = int(fixed_size[0]), int(fixed_size[1])
+            if w <= 0 or h <= 0 or (w * h) > len(index):
+                raise ValueError(f"fixed 8bpp texture size {w}x{h} does not fit index bytes {len(index)}")
+        else:
+            w, h = self.choose_single_size_for_4bpp(len(index) // 2, None, prefer_square=True)
+
+        if w > LVZ_MAX_TEXTURE_DIMENSION or h > LVZ_MAX_TEXTURE_DIMENSION or (w * h) > LVZ_MAX_TEXTURE_PIXELS:
+            raise ValueError(f"refusing 8bpp texture size {w}x{h}")
+        if self.debug_print:
+            dbg(f"[size] chosen (8bpp): {w}x{h} (pixels={w*h}, index_bytes={len(index)})")
+
+        need = w * h
+        slab = np.frombuffer(index[:need], dtype=np.uint8).copy()
+        if slab.size < need:
+            raise ValueError(f"8bpp indices smaller than required pixels ({slab.size} < {need}).")
+        if use_swizzle:
+            slab = self.unswizzle8_ps2_linearized(slab, w, h)
+        idx2d = slab.reshape(h, w)
+        idx2d = np.flipud(idx2d)
+        pal_arr = np.asarray(palette, dtype=np.uint8)
+        pal_arr = self.apply_ps2_alpha_scale(pal_arr, do_scale=(alpha_scale == "ps2"))
+        rgba = pal_arr[np.clip(idx2d, 0, pal_arr.shape[0] - 1)]
+        asset_name = name_override if name_override else out_stem
+        img = self.image_from_rgba_uint8(rgba, asset_name, w, h)
+        mat = self.create_material_from_image(img, asset_name)
+        return {"material": mat, "size": (w, h), "palette_tag": tag}
+
     def direct_texture_raster_info_from_blob(self, blob: bytes) -> Dict[str, int]:
         if len(blob) < LVZ_DIRECT_TEXTURE_HEADER_BYTES + LVZ_DIRECT_TEXTURE_PALETTE_BYTES:
             raise ValueError("direct texture blob is shorter than its 16-byte header and 64-byte palette")
@@ -1887,9 +2070,10 @@ class read_lvz:
         info = self.direct_texture_raster_info_from_blob(blob)
         depth = int(info["depth"])
         mipmaps = max(1, int(info["mipmaps"]))
-        if depth != 4:
-            raise ValueError(f"only 4bpp direct LVZ textures are decoded here right now; got depth={depth}")
+        if depth not in (4, 8):
+            raise ValueError(f"only 4bpp/8bpp direct LVZ textures are decoded here right now; got depth={depth}")
 
+        palette_bytes = LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP if depth == 8 else LVZ_DIRECT_TEXTURE_PALETTE_BYTES
         level_w = int(width)
         level_h = int(height)
         image_bytes_total = 0
@@ -1906,12 +2090,12 @@ class read_lvz:
         if src_index_end > len(blob):
             raise ValueError("direct texture base mip is truncated")
 
-        if palette_start + LVZ_DIRECT_TEXTURE_PALETTE_BYTES <= len(blob):
-            palette = blob[palette_start:palette_start + LVZ_DIRECT_TEXTURE_PALETTE_BYTES]
-        elif src_index_end + LVZ_DIRECT_TEXTURE_PALETTE_BYTES <= len(blob):
-            palette = blob[src_index_end:src_index_end + LVZ_DIRECT_TEXTURE_PALETTE_BYTES]
+        if palette_start + palette_bytes <= len(blob):
+            palette = blob[palette_start:palette_start + palette_bytes]
+        elif src_index_end + palette_bytes <= len(blob):
+            palette = blob[src_index_end:src_index_end + palette_bytes]
         else:
-            palette = blob[-LVZ_DIRECT_TEXTURE_PALETTE_BYTES:]
+            palette = blob[-palette_bytes:]
 
         return blob[src_index_start:src_index_end] + palette
 
@@ -1947,20 +2131,31 @@ class read_lvz:
                 raster_info = self.direct_texture_raster_info_from_blob(full_blob)
                 width, height = int(raster_info["width"]), int(raster_info["height"])
                 payload = self.direct_texture_payload_from_blob(full_blob, width, height)
+                depth = int(raster_info.get("depth", 4))
                 texture_uses_swizzle = bool(self.use_swizzle and (int(raster_info.get("swizzle_mask", 0)) & 1))
-                result = self.decode_blob_4bpp_lo_single(
-                    blob=payload,
-                    out_stem=material_name,
-                    palette_mode="tail64",
-                    palette_offset=None,
-                    palette_size=None,
-                    use_swizzle=texture_uses_swizzle,
-                    sizes_hint=None,
-                    alpha_scale="ps2",
-                    name_override=material_name,
-                    fixed_size=(width, height),
-                    round_to_power_of_two=False,
-                )
+                if depth == 8:
+                    result = self.decode_blob_8bpp_single(
+                        blob=payload,
+                        out_stem=material_name,
+                        use_swizzle=texture_uses_swizzle,
+                        alpha_scale="ps2",
+                        name_override=material_name,
+                        fixed_size=(width, height),
+                    )
+                else:
+                    result = self.decode_blob_4bpp_lo_single(
+                        blob=payload,
+                        out_stem=material_name,
+                        palette_mode="tail64",
+                        palette_offset=None,
+                        palette_size=None,
+                        use_swizzle=texture_uses_swizzle,
+                        sizes_hint=None,
+                        alpha_scale="ps2",
+                        name_override=material_name,
+                        fixed_size=(width, height),
+                        round_to_power_of_two=False,
+                    )
                 mat = result["material"]
                 try:
                     mat["blds_kind"] = "TEX"
@@ -1973,6 +2168,7 @@ class read_lvz:
                     mat["blds_lvz_texture_width_half"] = int(row.get("width_half", 0) or 0)
                     mat["blds_lvz_texture_flags"] = int(row.get("texture_flags", 0) or 0)
                     mat["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
+                    mat["blds_lvz_texture_depth"] = int(raster_info.get("depth", 0))
                     mat["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
                     if getattr(result.get("material"), "node_tree", None) is not None:
                         for node in result["material"].node_tree.nodes:
@@ -1985,6 +2181,7 @@ class read_lvz:
                                 node.image["blds_lvz_texture_direct"] = True
                                 node.image["blds_lvz_texture_header_len"] = int(LVZ_DIRECT_TEXTURE_HEADER_BYTES)
                                 node.image["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
+                                node.image["blds_lvz_texture_depth"] = int(raster_info.get("depth", 0))
                                 node.image["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
                                 mat["blds_texture_image_name"] = node.image.name
                                 break
@@ -2116,23 +2313,129 @@ class read_lvz:
     def _decode_rgba4444(self, v16: int) -> Tuple[int,int,int,int]:
         return self._decode_rgba5551(v16)
 
-    def _find_unpack_near(self, buf: bytes, off: int, window: int = 8, max_end: Optional[int] = None) -> int:
+    def _log_unpack_alignment(self, requested_off: int, found_off: int):
+        if requested_off == found_off:
+            return
+        try:
+            count = int(getattr(self, "_unpack_align_log_count", 0))
+        except Exception:
+            count = 0
+        if count < LVZ_UNPACK_ALIGN_LOG_LIMIT:
+            try:
+                dbg(
+                    f"[unpack-align] UNPACK pointer adjusted "
+                    f"0x{requested_off:08X}->0x{found_off:08X} "
+                    f"delta={found_off - requested_off:+d}"
+                )
+            except Exception:
+                pass
+        elif count == LVZ_UNPACK_ALIGN_LOG_LIMIT:
+            try:
+                dbg(f"[unpack-align] further UNPACK pointer adjustment logs suppressed after {LVZ_UNPACK_ALIGN_LOG_LIMIT}")
+            except Exception:
+                pass
+        try:
+            setattr(self, "_unpack_align_log_count", count + 1)
+        except Exception:
+            pass
+
+    def _find_unpack_near(self, buf: bytes, off: int, window: int = LVZ_UNPACK_SEARCH_WINDOW, max_end: Optional[int] = None, allow_backward: bool = True) -> int:
         n = len(buf)
         if max_end is not None:
             n = min(n, max(0, int(max_end)))
-        start = max(0, off - window)
-        end = min(n, off + window + 4)
-        for p in range(start, end):
-            if (p & 3) == 0 and p + 4 <= n and read_u32(buf, p) == self.UNPACK:
+        requested = int(off)
+        if n <= 0:
+            raise ValueError(f"UNPACK header not found near 0x{requested:08X}")
+
+        def valid_unpack(p: int) -> bool:
+            if not allow_backward and p < requested:
+                return False
+            return (p & 3) == 0 and 0 <= p and p + 4 <= n and read_u32(buf, p) == self.UNPACK
+
+        # Some slave/overlay resource descriptors do not point straight at the
+        # VIF UNPACK word.  There are two common cases in beach:
+        #   * descriptor cursor lands 12 bytes after the real UNPACK header
+        #   * descriptor cursor lands at an 0x50-byte row/object header that stores
+        #     ids / placement-ish data, then the real UNPACK starts after it
+        # The old narrow scan produced false "UNPACK not found near ..." failures.
+        # Check the known descriptor deltas first, especially +0x50, then do a
+        # bounded aligned scan so we still don't jump to a random later object.
+        # For the next batch after MSCAL, callers must pass allow_backward=False.
+        # Otherwise the +0x50 descriptor fix can accidentally rediscover the same
+        # UNPACK from behind and loop until max_groups.
+        preferred_deltas = (
+            0,
+            0x50, -0x50,
+            0x4C, 0x54, 0x48, 0x58, 0x44, 0x5C, 0x40, 0x60,
+            -12, 12, -16, 16, -8, 8, -4, 4,
+            -20, 20, -24, 24, -28, 28, -32, 32, -36, 36, -40, 40,
+        )
+        seen = set()
+        for delta in preferred_deltas:
+            if not allow_backward and delta < 0:
+                continue
+            p = requested + delta
+            if p in seen:
+                continue
+            seen.add(p)
+            if valid_unpack(p):
+                self._log_unpack_alignment(requested, p)
                 return p
-        raise ValueError(f"UNPACK header not found near 0x{off:08X}")
+
+        win = max(int(window), 0x90)
+        start = max(0, requested - win) if allow_backward else max(0, requested)
+        end = min(n - 4, requested + win)
+        aligned = []
+        for p in range(start, end + 1):
+            if (p & 3) == 0 and p not in seen and valid_unpack(p):
+                aligned.append(p)
+        if aligned:
+            # Prefer the closest aligned UNPACK.  Ties prefer the earlier header,
+            # because descriptor cursors most often land after the real header.
+            p = sorted(aligned, key=lambda q: (abs(q - requested), q))[0]
+            self._log_unpack_alignment(requested, p)
+            return p
+        raise ValueError(f"UNPACK header not found near 0x{requested:08X}")
+
+    def _find_next_unpack_after_mscal(self, buf: bytes, off: int, window: int = LVZ_UNPACK_SEARCH_WINDOW, max_end: Optional[int] = None) -> int:
+        return self._find_unpack_near(buf, off, window=window, max_end=max_end, allow_backward=False)
+
+    def _log_unpack_next_self_loop_guard(self, requested_off: int, found_off: int):
+        try:
+            count = int(getattr(self, "_unpack_next_self_loop_log_count", 0))
+        except Exception:
+            count = 0
+        if count < LVZ_UNPACK_NEXT_SELF_LOOP_LOG_LIMIT:
+            try:
+                dbg(
+                    f"[unpack-align] rejected backward/duplicate next UNPACK "
+                    f"after MSCAL: requested=0x{requested_off:08X} found=0x{found_off:08X}"
+                )
+            except Exception:
+                pass
+        elif count == LVZ_UNPACK_NEXT_SELF_LOOP_LOG_LIMIT:
+            try:
+                dbg(f"[unpack-align] further next-UNPACK self-loop guard logs suppressed after {LVZ_UNPACK_NEXT_SELF_LOOP_LOG_LIMIT}")
+            except Exception:
+                pass
+        try:
+            setattr(self, "_unpack_next_self_loop_log_count", count + 1)
+        except Exception:
+            pass
 
     def parse_mdl_material_list(self, base: int, max_end: Optional[int] = None) -> MDLMaterialList:
         lvz = self.decomp
         n = len(lvz)
         if max_end is not None:
             n = min(n, max(0, int(max_end)))
+        requested_base = int(base)
         detected = self.detect_mdl_material_list_format(base, max_end=n)
+        if detected is None:
+            adjusted_base = self.find_mdl_material_list_start_near(base, max_end=n)
+            if adjusted_base is not None and adjusted_base != base:
+                self._log_mdl_descriptor_alignment(requested_base, int(adjusted_base))
+                base = int(adjusted_base)
+                detected = self.detect_mdl_material_list_format(base, max_end=n)
         if detected is None:
             if base + 4 > n:
                 raise ValueError("MDL material list header out of range.")
@@ -2258,7 +2561,7 @@ class read_lvz:
         if read_u32(buf, w) != self.STROW:  raise ValueError(f"Expected STROW before positions at 0x{w:08X}")
         w += 20
         h_pos = read_u32(buf, w)
-        if (h_pos & 0xFF004000) != 0x79000000: raise ValueError(f"Unexpected positions header 0x{h_pos:08X} at 0x{w:08X}")
+        if (h_pos & 0xFF000000) != 0x79000000: raise ValueError(f"Unexpected positions header 0x{h_pos:08X} at 0x{w:08X}")
         w += 4
         need_bytes_pos = nvert_all * 6
         if w + need_bytes_pos > n: raise ValueError("Position payload truncated.")
@@ -2274,7 +2577,7 @@ class read_lvz:
         if read_u32(buf, w) != self.STROW:  raise ValueError(f"Expected STROW before texcoords at 0x{w:08X}")
         w += 20
         h_uv = read_u32(buf, w)
-        if (h_uv & 0xFF004000) != 0x76004000: raise ValueError(f"Unexpected UV header 0x{h_uv:08X} at 0x{w:08X}")
+        if (h_uv & 0xFF000000) != 0x76000000: raise ValueError(f"Unexpected UV header 0x{h_uv:08X} at 0x{w:08X}")
         w += 4
         need_bytes_uv = nvert_all * 2
         if w + need_bytes_uv > n: raise ValueError("UV payload truncated.")
@@ -2286,7 +2589,7 @@ class read_lvz:
         w = align_up4(w)
 
         h_col = read_u32(buf, w)
-        if (h_col & 0xFF004000) != 0x6F000000: raise ValueError(f"Unexpected prelight header 0x{h_col:08X} at 0x{w:08X}")
+        if (h_col & 0xFF000000) != 0x6F000000: raise ValueError(f"Unexpected prelight header 0x{h_col:08X} at 0x{w:08X}")
         w += 4
         need_bytes_col = nvert_all * 2
         if w + need_bytes_col > n: raise ValueError("Prelight payload truncated.")
@@ -2317,25 +2620,54 @@ class read_lvz:
         )
         return strip, w
 
-    def parse_mdl_stream_after_list(self, start_off: int, max_groups: int = LVZ_MAX_MDL_BATCHES_PER_RESOURCE, max_end: Optional[int] = None) -> Tuple[List[MDLStripGroup], int]:
+    def ps2_mdl_stream_byte_budget_from_material_list(self, mlist: MDLMaterialList) -> int:
+        if not str(getattr(mlist, "format_tag", "")).startswith("ps2_"):
+            return 0
+        total = 0
+        for material in getattr(mlist, "materials", []) or []:
+            try:
+                packet_size = int(getattr(material, "tri_strip_size", 0))
+            except Exception:
+                packet_size = 0
+            if packet_size <= 0:
+                continue
+            if packet_size > 0x400000:
+                return 0
+            total += packet_size
+            if total > 0x2000000:
+                return 0
+        return int(total)
+
+    def parse_mdl_stream_after_list(self, start_off: int, max_groups: int = LVZ_MAX_MDL_BATCHES_PER_RESOURCE, max_end: Optional[int] = None, byte_budget: Optional[int] = None) -> Tuple[List[MDLStripGroup], int]:
         buf = self.decomp
         groups: List[MDLStripGroup] = []
-        parse_end = len(buf) if max_end is None else min(len(buf), max(0, int(max_end)))
-        if start_off >= parse_end:
+        hard_end = len(buf) if max_end is None else min(len(buf), max(0, int(max_end)))
+        if start_off >= hard_end:
             return groups, start_off
         try:
-            off = self._find_unpack_near(buf, start_off, max_end=parse_end)
-        except Exception as e:
-            dbg(f"[splits] UNPACK not found near 0x{start_off:08X}: {e}")
+            off = self._find_unpack_near(buf, start_off, max_end=hard_end)
+        except Exception:
             return groups, start_off
+
+        parse_end = hard_end
+        budget_end = None
+        if byte_budget is not None:
+            try:
+                budget = int(byte_budget)
+            except Exception:
+                budget = 0
+            if budget > 0:
+                budget_end = min(hard_end, off + budget)
+                if budget_end > off:
+                    parse_end = budget_end
+
         total_vertices = 0
         for _ in range(max_groups):
             if off >= parse_end:
                 break
             try:
                 strip, next_off = self.parse_one_batch_noskip(buf, off, max_end=parse_end)
-            except Exception as e:
-                dbg(f"[splits] stop at 0x{off:08X}: {e}")
+            except Exception:
                 break
             total_vertices += int(strip.count)
             if total_vertices > LVZ_MAX_MDL_VERTICES_PER_OBJECT:
@@ -2345,11 +2677,23 @@ class read_lvz:
                 )
                 break
             groups.append(MDLStripGroup(strips=[strip], bytes_read=(next_off - off), start_off=off, end_off=next_off))
+            if next_off <= off:
+                self._log_unpack_next_self_loop_guard(next_off, off)
+                off = next_off
+                break
+            if budget_end is not None and next_off >= budget_end:
+                off = next_off
+                break
             try:
-                off = self._find_unpack_near(buf, next_off, max_end=parse_end)
+                next_unpack = self._find_next_unpack_after_mscal(buf, next_off, max_end=parse_end)
             except Exception:
                 off = next_off
                 break
+            if next_unpack <= off:
+                self._log_unpack_next_self_loop_guard(next_off, next_unpack)
+                off = next_off
+                break
+            off = next_unpack
         if len(groups) >= max_groups:
             dbg(f"[splits] stopped after max_groups={max_groups}")
         return groups, off
@@ -2411,7 +2755,8 @@ class read_lvz:
     def parse_mdl_geometry_after_list(self, mlist: MDLMaterialList, max_end: Optional[int] = None) -> Tuple[List[MDLStripGroup], int]:
         if str(getattr(mlist, "format_tag", "")).startswith("psp_wrld"):
             return self.parse_psp_wrld_stream_after_list(mlist, max_end=max_end)
-        return self.parse_mdl_stream_after_list(mlist.next_off, max_end=max_end)
+        byte_budget = self.ps2_mdl_stream_byte_budget_from_material_list(mlist)
+        return self.parse_mdl_stream_after_list(mlist.next_off, max_end=max_end, byte_budget=byte_budget)
 
     def assign_materials_by_strip_bytes(self, mlist: MDLMaterialList, groups: List[MDLStripGroup]):
 
@@ -2613,6 +2958,138 @@ class read_img:
         self.lvz_bytes = lvz_bytes
         self.is_ver2_archive = is_ver2_img_archive(img_bytes)
         self.ver2_entries = parse_ver2_img_directory(img_bytes) if self.is_ver2_archive else []
+        self._wrldtool_img_offset_by_lvz_addr = None
+        self._wrldtool_img_offset_log_done = False
+        self._img_mdl_parser = read_lvz(
+            decomp_bytes=img_bytes,
+            stem="img",
+            use_swizzle=False,
+            debug_print=False,
+        )
+
+    def find_mdl_material_list_start_near(self, addr: int, max_end: Optional[int] = None) -> Optional[int]:
+        return self._img_mdl_parser.find_mdl_material_list_start_near(addr, max_end=max_end)
+
+    def detect_mdl_material_list_format(self, addr: int, max_end: Optional[int] = None) -> Optional[Dict[str, object]]:
+        return self._img_mdl_parser.detect_mdl_material_list_format(addr, max_end=max_end)
+
+    def parse_mdl_material_list(self, base: int, max_end: Optional[int] = None) -> MDLMaterialList:
+        return self._img_mdl_parser.parse_mdl_material_list(base, max_end=max_end)
+
+    def parse_mdl_geometry_after_list(self, material_list: MDLMaterialList, max_end: Optional[int] = None) -> Tuple[List[MDLStripGroup], int]:
+        return self._img_mdl_parser.parse_mdl_geometry_after_list(material_list, max_end=max_end)
+
+    def wrldtool_img_offset_by_lvz_addr(self) -> Dict[int, int]:
+        """
+        V65: use the WRLDTool-style IMG offset field directly.
+
+        The companion IMG does not store the 32-byte DLRW/xet preface bytes, so
+        V63/V64's preface matching correctly returned zero.  The value at LVZ
+        header +0x18 is the contIMG / IMG data offset used by the older working
+        importer logs.
+
+        Important:
+          - This is the IMG data base, not a place to add another +0x20.
+          - file_size includes the 0x20 LVZ DLRW preface, so the IMG data span is
+            [contIMG, contIMG + file_size - 0x20).
+        """
+        if self._wrldtool_img_offset_by_lvz_addr is not None:
+            return self._wrldtool_img_offset_by_lvz_addr
+
+        mapping: Dict[int, int] = {}
+        for addr in self._iter_lvz_dlrw_headers_for_direct_contimg():
+            try:
+                total = read_u32(self.lvz_bytes, addr + 0x08)
+                cont_img = read_u32(self.lvz_bytes, addr + 0x18)
+                if total >= 0x20 and 0 <= int(cont_img) < len(self.img_bytes):
+                    mapping[int(addr)] = int(cont_img)
+            except Exception:
+                pass
+
+        self._wrldtool_img_offset_by_lvz_addr = mapping
+        try:
+            if not self._wrldtool_img_offset_log_done:
+                dbg(f"[wrldtool-offset] direct LVZ +0x18 contIMG offsets: {len(mapping)}")
+                for i, addr in enumerate(sorted(mapping)[:64]):
+                    cont_img = mapping[addr]
+                    total = read_u32(self.lvz_bytes, addr + 0x08)
+                    dbg(
+                        f"[wrldtool-offset] sample {i:03d}: offsetLVZ=0x{addr:08X} "
+                        f"size={int(total)} contIMG=0x{int(cont_img):08X} "
+                        f"dataBase=0x{int(cont_img):08X} dataEnd=0x{int(cont_img + max(0, int(total) - 0x20)):08X}"
+                    )
+                self._wrldtool_img_offset_log_done = True
+        except Exception:
+            pass
+        return mapping
+
+    def _iter_lvz_dlrw_headers_for_direct_contimg(self) -> List[int]:
+        lvz = self.lvz_bytes
+        n = len(lvz)
+        out = []
+        seen = set()
+
+        def add(addr):
+            try:
+                addr = int(addr)
+                if addr in seen:
+                    return
+                if not (0 <= addr and addr + 0x20 <= n and (addr & 3) == 0):
+                    return
+                if lvz[addr:addr + 4] not in (b"DLRW", b"xet\0"):
+                    return
+                total = read_u32(lvz, addr + 0x08)
+                cont_img = read_u32(lvz, addr + 0x18)
+                if total < 0x20 or total > 0x4000000:
+                    return
+                if not (0 <= cont_img < len(self.img_bytes)):
+                    return
+                seen.add(addr)
+                out.append(addr)
+            except Exception:
+                pass
+
+        # Master group chain first.
+        cursor = 0x24
+        while cursor + 8 <= n:
+            addr = read_u32(lvz, cursor + 0)
+            if not (0 < addr < n and (addr & 3) == 0 and addr + 0x20 <= n):
+                break
+            if lvz[addr:addr + 4] not in (b"DLRW", b"xet\0"):
+                break
+            add(addr)
+            group_count = read_u32(lvz, addr + 0x14)
+            if group_count <= 0 or group_count > 4096:
+                group_count = 1
+            for child in range(1, int(group_count)):
+                add(addr + child * 0x20)
+            cursor += 8
+
+        # Fallback scan for triggered/AREA headers.
+        pos = 0
+        while True:
+            pos = lvz.find(b"DLRW", pos)
+            if pos < 0:
+                break
+            add(pos)
+            pos += 4
+
+        out.sort()
+        return out
+
+    def img_data_base_for_lvz_dlrw_header(self, header_addr: int, fallback_global_rel: int, file_size: int):
+        mapping = self.wrldtool_img_offset_by_lvz_addr()
+        header_addr = int(header_addr)
+        cont_img = mapping.get(header_addr)
+        if cont_img is None:
+            cont_img = int(fallback_global_rel)
+
+        # contIMG is already the IMG data base. Do NOT add +0x20 here.
+        data_base = int(cont_img)
+        data_end = min(len(self.img_bytes), data_base + max(0, int(file_size) - 0x20))
+        used_direct_contimg = 0 <= data_base < len(self.img_bytes)
+        return int(data_base), int(data_end), int(data_base), bool(used_direct_contimg)
+
 
     def find_sector_row_directories_from_lvz(self) -> List[Dict[str, int]]:
         lvz = self.lvz_bytes
@@ -2679,6 +3156,7 @@ class read_img:
                 global_tab = read_u32(lvz, header_addr + 0x18)
                 if file_size < 0x20:
                     continue
+                data_base, data_end, img_header_off, used_direct_contimg = self.img_data_base_for_lvz_dlrw_header(header_addr, global_tab, file_size)
                 sector_x = start_x + header_index
                 origin = sector_origin_for_xy(game_hint, sector_x, sector_y)
                 records.append({
@@ -2687,14 +3165,17 @@ class read_img:
                     "sector_x": int(sector_x),
                     "sector_y": int(sector_y),
                     "header_addr": int(header_addr),
-                    "cont": int(global_tab),
+                    "cont": int(data_base),
                     "file_size": int(file_size),
                     "data_size": int(data_size),
                     "reloc_tab": int(reloc_tab),
                     "num_relocs": int(num_relocs),
-                    "end": int(global_tab + file_size - 0x20),
+                    "end": int(data_end),
                     "origin": origin,
                     "game_hint": game_hint,
+                    "img_header_off": int(img_header_off),
+                    "global_rel": int(global_tab),
+                    "wrldtool_direct_contimg": bool(used_direct_contimg),
                 })
                 sector_index += 1
         return records
@@ -2753,48 +3234,317 @@ class read_img:
                 break
         return spans
 
-    def collect_sector_overlay_resources(self, sector_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None) -> List[Dict[str, int]]:
+    def collect_sector_overlay_resources(self, sector_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None, include_alt_12_layouts: bool = False, wanted_res_ids: Optional[set] = None) -> List[Dict[str, int]]:
         img = self.img_bytes
         if sector_records is None:
             sector_records = self.find_sector_container_records_from_lvz()
+
+        wanted = None
+        if wanted_res_ids is not None:
+            try:
+                wanted = {int(x) for x in wanted_res_ids}
+            except Exception:
+                wanted = None
+
         overlays: List[Dict[str, int]] = []
-        for sector in sector_records:
-            cont = int(sector.get("cont", -1))
-            end = min(len(img), int(sector.get("end", len(img))))
-            if cont < 0 or cont + 8 > len(img) or end <= cont:
-                continue
-            resources_ptr = read_u32(img, cont + 0x00)
-            num_resources = read_u16(img, cont + 0x04)
-            if num_resources <= 0 or num_resources > 4096:
-                continue
-            list_start = cont + int(resources_ptr) - 0x20
-            if list_start < cont or list_start + num_resources * 8 > end:
-                continue
-            for resource_index in range(num_resources):
-                row_off = list_start + resource_index * 8
-                res_id_signed = struct.unpack_from("<i", img, row_off + 0x00)[0]
-                if res_id_signed < 0:
+        seen = set()
+        container_bounds = sorted(set(
+            int(record.get("cont", -1))
+            for record in (sector_records or [])
+            if 0 <= int(record.get("cont", -1)) < len(img)
+        ))
+        next_container_by_cont: Dict[int, int] = {}
+        for bound_index, bound_cont in enumerate(container_bounds):
+            next_container_by_cont[int(bound_cont)] = int(container_bounds[bound_index + 1]) if bound_index + 1 < len(container_bounds) else len(img)
+
+        def expanded_container_end(cont: int, declared_end: int) -> int:
+            hard_end = int(next_container_by_cont.get(int(cont), len(img)))
+            if hard_end <= cont:
+                hard_end = len(img)
+            declared_end = max(int(declared_end), int(cont))
+            return max(int(declared_end), min(len(img), hard_end))
+
+        self.last_overlay_resource_stats = {
+            "containers": 0,
+            "rows_8_id_ptr": 0,
+            "rows_12_ptr_id": 0,
+            "rows_12_ptr_mid_id": 0,
+            "rows_12_id_unused_ptr": 0,
+            "rows_12_id_ptr_unused": 0,
+            "accepted": 0,
+            "pointer_variants": 0,
+            "expanded_bounds": 0,
+            "tight_resource_bounds": 0,
+        }
+
+        def add_overlay(sector, resource_index: int, res_id: int, raw_ptr: int, raw_off: int, row_off: int, stride: int, layout: str, cont: int, end: int):
+            if res_id < 0:
+                return
+            if wanted is not None and int(res_id) not in wanted:
+                return
+            if max_resource_id is not None and res_id >= int(max_resource_id):
+                return
+            if raw_ptr < 0:
+                return
+
+            # V74: exact Slave WRLD resource table recovery.
+            #
+            # The WRLD article says slave Resource[] rows are:
+            #   4b resource id
+            #   4b offset to resource
+            #
+            # In the file data we see multiple pointer states depending on the
+            # table/FAT/global-section path:
+            #   - WRLD-local including the missing 0x20 DLRW preface: cont + ptr - 0x20
+            #   - continuation-local after the 0x20 preface was stripped: cont + ptr
+            #   - already absolute IMG offset: ptr
+            #   - already absolute but still preface-based: ptr - 0x20
+            #
+            # Old builds only tried cont + ptr - 0x20.  That makes real resources
+            # look absent, then the importer falls into fake WRLD sparse ranges.
+            candidates = []
+            def push(label, off):
+                try:
+                    off = int(off)
+                except Exception:
+                    return
+                if off not in [v for _, v in candidates]:
+                    candidates.append((label, off))
+
+            push("", int(raw_off))
+
+            # Only broaden pointer interpretations when this is a targeted exact
+            # resource search.  This avoids creating random false positives during
+            # the broad first pass, but lets missing ids such as beach1881 be
+            # resolved from the real slave Resource[] row.
+            if wanted is not None and int(res_id) in wanted:
+                push(":ptr_cont_minus20", int(cont) + int(raw_ptr) - 0x20)
+                push(":ptr_cont", int(cont) + int(raw_ptr))
+                push(":ptr_abs", int(raw_ptr))
+                push(":ptr_abs_minus20", int(raw_ptr) - 0x20)
+
+            for suffix, cand_off in candidates:
+                if raw_ptr < 0x20 and suffix in ("", ":ptr_cont_minus20"):
                     continue
-                res_id = int(res_id_signed)
-                if max_resource_id is not None and res_id >= int(max_resource_id):
+                if cand_off < cont or cand_off + 4 > end:
+                    # Absolute IMG offsets can legitimately be outside this
+                    # expanded container; accept them if they point inside file
+                    # and the caller is doing a targeted exact-res lookup.
+                    if not (wanted is not None and int(res_id) in wanted and 0 <= cand_off + 4 <= len(img)):
+                        continue
+                if cand_off < 0 or cand_off + 4 > len(img):
                     continue
-                raw_ptr = read_u32(img, row_off + 0x04)
-                raw_off = cont + int(raw_ptr) - 0x20
-                if raw_off < cont or raw_off + 4 > end:
+                if (cand_off & 3) != 0:
                     continue
+
+                descriptor_max_end = end
+                if not (cont <= cand_off < end):
+                    descriptor_max_end = len(img)
+                descriptor_off = self.find_mdl_material_list_start_near(cand_off, max_end=descriptor_max_end)
+                if descriptor_off is None:
+                    continue
+                cand_off = int(descriptor_off)
+
+                key = (
+                    int(sector.get("sector_index", -1)),
+                    int(sector.get("row_index", -1)),
+                    int(res_id),
+                    int(cand_off),
+                    int(stride),
+                    str(layout) + str(suffix),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
                 overlays.append({
                     "sector_index": int(sector.get("sector_index", -1)),
                     "row_index": int(sector.get("row_index", -1)),
                     "sector_x": int(sector.get("sector_x", 0)),
                     "sector_y": int(sector.get("sector_y", 0)),
                     "cont": cont,
-                    "sector_end": end,
+                    "sector_end": max(int(end), int(cand_off) + 4) if int(cand_off) >= int(end) else end,
                     "resource_index": int(resource_index),
-                    "res_id": res_id,
+                    "res_id": int(res_id),
                     "raw_ptr": int(raw_ptr),
-                    "raw_off": int(raw_off),
+                    "raw_off": int(cand_off),
+                    "resource_row_off": int(row_off),
+                    "resource_stride": int(stride),
+                    "resource_layout": str(layout) + str(suffix),
                 })
+                self.last_overlay_resource_stats["accepted"] += 1
+                if suffix:
+                    self.last_overlay_resource_stats["pointer_variants"] += 1
+
+        for sector in sector_records:
+            cont = int(sector.get("cont", -1))
+            declared_end = min(len(img), int(sector.get("end", len(img))))
+            end = expanded_container_end(cont, declared_end)
+            if end > declared_end:
+                self.last_overlay_resource_stats["expanded_bounds"] += 1
+            if cont < 0 or cont + 8 > len(img) or end <= cont:
+                continue
+
+            resources_ptr = read_u32(img, cont + 0x00)
+            num_resources = read_u16(img, cont + 0x04)
+            if num_resources <= 0 or num_resources > 4096:
+                continue
+
+            list_start = cont + int(resources_ptr) - 0x20
+            if list_start < cont or list_start + 8 > end:
+                continue
+
+            self.last_overlay_resource_stats["containers"] += 1
+
+            # Old LCS/WRLD style:
+            #   s32 resource_id, u32 payload_pointer
+            if list_start + num_resources * 8 <= end:
+                for resource_index in range(num_resources):
+                    row_off = list_start + resource_index * 8
+                    res_id = struct.unpack_from("<i", img, row_off + 0x00)[0]
+                    raw_ptr = read_u32(img, row_off + 0x04)
+                    before = len(overlays)
+                    add_overlay(sector, resource_index, int(res_id), int(raw_ptr), cont + int(raw_ptr) - 0x20, row_off, 8, "id_ptr", cont, end)
+                    if len(overlays) != before:
+                        self.last_overlay_resource_stats["rows_8_id_ptr"] += 1
+
+            # VCS/PS2 slave WRLD can mirror the master Resource[] 12-byte shape:
+            #   u32 payload_pointer, u32 unused/flags, u32 resource_id
+            if list_start + num_resources * 12 <= end:
+                for resource_index in range(num_resources):
+                    row_off = list_start + resource_index * 12
+                    a = read_u32(img, row_off + 0x00)
+                    b = read_u32(img, row_off + 0x04)
+                    c = read_u32(img, row_off + 0x08)
+
+                    before = len(overlays)
+                    add_overlay(sector, resource_index, int(c), int(a), cont + int(a) - 0x20, row_off, 12, "ptr_unused_id", cont, end)
+                    if len(overlays) != before:
+                        self.last_overlay_resource_stats["rows_12_ptr_id"] += 1
+
+                    # Extra 12-byte interpretations are only used for targeted missing IDs.
+                    # Running them globally creates false positive city slabs, but some VCS
+                    # beach/mainla IPL models live in these variants.
+                    if include_alt_12_layouts:
+                        before = len(overlays)
+                        add_overlay(sector, resource_index, int(b), int(a), cont + int(a) - 0x20, row_off, 12, "ptr_id_unused", cont, end)
+                        if len(overlays) != before:
+                            self.last_overlay_resource_stats["rows_12_ptr_mid_id"] += 1
+
+                        before = len(overlays)
+                        add_overlay(sector, resource_index, int(a), int(c), cont + int(c) - 0x20, row_off, 12, "id_unused_ptr", cont, end)
+                        if len(overlays) != before:
+                            self.last_overlay_resource_stats["rows_12_id_unused_ptr"] += 1
+
+                        before = len(overlays)
+                        add_overlay(sector, resource_index, int(a), int(b), cont + int(b) - 0x20, row_off, 12, "id_ptr_unused", cont, end)
+                        if len(overlays) != before:
+                            self.last_overlay_resource_stats["rows_12_id_ptr_unused"] += 1
+
+        # V81: only real-looking MDL resource starts are allowed to tighten the
+        # bound of another resource.  V80 used every Resource[] interpretation as
+        # a hard end.  That was too aggressive because the broad pass reads both
+        # 8-byte and 12-byte resource-table layouts; the wrong 12-byte pass can
+        # point into the middle of an existing VIF payload.  Those false starts
+        # created short resource_end values and caused valid batches to stop with
+        # "Position/UV/Prelight payload truncated".
+        def looks_like_mdl_resource_start_for_bounds(raw_off: int, sector_end: int) -> bool:
+            try:
+                raw_off = int(raw_off)
+                sector_end = min(len(img), int(sector_end))
+            except Exception:
+                return False
+            if raw_off < 0 or raw_off + 8 > sector_end or raw_off + 8 > len(img):
+                return False
+            if (raw_off & 3) != 0:
+                return False
+            if img[raw_off:raw_off + 4] in (b"DLRW", b"xet\x00"):
+                return False
+
+            # Raw VIF UNPACK words are not valid resource starts for bounding.
+            # They are often internal batches inside the same MDL stream.  Treating
+            # them as next resources is what caused V80/V81 to clip valid MDLs at
+            # the second or third batch.  A resource bound must begin at a material
+            # descriptor table, not at an internal UNPACK.
+            if read_u32(img, raw_off) == 0x6C018000:
+                return False
+
+            descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=sector_end)
+            return descriptor_off is not None
+
+        bound_groups: Dict[int, List[Dict[str, int]]] = {}
+        for overlay in overlays:
+            try:
+                cont_key = int(overlay.get("cont", -1))
+                raw_off = int(overlay.get("raw_off", -1))
+                sector_end = int(overlay.get("sector_end", len(img)))
+                if cont_key < 0 or raw_off < 0 or raw_off + 4 > len(img):
+                    continue
+                if raw_off >= sector_end:
+                    continue
+                bound_groups.setdefault(cont_key, []).append(overlay)
+            except Exception:
+                continue
+
+        tight_count = 0
+        ignored_bound_starts = 0
+        for cont_key, group_overlays in bound_groups.items():
+            starts = []
+            for overlay in group_overlays:
+                try:
+                    raw_off = int(overlay.get("raw_off", -1))
+                    row_off = int(overlay.get("resource_row_off", -1))
+                    layout = str(overlay.get("resource_layout", ""))
+                    sector_end = int(overlay.get("sector_end", len(img)))
+                    if raw_off >= 0 and raw_off + 4 <= len(img) and raw_off < sector_end:
+                        if looks_like_mdl_resource_start_for_bounds(raw_off, sector_end):
+                            starts.append((raw_off, row_off, layout))
+                        else:
+                            ignored_bound_starts += 1
+                except Exception:
+                    continue
+            starts.sort(key=lambda item: (item[0], item[1], item[2]))
+            for overlay in group_overlays:
+                try:
+                    raw_off = int(overlay.get("raw_off", -1))
+                    row_off = int(overlay.get("resource_row_off", -1))
+                    sector_end = int(overlay.get("sector_end", len(img)))
+                    resource_end = sector_end
+                    for next_raw, next_row_off, _layout in starts:
+                        if next_raw <= raw_off:
+                            continue
+                        if next_row_off == row_off:
+                            continue
+                        if next_raw > raw_off + 4:
+                            resource_end = min(resource_end, next_raw)
+                            break
+                    resource_end = max(raw_off + 4, min(resource_end, sector_end, len(img)))
+                    overlay["resource_end"] = int(resource_end)
+                    if resource_end < sector_end:
+                        tight_count += 1
+                except Exception:
+                    continue
+
+        if tight_count:
+            try:
+                self.last_overlay_resource_stats["tight_resource_bounds"] = int(tight_count)
+            except Exception:
+                pass
+            try:
+                dbg(f"[overlay-bounds] tightened IMG resource parse bounds for {tight_count} overlay rows")
+            except Exception:
+                pass
+        if ignored_bound_starts:
+            try:
+                self.last_overlay_resource_stats["ignored_non_mdl_bound_starts"] = int(ignored_bound_starts)
+            except Exception:
+                pass
+            try:
+                dbg(f"[overlay-bounds] ignored non-MDL/alias resource starts while tightening bounds: {ignored_bound_starts}")
+            except Exception:
+                pass
+
         return overlays
+
 
     def enumerate_sector_details(self, max_resource_id: Optional[int] = None, include_lod: bool = False, dedupe_visible: bool = True):
         img = self.img_bytes
@@ -2813,6 +3563,7 @@ class read_img:
         for sector in sector_records:
             cont = int(sector.get("cont", -1))
             origin = tuple(sector.get("origin", (0.0, 0.0, 0.0)))
+            sector_index = int(sector.get("sector_index", -1))
             for pass_index, pass_name, start, stop, pass_ptrs in self.sector_instance_spans(sector):
                 off = start
                 while off + 0x50 <= stop:
@@ -2828,7 +3579,15 @@ class read_img:
                         stats["skipped_lod_rows"] += 1
                         off += 0x50
                         continue
-                    dedupe_key = (ipl_id, int(res_id))
+                    if str(pass_name) in IMG_NON_MODEL_PASS_NAMES:
+                        stats["skipped_lod_rows"] += 1
+                        off += 0x50
+                        continue
+                    if (not include_lod) and str(pass_name) not in IMG_MODEL_PASS_NAMES_DEFAULT:
+                        stats["skipped_lod_rows"] += 1
+                        off += 0x50
+                        continue
+                    dedupe_key = (sector_index, int(pass_index), ipl_id, int(res_id))
                     if dedupe_visible and dedupe_key in seen_keys:
                         stats["skipped_duplicate_rows"] += 1
                         off += 0x50
@@ -2845,14 +3604,202 @@ class read_img:
                     details.append((
                         int(res_id), cont, off - cont, int(ipl_raw), ipl_id,
                         sx, sy, sz, sr, s0, s1, s2, m,
-                        int(pass_index), str(pass_name), int(sector.get("sector_index", -1)),
+                        int(pass_index), str(pass_name), sector_index,
                         int(sector.get("sector_x", 0)), int(sector.get("sector_y", 0)), origin,
+                        int(sector.get("row_index", -1)),
                     ))
                     stats["kept_rows"] += 1
                     off += 0x50
         details.sort(key=lambda t: (int(t[15]), int(t[13]), int(t[2])))
         self.last_sector_walk_stats = stats
         return details
+
+
+    def find_extra_container_records_from_lvz(self, sector_records: Optional[List[Dict[str, int]]] = None) -> List[Dict[str, int]]:
+        img = self.img_bytes
+        if sector_records is None:
+            sector_records = self.find_sector_container_records_from_lvz()
+
+        sector_header_addrs = set(int(record.get("header_addr", -1)) for record in sector_records)
+        sector_conts = set(int(record.get("cont", -1)) for record in sector_records)
+        records_by_key: Dict[Tuple[int, int], Dict[str, int]] = {}
+        candidates = []
+        candidates.extend(self.find_parent_container_records_from_lvz())
+        candidates.extend(self.find_nested_container_records_from_lvz())
+        game_hint = self.detect_sector_game_hint()
+
+        extra_index = 0
+        for candidate in candidates:
+            header_addr = int(candidate.get("lvz_addr", -1))
+            cont = int(candidate.get("cont", -1))
+            total = int(candidate.get("total", 0))
+            tag_u32 = int(candidate.get("tag_u32", 0))
+            if header_addr in sector_header_addrs:
+                continue
+            if cont in sector_conts:
+                continue
+            if cont <= 0 or cont >= len(img):
+                continue
+            if total < 0x20:
+                continue
+            end = int(candidate.get("end", min(len(img), cont + total - 0x20)))
+            if end <= cont + 0x30:
+                continue
+            key = (header_addr, cont)
+            if key in records_by_key:
+                continue
+
+            group_index = int(candidate.get("group_index", -1))
+            child_index = int(candidate.get("child_index", 0))
+            group_start_x = int(candidate.get("group_type", 0))
+            sector_x = 0
+            sector_y = 0
+            origin = (0.0, 0.0, 0.0)
+            # AREA/triggered containers are still attached to a WRLD group entry. Their
+            # instance rows are local to that group's grid cell, same as normal sector rows.
+            # V80 kept the rows but used origin 0,0,0, which shoved valid models into the
+            # wrong place and made the import look broken.
+            if group_index >= 0 and 0 <= group_start_x < 256 and 0 <= child_index < 4096:
+                sector_x = group_start_x + child_index
+                sector_y = group_index
+                origin = sector_origin_for_xy(game_hint, sector_x, sector_y)
+
+            records_by_key[key] = {
+                "sector_index": int(-100000 - extra_index),
+                "row_index": int(group_index),
+                "sector_x": int(sector_x),
+                "sector_y": int(sector_y),
+                "header_addr": header_addr,
+                "cont": cont,
+                "file_size": total,
+                "data_size": int(candidate.get("g0", 0)),
+                "reloc_tab": int(candidate.get("g1", 0)),
+                "num_relocs": int(candidate.get("gcnt", 0)),
+                "end": int(end),
+                "origin": origin,
+                "game_hint": game_hint,
+                "extra_container": True,
+                "extra_tag_u32": tag_u32,
+                "extra_group_index": int(group_index),
+                "extra_child_index": int(child_index),
+            }
+            extra_index += 1
+
+        return [records_by_key[key] for key in sorted(records_by_key)]
+
+    def extra_container_instance_spans(self, container_record: Dict[str, int]):
+        img = self.img_bytes
+        cont = int(container_record.get("cont", -1))
+        entry_end = min(len(img), int(container_record.get("end", len(img))))
+        if cont < 0 or cont + 0x30 > len(img) or entry_end <= cont:
+            return []
+        pass_count = self.detect_pass_pointer_count(cont, entry_end)
+        if pass_count <= 1:
+            return []
+        pass_ptrs = [read_u32(img, cont + 0x08 + i * 4) for i in range(pass_count)]
+        # Extra AREA/triggered containers use the same IPL pass order as normal WRLD sector containers.
+        # Do not label these as AREA_PASS_N, because the visible-pass filter treats unknown pass names
+        # as non-model rows and drops the whole AREA/triggered placement table.
+        pass_names = IMG_PASS_NAMES_LCS if str(container_record.get("game_hint", self.detect_sector_game_hint())) == "lcs" else IMG_PASS_NAMES_VCS
+        spans = []
+        total_rows = 0
+        for pass_index in range(pass_count - 1):
+            start_ptr = int(pass_ptrs[pass_index])
+            stop_ptr = int(pass_ptrs[pass_index + 1])
+            if stop_ptr <= start_ptr:
+                continue
+            start = max(cont, cont + start_ptr - 0x20)
+            stop = min(entry_end, cont + stop_ptr - 0x20)
+            if stop <= start:
+                continue
+            row_count = (stop - start) // 0x50
+            if row_count <= 0:
+                continue
+            total_rows += row_count
+            if total_rows > LVZ_MAX_IMG_ROWS_PER_CONTAINER:
+                allowed = max(0, LVZ_MAX_IMG_ROWS_PER_CONTAINER - (total_rows - row_count))
+                stop = start + allowed * 0x50
+            pass_name = pass_names[pass_index] if pass_index < len(pass_names) else f"PASS_{pass_index}"
+            spans.append((pass_index, pass_name, start, stop, pass_ptrs))
+            if total_rows >= LVZ_MAX_IMG_ROWS_PER_CONTAINER:
+                break
+        return spans
+
+    def enumerate_extra_container_details(self, container_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None, include_lod: bool = False):
+        img = self.img_bytes
+        details = []
+        stats = {
+            "container_records": 0,
+            "candidate_rows": 0,
+            "valid_rows": 0,
+            "kept_rows": 0,
+            "skipped_lod_rows": 0,
+            "nonzero_origin_containers": 0,
+        }
+        if container_records is None:
+            container_records = self.find_extra_container_records_from_lvz()
+        stats["container_records"] = len(container_records)
+        for container in container_records:
+            cont = int(container.get("cont", -1))
+            origin = tuple(container.get("origin", (0.0, 0.0, 0.0)))
+            if any(abs(float(v)) > 0.0001 for v in origin[:3]):
+                stats["nonzero_origin_containers"] += 1
+            sector_index = int(container.get("sector_index", -1))
+            for pass_index, pass_name, start, stop, pass_ptrs in self.extra_container_instance_spans(container):
+                off = start
+                while off + 0x50 <= stop:
+                    stats["candidate_rows"] += 1
+                    if not looks_like_img_instance_row(img, off, max_resource_id=max_resource_id):
+                        off += 0x50
+                        continue
+                    stats["valid_rows"] += 1
+                    ipl_raw = read_u16(img, off + 0x00)
+                    ipl_id = int(ipl_raw & 0x7FFF)
+                    res_id = read_u16(img, off + 0x02)
+                    if (not include_lod) and str(pass_name) in IMG_LOD_PASS_NAMES:
+                        stats["skipped_lod_rows"] += 1
+                        off += 0x50
+                        continue
+                    if str(pass_name) in IMG_NON_MODEL_PASS_NAMES:
+                        stats["skipped_lod_rows"] += 1
+                        off += 0x50
+                        continue
+                    if (not include_lod) and str(pass_name) not in IMG_MODEL_PASS_NAMES_DEFAULT:
+                        stats["skipped_lod_rows"] += 1
+                        off += 0x50
+                        continue
+                    sx = half_to_float(read_u16(img, off + 0x04))
+                    sy = half_to_float(read_u16(img, off + 0x06))
+                    sz = half_to_float(read_u16(img, off + 0x08))
+                    sr = half_to_float(read_u16(img, off + 0x0A))
+                    m = struct.unpack_from("<16f", img, off + 0x10)
+                    s0 = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
+                    s1 = math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])
+                    s2 = math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])
+                    details.append((
+                        int(res_id), cont, off - cont, int(ipl_raw), ipl_id,
+                        sx, sy, sz, sr, s0, s1, s2, m,
+                        int(pass_index), str(pass_name), sector_index,
+                        int(container.get("sector_x", 0)), int(container.get("sector_y", 0)), origin,
+                    ))
+                    stats["kept_rows"] += 1
+                    off += 0x50
+        details.sort(key=lambda t: (int(t[15]), int(t[13]), int(t[2])))
+        self.last_extra_container_walk_stats = stats
+        return details
+
+    def merge_instance_details(self, *detail_lists):
+        merged = []
+        seen = set()
+        for detail_list in detail_lists:
+            for detail in detail_list:
+                key = (int(detail[1]), int(detail[2]), int(detail[3]), int(detail[0]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(detail)
+        merged.sort(key=lambda t: (int(t[15]), int(t[13]), int(t[1]), int(t[2])))
+        return merged
 
     def write_sector_csvs(self, lvz_path: str, details, enable_unique: bool):
         all_rows = [(int(d[1]), int(d[2]), int(d[3]), int(d[4]), int(d[0])) for d in details]
@@ -2872,7 +3819,7 @@ class read_img:
                 seen = set()
                 unique_details = []
                 for d in details:
-                    key = (int(d[4]), int(d[0]))
+                    key = (int(d[15]), int(d[13]), int(d[4]), int(d[0]))
                     if key in seen:
                         continue
                     seen.add(key)
@@ -2931,6 +3878,9 @@ class read_img:
             if tag not in (b"DLRW", b"xet\0"):
                 break
 
+            total = read_u32(lvz, group_addr + 0x08)
+            global_rel = read_u32(lvz, group_addr + 0x18)
+            data_base, data_end, img_header_off, used_direct_contimg = self.img_data_base_for_lvz_dlrw_header(group_addr, global_rel, total)
             records.append({
                 "group_index": group_index,
                 "group_type": int(group_type),
@@ -2938,11 +3888,15 @@ class read_img:
                 "lvz_addr": int(group_addr),
                 "tag_u32": read_u32(lvz, group_addr + 0x00),
                 "wrld_type": read_u32(lvz, group_addr + 0x04),
-                "total": read_u32(lvz, group_addr + 0x08),
+                "total": int(total),
                 "g0": read_u32(lvz, group_addr + 0x0C),
                 "g1": read_u32(lvz, group_addr + 0x10),
                 "gcnt": read_u32(lvz, group_addr + 0x14),
-                "cont": read_u32(lvz, group_addr + 0x18),
+                "cont": int(data_base),
+                "end": int(data_end),
+                "img_header_off": int(img_header_off),
+                "global_rel": int(global_rel),
+                "wrldtool_direct_contimg": bool(used_direct_contimg),
             })
             group_index += 1
             cursor += 8
@@ -2966,6 +3920,9 @@ class read_img:
                 child_tag = lvz[child_addr:child_addr + 4]
                 if child_tag not in (b"DLRW", b"xet\0"):
                     break
+                total = read_u32(lvz, child_addr + 0x08)
+                global_rel = read_u32(lvz, child_addr + 0x18)
+                data_base, data_end, img_header_off, used_direct_contimg = self.img_data_base_for_lvz_dlrw_header(child_addr, global_rel, total)
                 records.append({
                     "group_index": int(parent["group_index"]),
                     "group_type": group_type,
@@ -2973,11 +3930,15 @@ class read_img:
                     "lvz_addr": int(child_addr),
                     "tag_u32": read_u32(lvz, child_addr + 0x00),
                     "wrld_type": read_u32(lvz, child_addr + 0x04),
-                    "total": read_u32(lvz, child_addr + 0x08),
+                    "total": int(total),
                     "g0": read_u32(lvz, child_addr + 0x0C),
                     "g1": read_u32(lvz, child_addr + 0x10),
                     "gcnt": read_u32(lvz, child_addr + 0x14),
-                    "cont": read_u32(lvz, child_addr + 0x18),
+                    "cont": int(data_base),
+                    "end": int(data_end),
+                    "img_header_off": int(img_header_off),
+                    "global_rel": int(global_rel),
+                    "wrldtool_direct_contimg": bool(used_direct_contimg),
                 })
         return records
 

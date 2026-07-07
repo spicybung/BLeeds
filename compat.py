@@ -1,21 +1,6 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
-# Author: spicybung
-# Years: 2025 - 2026
-
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
-
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-# This is an attempt at providing compatibility for Blender 2.90
+# SPDX-License-Identifier: GPL-3.0-or-later
+# BLeeds - Blender API compatibility helpers
+# Supports Blender 2.90+ through current 4.x/5.x development builds where possible.
 
 from typing import Any, List
 

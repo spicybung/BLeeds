@@ -457,7 +457,7 @@ def register() -> None:
 
     if not hasattr(bpy.types.Object, "bleeds_model_game"):
         bpy.types.Object.bleeds_model_game = EnumProperty(
-            name="Models",
+            name="3D Models",
             description="Leeds 3D model family",
             items=[
                 ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),
