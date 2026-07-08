@@ -52,4 +52,4 @@ This project is licensed under the GPL 3.0 License - see the [LICENSE](LICENSE) 
 - The GTA modding community.
 - The GTA Mods Wiki & GTAModding Wiki(RIP)for being a huge considerate help in figuring things, such as data structures, out.
 - Daniil Sayanov, for his great help, knowledge in R* Leeds formats, as well as inspiration & motivation.
-- Last, but not least, The_Hero(aap) for their incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
+- Last, but not least, The_Hero(apa) for their incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
