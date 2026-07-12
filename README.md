@@ -1,8 +1,8 @@
-# BLeeds - Rockstar Games Leeds Blender IO
+# Finally, an I/O for the GTA Stories games, and more!
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-BLeeds is an IO for Blender, with scripts designed around the Leeds Engine file formats(Stories, Chinatown Wars, Manhunt 2). It is a work-in-progress reverse engineering of R* Leeds file formats.
+**BLeeds** is an IO for Blender, with scripts designed around the Leeds Engine file formats(Stories, Chinatown Wars, Manhunt 2). It is a work-in-progress reverse engineering of R* Leeds file formats.
 
 ## Supported Formats
 
