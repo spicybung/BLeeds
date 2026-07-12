@@ -48,12 +48,72 @@ class LvzImgImportProgress:
         self.stage = ""
         self.last_redraw_time = 0.0
         self.last_report_bucket = -1
+        self.initial_object_names = set()
+        self.initial_mesh_names = set()
+        self.initial_material_names = set()
+        self.initial_image_names = set()
+        self.initial_collection_names = set()
+
+    def capture_initial_data_blocks(self):
+        try:
+            self.initial_object_names = set(bpy.data.objects.keys())
+        except Exception:
+            self.initial_object_names = set()
+        try:
+            self.initial_mesh_names = set(bpy.data.meshes.keys())
+        except Exception:
+            self.initial_mesh_names = set()
+        try:
+            self.initial_material_names = set(bpy.data.materials.keys())
+        except Exception:
+            self.initial_material_names = set()
+        try:
+            self.initial_image_names = set(bpy.data.images.keys())
+        except Exception:
+            self.initial_image_names = set()
+        try:
+            self.initial_collection_names = set(bpy.data.collections.keys())
+        except Exception:
+            self.initial_collection_names = set()
+
+    def remove_failed_import_data_blocks(self):
+        try:
+            for obj in list(bpy.data.objects):
+                if obj.name not in self.initial_object_names:
+                    bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            pass
+        try:
+            for mesh in list(bpy.data.meshes):
+                if mesh.name not in self.initial_mesh_names and mesh.users == 0:
+                    bpy.data.meshes.remove(mesh)
+        except Exception:
+            pass
+        try:
+            for material in list(bpy.data.materials):
+                if material.name not in self.initial_material_names and material.users == 0:
+                    bpy.data.materials.remove(material)
+        except Exception:
+            pass
+        try:
+            for image in list(bpy.data.images):
+                if image.name not in self.initial_image_names and image.users == 0:
+                    bpy.data.images.remove(image)
+        except Exception:
+            pass
+        try:
+            for collection in list(bpy.data.collections):
+                if collection.name not in self.initial_collection_names:
+                    bpy.data.collections.remove(collection)
+        except Exception:
+            pass
 
     def begin(self, stage="Reading LVZ container"):
         global _ACTIVE_IMPORT_PROGRESS
         _ACTIVE_IMPORT_PROGRESS = self
         self.started = True
         self.finished = False
+        self.capture_initial_data_blocks()
         if self.window_manager is not None:
             try:
                 self.window_manager.progress_begin(0, 100)
@@ -159,6 +219,8 @@ class LvzImgImportProgress:
         self.finished = True
         final_stage = str(message or ("Import complete" if succeeded else "Import cancelled"))
         final_value = 100 if succeeded else max(0, self.value)
+        if not succeeded:
+            self.remove_failed_import_data_blocks()
         if self.window_manager is not None:
             try:
                 self.window_manager.progress_update(final_value)
@@ -3207,6 +3269,7 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
         max_resource_id=max_resource_id,
         include_alt_12_layouts=include_alt_12_layouts,
         wanted_res_ids=wanted_res_ids,
+        progress_callback=progress_callback,
     )
     if needed_sector_res_keys is not None:
         needed_sector_res_keys = set(needed_sector_res_keys)
@@ -3363,7 +3426,7 @@ def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.re
         for record in sorted(sector_records, key=lambda item: (int(item.get("row_index", -1)), int(item.get("sector_index", -1))))
         if int(record.get("row_index", -1)) >= 0
     ]
-    overlay_rows = img_reader.collect_sector_overlay_resources(row_base_records, max_resource_id=max_resource_id, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids)
+    overlay_rows = img_reader.collect_sector_overlay_resources(row_base_records, max_resource_id=max_resource_id, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids, progress_callback=progress_callback)
     if needed_row_res_keys is not None:
         needed_row_res_keys = set(needed_row_res_keys)
         overlay_rows = [row for row in overlay_rows if (int(row.get("row_index", -1)), int(row.get("res_id", -1))) in needed_row_res_keys]
@@ -3484,7 +3547,7 @@ def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.
             "nested_child_index": child_index,
         })
 
-    overlay_rows = img_reader.collect_sector_overlay_resources(nested_records, max_resource_id=None, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids)
+    overlay_rows = img_reader.collect_sector_overlay_resources(nested_records, max_resource_id=None, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids, progress_callback=progress_callback)
     if needed_row_res_keys:
         overlay_rows = [
             row for row in overlay_rows
@@ -3573,7 +3636,7 @@ def build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader:
     )
     parser.material_by_res_index = lvz_reader.material_by_res_index
 
-    overlay_rows = img_reader.collect_sector_overlay_resources(extra_container_records, max_resource_id=None, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids)
+    overlay_rows = img_reader.collect_sector_overlay_resources(extra_container_records, max_resource_id=None, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids, progress_callback=progress_callback)
     if needed_res_ids is not None:
         needed_res_ids = set(int(value) for value in needed_res_ids)
         overlay_rows = [row for row in overlay_rows if int(row.get("res_id", -1)) in needed_res_ids]
@@ -4105,11 +4168,23 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
     ide_ipl_to_name = ide_ipl_to_name or {}
 
     overlay_by_res: Dict[int, bpy.types.Object] = {}
+    continuation_by_res: Dict[int, bpy.types.Object] = {}
     for (sector_index, res_id), obj in overlay_by_sector_res.items():
         if obj is None:
             continue
-        old_obj = overlay_by_res.get(int(res_id))
-        overlay_by_res[int(res_id)] = choose_better_blds_candidate(old_obj, obj)
+        resource_id = int(res_id)
+        old_obj = overlay_by_res.get(resource_id)
+        overlay_by_res[resource_id] = choose_better_blds_candidate(old_obj, obj)
+        try:
+            is_continuation = bool(obj.get("blds_img_continues_in_img", False))
+        except Exception:
+            is_continuation = False
+        if is_continuation:
+            old_continuation = continuation_by_res.get(resource_id)
+            continuation_by_res[resource_id] = choose_better_blds_candidate(old_continuation, obj)
+
+    if continuation_by_res:
+        LVZ.dbg(f"[continues-img] proven placement model pool: {len(continuation_by_res)} resource ids")
 
     extra_by_res: Dict[int, bpy.types.Object] = {}
     for obj in extra_resource_objects:
@@ -4713,6 +4788,9 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
 
         def lookup_primary_placement_model(model_id: int):
             model_id = int(model_id)
+            obj = continuation_by_res.get(model_id)
+            if obj is not None:
+                return obj, "img_continuation_model"
             obj = overlay_by_sector_res.get((sector_index, model_id))
             if obj is not None:
                 return obj, "exact_sector_model"
@@ -4747,7 +4825,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                 fallback_row += 1
             elif primary_model_source == "area_model":
                 fallback_extra += 1
-            elif primary_model_source == "global_sector_model":
+            elif primary_model_source in ("global_sector_model", "img_continuation_model"):
                 fallback_overlay += 1
         # V72: if the Resource ID side is absent but the row IPL/model id has a
         # real parsed MDL payload, use the real MDL. This matches the WRLD row

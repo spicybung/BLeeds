@@ -3252,7 +3252,7 @@ class read_img:
                 break
         return spans
 
-    def collect_sector_overlay_resources(self, sector_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None, include_alt_12_layouts: bool = False, wanted_res_ids: Optional[set] = None) -> List[Dict[str, int]]:
+    def collect_sector_overlay_resources(self, sector_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None, include_alt_12_layouts: bool = False, wanted_res_ids: Optional[set] = None, progress_callback=None) -> List[Dict[str, int]]:
         img = self.img_bytes
         if sector_records is None:
             sector_records = self.find_sector_container_records_from_lvz()
@@ -3583,8 +3583,14 @@ class read_img:
         }
         seen_keys = set()
         sector_records = self.find_sector_container_records_from_lvz()
-        stats["sector_records"] = len(sector_records)
-        for sector in sector_records:
+        sector_total = len(sector_records)
+        stats["sector_records"] = sector_total
+        for sector_number, sector in enumerate(sector_records):
+            if progress_callback is not None:
+                try:
+                    progress_callback(sector_number, sector_total)
+                except Exception:
+                    pass
             cont = int(sector.get("cont", -1))
             origin = tuple(sector.get("origin", (0.0, 0.0, 0.0)))
             sector_index = int(sector.get("sector_index", -1))
