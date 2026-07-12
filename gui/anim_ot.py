@@ -14,6 +14,7 @@ from ..ops import anim_importer
 class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_anim"
     bl_label = "Import R* Leeds ANIM"
+    bl_description = "Import animation data from a Rockstar Leeds ANIM file"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".anim"

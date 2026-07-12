@@ -25,7 +25,7 @@ import struct
 from mathutils import Vector, Matrix
 
 from ..leedsLib import mdl as mdl_lib
-from ..compat import ensureMeshAttribute, getMeshAttribute, removeMeshAttribute
+from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute
 
 def natural_sort_key(name: str) -> List[object]:
 
@@ -111,7 +111,7 @@ def resolve_texture_name(mat) -> str:
 
     return mat.name.rsplit(".", 1)[0]
 
-def collect_material_names_in_slot_order(mesh_obj) -> list[str]:
+def collect_material_names_in_slot_order(mesh_obj):
     names = []
     for slot in getattr(mesh_obj, "material_slots", []):
         mat = slot.material
@@ -180,7 +180,7 @@ def ensureMdlIntAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any:
             pass
 
     expected_count = getMdlAttributeDomainSize(mesh, domain_key)
-    attribute = getMeshAttribute(mesh, name)
+    attribute = get_mesh_attribute(mesh, name)
 
     if attribute is not None:
         try:
@@ -189,14 +189,14 @@ def ensureMdlIntAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any:
             existing_domain = domain_key
         if existing_domain and existing_domain != domain_key:
             try:
-                removeMeshAttribute(mesh, attribute)
+                remove_mesh_attribute(mesh, attribute)
                 attribute = None
             except Exception:
                 return attribute
 
     if attribute is None:
         try:
-            attribute = ensureMeshAttribute(mesh, name, 'INT', domain_key)
+            attribute = ensure_mesh_attribute(mesh, name, 'INT', domain_key)
         except Exception:
             return None
 
@@ -220,8 +220,8 @@ def ensureMdlIntAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any:
 
     if expected_count > 0 and current_count == 0:
         try:
-            removeMeshAttribute(mesh, attribute)
-            attribute = ensureMeshAttribute(mesh, name, 'INT', domain_key)
+            remove_mesh_attribute(mesh, attribute)
+            attribute = ensure_mesh_attribute(mesh, name, 'INT', domain_key)
         except Exception:
             pass
 
@@ -246,7 +246,7 @@ def setMdlIntAttributeValue(attribute: Any, index: int, value: int) -> bool:
 
 def getMdlIntAttribute(mesh: bpy.types.Mesh, name: str):
     try:
-        attribute = getMeshAttribute(mesh, name)
+        attribute = get_mesh_attribute(mesh, name)
         if attribute is None:
             return None
         return attribute
@@ -1563,7 +1563,7 @@ def buildPedWriterMaterialNames(root_cache: Dict[str, Any], part_names: List[str
         return names_from_root
 
     unique_names: List[str] = []
-    seen: set[str] = set()
+    seen = set()
     for name in list(part_names or []):
         clean = str(name or "default")
         key = clean.lower()
@@ -1591,7 +1591,7 @@ def buildPedWriterMaterialNames(root_cache: Dict[str, Any], part_names: List[str
 
 def getPointSourceEmitOrder(mesh: bpy.types.Mesh) -> List[int]:
     try:
-        attribute = getMeshAttribute(mesh, "bleeds_mdl_point_source_emit_index")
+        attribute = get_mesh_attribute(mesh, "bleeds_mdl_point_source_emit_index")
         if attribute is None:
             return list(range(len(mesh.vertices)))
         values: List[Tuple[int, int]] = []
@@ -1627,7 +1627,7 @@ def buildVertexLoopLookup(mesh: bpy.types.Mesh) -> Dict[int, int]:
 
 def getCornerSourceEmitOrder(mesh: bpy.types.Mesh) -> List[int]:
     try:
-        attribute = getMeshAttribute(mesh, "bleeds_mdl_corner_source_emit_index")
+        attribute = get_mesh_attribute(mesh, "bleeds_mdl_corner_source_emit_index")
         if attribute is None:
             return []
         if len(attribute.data) < len(mesh.loops):
@@ -1661,7 +1661,7 @@ def getPointSourceEmitOrder(mesh: bpy.types.Mesh) -> List[int]:
         return []
 
     try:
-        attribute = getMeshAttribute(mesh, "bleeds_mdl_point_source_emit_index")
+        attribute = get_mesh_attribute(mesh, "bleeds_mdl_point_source_emit_index")
         if attribute is None:
             return fallback
         if len(attribute.data) < vertex_count:
@@ -2232,7 +2232,7 @@ def fillMissingPointRawSkinByNearest(mesh_obj: bpy.types.Object, mesh: bpy.types
     )
 
     try:
-        attrs = [getMeshAttribute(mesh, name) for name in names]
+        attrs = [get_mesh_attribute(mesh, name) for name in names]
     except Exception:
         return 0
     if any(attr is None for attr in attrs):
@@ -2354,7 +2354,7 @@ def readImportedSkinRawDwordsFromPointAttributes(mesh: bpy.types.Mesh) -> List[T
         "bleeds_mdl_point_skin_raw3",
     )
     try:
-        attrs = [getMeshAttribute(mesh, name) for name in names]
+        attrs = [get_mesh_attribute(mesh, name) for name in names]
     except Exception:
         return []
     if any(attr is None for attr in attrs):
@@ -2473,7 +2473,7 @@ def ensureMdlAttribute(mesh: bpy.types.Mesh, name: str, data_type: str, domain: 
     domain_key = str(domain or 'POINT').upper().strip()
     data_type_key = str(data_type or 'INT').upper().strip()
     try:
-        attr = getMeshAttribute(mesh, name)
+        attr = get_mesh_attribute(mesh, name)
     except Exception:
         attr = None
     if attr is not None:
@@ -2485,13 +2485,13 @@ def ensureMdlAttribute(mesh: bpy.types.Mesh, name: str, data_type: str, domain: 
             existing_type = data_type_key
         if (existing_domain and existing_domain != domain_key) or (existing_type and existing_type != data_type_key):
             try:
-                removeMeshAttribute(mesh, attr)
+                remove_mesh_attribute(mesh, attr)
                 attr = None
             except Exception:
                 return attr
     if attr is None:
         try:
-            attr = ensureMeshAttribute(mesh, name, data_type_key, domain_key)
+            attr = ensure_mesh_attribute(mesh, name, data_type_key, domain_key)
         except Exception:
             return None
     return attr
@@ -2533,8 +2533,8 @@ def readMdlSkinPairsFromAttributes(mesh: bpy.types.Mesh, vertex_index: int) -> L
         return []
 
     try:
-        node_attrs = [getMeshAttribute(mesh, name) for name in SKIN_NODE_ATTRIBUTE_NAMES]
-        weight_attrs = [getMeshAttribute(mesh, name) for name in SKIN_WEIGHT_ATTRIBUTE_NAMES]
+        node_attrs = [get_mesh_attribute(mesh, name) for name in SKIN_NODE_ATTRIBUTE_NAMES]
+        weight_attrs = [get_mesh_attribute(mesh, name) for name in SKIN_WEIGHT_ATTRIBUTE_NAMES]
     except Exception:
         return []
     if any(attr is None for attr in node_attrs) or any(attr is None for attr in weight_attrs):
@@ -2648,7 +2648,7 @@ def findMdlSkinSourceMeshes(root_obj: Optional[bpy.types.Object], current_obj: b
         if mesh is None:
             continue
         try:
-            if getMeshAttribute(mesh, "bleeds_skin_node_0") is None or getMeshAttribute(mesh, "bleeds_skin_weight_0") is None:
+            if get_mesh_attribute(mesh, "bleeds_skin_node_0") is None or get_mesh_attribute(mesh, "bleeds_skin_weight_0") is None:
                 continue
         except Exception:
             continue

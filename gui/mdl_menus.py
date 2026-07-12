@@ -19,7 +19,7 @@ import math
 from typing import Optional, Tuple
 
 import bpy
-from ..compat import getMeshAttribute
+from .. import get_mesh_attribute
 from bpy.props import (
     BoolProperty,
     EnumProperty,
@@ -98,6 +98,7 @@ def value_as_power_of_two_fraction_hint(value: float, eps: float = 1e-6) -> str:
 class EXPORT_OT_MDL_Bake_LeedsScalePos(bpy.types.Operator):
     bl_idname = "bleeds.mdl_bake_leeds_scale_pos"
     bl_label = "Bake Root into Leeds Scale/Pos"
+    bl_description = "Bake the root transform into the stored Leeds scale and position"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -236,7 +237,7 @@ class EXPORT_PT_MDL_LeedsScalePos(bpy.types.Panel):
                 meshes = gather_mesh_parts(context, root)
             except Exception:
                 meshes = []
-            counts: list[int] = []
+            counts = []
             depsgraph = context.evaluated_depsgraph_get()
             for obj in meshes:
 
@@ -268,6 +269,7 @@ class EXPORT_PT_MDL_LeedsScalePos(bpy.types.Panel):
 class EXPORT_OT_MDL_StampSemanticAttributes(bpy.types.Operator):
     bl_idname = "bleeds.mdl_stamp_semantic_attributes"
     bl_label = "Stamp/Refresh MDL Attributes"
+    bl_description = "Create or refresh the MDL export attributes on model meshes"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -417,7 +419,7 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
         attr_col = attr_box.column(align=True)
         for attr_name, domain in attr_specs:
             expected = getMdlAttributeExpectedCount(mesh, domain)
-            attr = getMeshAttribute(mesh, attr_name)
+            attr = get_mesh_attribute(mesh, attr_name)
             row = attr_col.row(align=True)
             if attr is None:
                 row.alert = True

@@ -18,8 +18,203 @@ from typing import Dict, List, Optional, Tuple
 import bpy
 from mathutils import Matrix
 
-from ..compat import setMeshAutoSmooth
+from .. import set_mesh_auto_smooth
 from ..leedsLib import lvz_img as LVZ
+
+_ACTIVE_IMPORT_PROGRESS = None
+_ACTIVE_IMPORT_UNDO_STATE = None
+
+
+def draw_lvz_img_import_progress_popup(menu, context):
+    layout = menu.layout
+    layout.use_property_split = False
+    layout.use_property_decorate = False
+    window_manager = context.window_manager
+    column = layout.column(align=True)
+    column.prop(window_manager, "bleeds_lvz_img_progress", text="Progress", slider=True)
+    stage_text = str(getattr(window_manager, "bleeds_lvz_img_stage", "") or "")
+    if stage_text:
+        column.label(text=stage_text)
+
+
+class LvzImgImportProgress:
+    def __init__(self, operator, context):
+        self.operator = operator
+        self.context = context
+        self.window_manager = getattr(context, "window_manager", None)
+        self.started = False
+        self.finished = False
+        self.value = -1
+        self.stage = ""
+        self.last_redraw_time = 0.0
+        self.last_report_bucket = -1
+
+    def begin(self, stage="Reading LVZ container"):
+        global _ACTIVE_IMPORT_PROGRESS
+        _ACTIVE_IMPORT_PROGRESS = self
+        self.started = True
+        self.finished = False
+        if self.window_manager is not None:
+            try:
+                self.window_manager.progress_begin(0, 100)
+            except Exception:
+                pass
+            try:
+                self.window_manager.bleeds_lvz_img_progress = 0
+                self.window_manager.bleeds_lvz_img_stage = str(stage)
+            except Exception:
+                pass
+            try:
+                self.window_manager.popup_menu(
+                    draw_lvz_img_import_progress_popup,
+                    title="LVZ + IMG Import",
+                    icon="TIME",
+                )
+            except Exception:
+                pass
+        try:
+            self.context.window.cursor_set("WAIT")
+        except Exception:
+            pass
+        self.update(0, stage, force=True)
+        return self
+
+    def update(self, value, stage=None, force=False):
+        if self.finished:
+            return
+        try:
+            value = max(0, min(100, int(round(float(value)))))
+        except Exception:
+            value = max(0, self.value)
+        if not force and self.value >= 0 and value < self.value:
+            value = self.value
+        if stage is not None:
+            self.stage = str(stage)
+        changed = value != self.value
+        self.value = value
+
+        if self.window_manager is not None:
+            try:
+                self.window_manager.progress_update(value)
+            except Exception:
+                pass
+            try:
+                self.window_manager.bleeds_lvz_img_progress = value
+                self.window_manager.bleeds_lvz_img_stage = self.stage
+            except Exception:
+                pass
+
+        status_text = "BLeeds LVZ + IMG | {:d}%".format(value)
+        if self.stage:
+            status_text += " | " + self.stage
+        try:
+            self.context.workspace.status_text_set(status_text)
+        except Exception:
+            pass
+
+        current_time = time.monotonic()
+        should_redraw = force or (changed and current_time - self.last_redraw_time >= 0.08)
+        if should_redraw:
+            self.last_redraw_time = current_time
+            self.redraw()
+
+        report_bucket = value // 10
+        if report_bucket != self.last_report_bucket and value not in (0, 100):
+            self.last_report_bucket = report_bucket
+            try:
+                self.operator.report({'INFO'}, "LVZ + IMG import: {:d}% - {}".format(value, self.stage))
+            except Exception:
+                pass
+
+    def update_range(self, range_start, range_end, index, total, stage):
+        try:
+            total = max(1, int(total))
+            index = max(0, min(total, int(index)))
+            fraction = float(index) / float(total)
+        except Exception:
+            fraction = 0.0
+        value = float(range_start) + (float(range_end) - float(range_start)) * fraction
+        self.update(value, stage)
+
+    def redraw(self):
+        try:
+            for window in self.window_manager.windows:
+                screen = getattr(window, "screen", None)
+                if screen is None:
+                    continue
+                for area in screen.areas:
+                    area.tag_redraw()
+        except Exception:
+            pass
+        try:
+            if bpy.ops.wm.redraw_timer.poll():
+                bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
+        except Exception:
+            pass
+
+    def finish(self, succeeded=True, message=None):
+        global _ACTIVE_IMPORT_PROGRESS
+        if self.finished:
+            return
+        self.finished = True
+        final_stage = str(message or ("Import complete" if succeeded else "Import cancelled"))
+        final_value = 100 if succeeded else max(0, self.value)
+        if self.window_manager is not None:
+            try:
+                self.window_manager.progress_update(final_value)
+                self.window_manager.bleeds_lvz_img_progress = final_value
+                self.window_manager.bleeds_lvz_img_stage = final_stage
+            except Exception:
+                pass
+        try:
+            self.context.workspace.status_text_set(None)
+        except Exception:
+            pass
+        try:
+            self.context.window.cursor_set("DEFAULT")
+        except Exception:
+            pass
+        try:
+            if self.window_manager is not None:
+                self.window_manager.progress_end()
+        except Exception:
+            pass
+        self.redraw()
+        if _ACTIVE_IMPORT_PROGRESS is self:
+            _ACTIVE_IMPORT_PROGRESS = None
+        restore_active_import_undo_state()
+
+
+def restore_active_import_undo_state():
+    global _ACTIVE_IMPORT_UNDO_STATE
+    state = _ACTIVE_IMPORT_UNDO_STATE
+    _ACTIVE_IMPORT_UNDO_STATE = None
+    if state is None:
+        return
+    edit_preferences, enabled = state
+    try:
+        edit_preferences.use_global_undo = bool(enabled)
+    except Exception:
+        pass
+
+
+def finish_active_import_progress(context=None, succeeded=True, message=None):
+    global _ACTIVE_IMPORT_PROGRESS
+    progress = _ACTIVE_IMPORT_PROGRESS
+    if progress is not None:
+        progress.finish(succeeded=succeeded, message=message)
+    else:
+        if context is not None:
+            try:
+                context.workspace.status_text_set(None)
+            except Exception:
+                pass
+            try:
+                context.window.cursor_set("DEFAULT")
+            except Exception:
+                pass
+    restore_active_import_undo_state()
+
 
 UNPACK_BYTES = struct.pack("<I", LVZ.read_lvz.UNPACK)
 IMG_MDL_SCAN_LIMIT = 0x240
@@ -1452,7 +1647,7 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
     mesh_name = f"{stem}{res_index}"
     mesh = bpy.data.meshes.new(mesh_name)
     mesh.from_pydata(vertices, [], faces)
-    setMeshAutoSmooth(mesh, True)
+    set_mesh_auto_smooth(mesh, True)
     mesh.validate(clean_customdata=False)
     mesh.update()
 
@@ -2544,7 +2739,7 @@ def collect_img_mdl_candidates(img_reader: LVZ.read_img) -> List[Dict[str, int]]
         }
     return [candidates_by_cont[key] for key in sorted(candidates_by_cont)]
 
-def build_lvz_resource_mdl_objects(lvz_reader: LVZ.read_lvz, rows: List[Dict]) -> Dict[int, bpy.types.Object]:
+def build_lvz_resource_mdl_objects(lvz_reader: LVZ.read_lvz, rows: List[Dict], progress_callback=None) -> Dict[int, bpy.types.Object]:
     mdl_rows = [row for row in rows if row.get("kind") == "MDL"]
     built_by_res: Dict[int, bpy.types.Object] = {}
     if not mdl_rows:
@@ -2552,7 +2747,10 @@ def build_lvz_resource_mdl_objects(lvz_reader: LVZ.read_lvz, rows: List[Dict]) -
         return built_by_res
 
     LVZ.dbg("— LVZ Resource MDLs —")
+    total_mdl_rows = len(mdl_rows)
     for mdl_debug_i, row in enumerate(mdl_rows):
+        if progress_callback is not None and (mdl_debug_i % 8 == 0 or mdl_debug_i + 1 == total_mdl_rows):
+            progress_callback(mdl_debug_i + 1, total_mdl_rows)
         res_index = int(row["index"])
         verbose_mdl = IMPORT_VERBOSE_MDL_DEBUG or mdl_debug_i < IMPORT_MDL_DEBUG_LIMIT
         res_addr = int(row["res_addr"])
@@ -2786,7 +2984,7 @@ def _probe_ps2_img_descriptor_for_continuation(img_bytes: bytes, off: int) -> Op
     return None
 
 
-def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, wanted_res_ids) -> Dict[int, dict]:
+def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, wanted_res_ids, progress_callback=None) -> Dict[int, dict]:
     if not ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG or not img_bytes:
         return {}
     try:
@@ -2823,7 +3021,12 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
     scanned_descriptors = 0
     matched_descriptors = 0
     parser_failures = 0
+    total_scan_steps = max(1, (max(0, n - 0x20) + stride - 1) // stride)
+    scan_step = 0
     while off + 0x20 <= n:
+        scan_step += 1
+        if progress_callback is not None and (scan_step % 4096 == 0 or scan_step == total_scan_steps):
+            progress_callback(scan_step, total_scan_steps)
         descriptor = _probe_ps2_img_descriptor_for_continuation(img_bytes, off)
         if descriptor is None:
             off += stride
@@ -2914,7 +3117,7 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
     return found
 
 
-def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str]) -> Dict[Tuple[int, int], bpy.types.Object]:
+def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str], progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
     if not ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
         return {}
     try:
@@ -2924,7 +3127,13 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
     if not wanted:
         return {}
 
-    proofs = scan_continues_in_img_descriptor_proofs(stem, img_bytes, lvz_reader, wanted)
+    proofs = scan_continues_in_img_descriptor_proofs(
+        stem,
+        img_bytes,
+        lvz_reader,
+        wanted,
+        progress_callback=progress_callback,
+    )
     if not proofs:
         LVZ.dbg(f"[continues-img] descriptor scan wanted={len(wanted)} created=0")
         return {}
@@ -2939,7 +3148,11 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
 
     out: Dict[Tuple[int, int], bpy.types.Object] = {}
     logged = 0
-    for index, res_id in enumerate(sorted(proofs)):
+    sorted_proof_ids = sorted(proofs)
+    total_proofs = len(sorted_proof_ids)
+    for index, res_id in enumerate(sorted_proof_ids):
+        if progress_callback is not None:
+            progress_callback(index + 1, total_proofs)
         proof = proofs[int(res_id)]
         raw_off = int(proof.get('raw_off', -1))
         after = int(proof.get('after', -1))
@@ -2980,7 +3193,7 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
     LVZ.dbg(f"[continues-img] descriptor scan wanted={len(wanted)} found={len(proofs)} created={len(out)}")
     return out
 
-def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_sector_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, collapse_by_res_id: bool = False) -> Dict[Tuple[int, int], bpy.types.Object]:
+def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_sector_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, collapse_by_res_id: bool = False, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
     parser = LVZ.read_lvz(
         decomp_bytes=img_bytes,
         stem=stem,
@@ -2989,10 +3202,19 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
     )
     parser.material_by_res_index = lvz_reader.material_by_res_index
 
-    overlay_rows = img_reader.collect_sector_overlay_resources(sector_records, max_resource_id=max_resource_id, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids)
+    overlay_rows = img_reader.collect_sector_overlay_resources(
+        sector_records,
+        max_resource_id=max_resource_id,
+        include_alt_12_layouts=include_alt_12_layouts,
+        wanted_res_ids=wanted_res_ids,
+    )
     if needed_sector_res_keys is not None:
         needed_sector_res_keys = set(needed_sector_res_keys)
-        overlay_rows = [row for row in overlay_rows if (int(row.get("sector_index", -1)), int(row.get("res_id", -1))) in needed_sector_res_keys]
+        overlay_rows = [
+            row for row in overlay_rows
+            if (int(row.get("sector_index", -1)), int(row.get("res_id", -1))) in needed_sector_res_keys
+        ]
+
     overlay_by_sector_res: Dict[Tuple[int, int], bpy.types.Object] = {}
     parsed = 0
     skipped_duplicate = 0
@@ -3001,10 +3223,16 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
     preselected_by_key = {}
     preselect_input_rows = 0
     preselect_dropped_rows = 0
+
     if collapse_by_res_id:
         best_by_res = {}
         preselect_input_rows = len(overlay_rows)
-        for overlay in overlay_rows:
+        preselect_total = len(overlay_rows)
+        for overlay_index, overlay in enumerate(overlay_rows):
+            if progress_callback is not None and (
+                overlay_index % 8 == 0 or overlay_index + 1 == preselect_total
+            ):
+                progress_callback(overlay_index + 1, max(1, preselect_total))
             try:
                 res_id = int(overlay.get("res_id", -1))
                 raw_off = int(overlay.get("raw_off", -1))
@@ -3025,9 +3253,10 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
             if score < 0.0:
                 skipped_non_geometry += 1
                 continue
-            old_best = best_by_res.get(res_id)
-            if old_best is None or score > old_best[0]:
+            previous = best_by_res.get(res_id)
+            if previous is None or score > previous[0]:
                 best_by_res[res_id] = (score, overlay, material_list, groups)
+
         overlay_rows = []
         for score, overlay, material_list, groups in best_by_res.values():
             sector_index = int(overlay.get("sector_index", -1))
@@ -3042,7 +3271,12 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
     if collapse_by_res_id:
         LVZ.dbg(f"[sector-mdl] fast preselect by RES: input={preselect_input_rows} kept={len(overlay_rows)} dropped={preselect_dropped_rows}")
 
-    for overlay in overlay_rows:
+    total_overlay_rows = len(overlay_rows)
+    for overlay_index, overlay in enumerate(overlay_rows):
+        if progress_callback is not None and (
+            overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows
+        ):
+            progress_callback(overlay_index + 1, max(1, total_overlay_rows))
         sector_index = int(overlay["sector_index"])
         res_id = int(overlay["res_id"])
         key = (sector_index, res_id)
@@ -3107,7 +3341,7 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
     return overlay_by_sector_res
 
 
-def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None) -> Dict[Tuple[int, int], bpy.types.Object]:
+def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
     if not sector_records:
         return {}
 
@@ -3142,7 +3376,10 @@ def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.re
     LVZ.dbg("— IMG Row Shared Resource MDLs —")
     LVZ.dbg(f"[row-mdl] row-base resource rows: {len(overlay_rows)}")
 
-    for overlay in overlay_rows:
+    total_overlay_rows = len(overlay_rows)
+    for overlay_index, overlay in enumerate(overlay_rows):
+        if progress_callback is not None and (overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows):
+            progress_callback(overlay_index + 1, total_overlay_rows)
         row_index = int(overlay.get("row_index", -1))
         res_id = int(overlay.get("res_id", -1))
         key = (row_index, res_id)
@@ -3196,7 +3433,7 @@ def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.re
     )
     return row_overlay_by_res
 
-def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None) -> Dict[Tuple[int, int], bpy.types.Object]:
+def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
     parser = LVZ.read_lvz(
         decomp_bytes=img_bytes,
         stem=stem,
@@ -3263,7 +3500,10 @@ def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.
     LVZ.dbg(f"[nested-mdl] child containers scanned: {len(nested_records)}")
     LVZ.dbg(f"[nested-mdl] matching resource rows: {len(overlay_rows)}")
 
-    for overlay in overlay_rows:
+    total_overlay_rows = len(overlay_rows)
+    for overlay_index, overlay in enumerate(overlay_rows):
+        if progress_callback is not None and (overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows):
+            progress_callback(overlay_index + 1, total_overlay_rows)
         row_index = int(overlay.get("row_index", -1))
         res_id = int(overlay.get("res_id", -1))
         raw_off = int(overlay.get("raw_off", -1))
@@ -3321,7 +3561,7 @@ def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.
     return nested_by_row_res
 
 
-def build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, extra_container_records: List[Dict[str, int]], source_lvz_path: str, img_name: Optional[str], needed_res_ids=None, include_alt_12_layouts: bool = False, wanted_res_ids=None) -> List[bpy.types.Object]:
+def build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, extra_container_records: List[Dict[str, int]], source_lvz_path: str, img_name: Optional[str], needed_res_ids=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None) -> List[bpy.types.Object]:
     if not extra_container_records:
         return []
 
@@ -3346,7 +3586,10 @@ def build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader:
         LVZ.dbg("— IMG AREA Direct Resource MDLs —")
         LVZ.dbg(f"[area-mdl] direct AREA/resource rows: {len(overlay_rows)}")
 
-    for overlay in overlay_rows:
+    total_overlay_rows = len(overlay_rows)
+    for overlay_index, overlay in enumerate(overlay_rows):
+        if progress_callback is not None and (overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows):
+            progress_callback(overlay_index + 1, total_overlay_rows)
         sector_index = int(overlay.get("sector_index", -1))
         res_id = int(overlay.get("res_id", -1))
         raw_off = int(overlay.get("raw_off", -1))
@@ -3844,7 +4087,7 @@ def lookup_neighbor_alias_base(
     return None, -1, "", 0, rejected
 
 
-def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None) -> Tuple[int, int, int]:
+def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None, progress_callback=None) -> Tuple[int, int, int]:
     if not details:
         return 0, 0, 0
 
@@ -4429,7 +4672,10 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
     except Exception:
         positive_sector_pair_keys = set()
 
-    for detail in details:
+    total_details = len(details)
+    for detail_index, detail in enumerate(details):
+        if progress_callback is not None and (detail_index % 128 == 0 or detail_index + 1 == total_details):
+            progress_callback(detail_index + 1, total_details)
         used_ipl_model_fallback = False
         used_force_missing_img_mdl = False
         used_exact_missing_img_mdl = False
@@ -6025,6 +6271,9 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         operator.report({'ERROR'}, "No LVZ selected.")
         return {'CANCELLED'}
 
+    progress = LvzImgImportProgress(operator, context).begin("Reading LVZ container")
+    progress.update(1, "Reading LVZ container", force=True)
+
     stem = Path(lvz_path).stem
     globals()["_CURRENT_IMPORT_STEM"] = stem
     log_path = str(Path(lvz_path).with_suffix("")) + "_blds_import.log" if write_debug_log else None
@@ -6071,21 +6320,27 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     t0 = time.time()
     lvz_bytes_in = Path(lvz_path).read_bytes()
     decomp, was_cmp = LVZ.safe_decompress(lvz_bytes_in)
+    progress.update(4, "Decoding LVZ container")
 
     LVZ.dbg("===== LVZ Walk + IMG Match/Apply =====")
     LVZ.dbg("Patch: LVZ_IMG_CONTINUES_IN_IMG_EXACT_RESOURCE_TABLE_RECOVERY_V97")
     old_global_undo = None
     try:
-        old_global_undo = bool(bpy.context.preferences.edit.use_global_undo)
+        global _ACTIVE_IMPORT_UNDO_STATE
+        edit_preferences = bpy.context.preferences.edit
+        old_global_undo = bool(edit_preferences.use_global_undo)
+        _ACTIVE_IMPORT_UNDO_STATE = (edit_preferences, old_global_undo)
         if old_global_undo:
-            bpy.context.preferences.edit.use_global_undo = False
+            edit_preferences.use_global_undo = False
             LVZ.dbg("[speed] disabled Blender global undo during LVZ+IMG import")
     except Exception as exc:
         LVZ.dbg(f"[speed] could not disable Blender global undo: {exc}")
 
     def restore_global_undo():
         nonlocal old_global_undo
+        global _ACTIVE_IMPORT_UNDO_STATE
         if old_global_undo is None:
+            restore_active_import_undo_state()
             return
         try:
             bpy.context.preferences.edit.use_global_undo = bool(old_global_undo)
@@ -6093,6 +6348,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         except Exception as exc:
             LVZ.dbg(f"[speed] could not restore Blender global undo: {exc}")
         old_global_undo = None
+        _ACTIVE_IMPORT_UNDO_STATE = None
 
     LVZ.dbg("[mode] reference DFF disabled: no Beachx DFF search, no reference geometry override, no reference proof CSV; LVZ+IMG only")
     LVZ.dbg("[mode] V94 LVZ+IMG resource-id import active: row RES/object id is authoritative; EMPTY Resource[] rows are resolved as IMG continuations with raw IMG offsets; converter IDE maps and IPL/model remaps disabled")
@@ -6124,16 +6380,19 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         debug_print=debug_print,
     )
 
+    progress.update(6, "Parsing LVZ headers")
     try:
         master = lvz.parse_master_header()
         groups_hdr, res_count, _ = lvz.parse_slave_groups_and_rescount()
     except Exception as exc:
         restore_global_undo()
+        progress.finish(succeeded=False, message="LVZ header parse failed")
         operator.report({'ERROR'}, f"Failed to parse LVZ: {exc}")
         if LVZ.DEBUG is not None:
             LVZ.DEBUG.flush()
         return {'CANCELLED'}
 
+    progress.update(9, "Reading companion IMG")
     img_bytes, img_name = None, None
     try:
         img_bytes, img_name = read_img_next_to_lvz(lvz_path)
@@ -6177,6 +6436,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         LVZ.dbg(f"  unique parent IMG container bases: {len(set(record['cont'] for record in parent_records))}")
     LVZ.dbg("")
 
+    progress.update(13, "Reading LVZ resource table")
     rows = lvz.walk_master_resource_table(master.res_table_addr, res_count)
     platform_from_resources, resource_dialects = detect_platform_from_resource_dialects(lvz, rows, platform)
     if platform_from_resources != platform or resource_dialects:
@@ -6191,7 +6451,13 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     master_empty_res_ids = {int(row['index']) for row in rows if str(row.get('kind', '')).upper() == 'EMPTY'}
     if img_bytes and master_empty_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
         proof_count_before = len(CONTINUES_IN_IMG_PROOF_CACHE)
-        scan_continues_in_img_descriptor_proofs(stem, img_bytes, lvz, master_empty_res_ids)
+        scan_continues_in_img_descriptor_proofs(
+            stem,
+            img_bytes,
+            lvz,
+            master_empty_res_ids,
+            progress_callback=lambda index, total: progress.update_range(14, 18, index, total, "Scanning IMG continuation descriptors"),
+        )
         proof_count_after = len(CONTINUES_IN_IMG_PROOF_CACHE)
         LVZ.dbg(
             f"[continues-img] proof scan: empty_resource_ids={len(master_empty_res_ids)} "
@@ -6234,8 +6500,13 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         )
     LVZ.dbg("")
 
-    lvz.decode_textures(rows)
+    progress.update(18, "Decoding LVZ textures")
+    lvz.decode_textures(
+        rows,
+        progress_callback=lambda index, total: progress.update_range(18, 22, index, total, "Decoding LVZ textures"),
+    )
 
+    progress.update(22, "Reading IMG placement tables")
     transforms_by_res: Dict[int, Matrix] = {}
     details = []
     sector_records = []
@@ -6247,8 +6518,18 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         LVZ.dbg(f"[img] concrete sector headers: {len(sector_records)}")
         LVZ.dbg(f"[img] extra AREA/triggered candidate containers: {len(extra_container_records)}")
         blds_log_raw_2dfx_diagnostics(lvz, img, img_bytes, sector_records, extra_container_records, lvz_path, int(res_count))
-        sector_details = img.enumerate_sector_details(max_resource_id=res_count, include_lod=IMPORT_LOD_PASSES_BY_DEFAULT, dedupe_visible=True)
-        extra_details = img.enumerate_extra_container_details(extra_container_records, max_resource_id=res_count, include_lod=IMPORT_LOD_PASSES_BY_DEFAULT)
+        sector_details = img.enumerate_sector_details(
+            max_resource_id=res_count,
+            include_lod=IMPORT_LOD_PASSES_BY_DEFAULT,
+            dedupe_visible=True,
+            progress_callback=lambda index, total: progress.update_range(22, 26, index, total, "Reading IMG sector placements"),
+        )
+        extra_details = img.enumerate_extra_container_details(
+            extra_container_records,
+            max_resource_id=res_count,
+            include_lod=IMPORT_LOD_PASSES_BY_DEFAULT,
+            progress_callback=lambda index, total: progress.update_range(26, 28, index, total, "Reading IMG AREA placements"),
+        )
         details = img.merge_instance_details(sector_details, extra_details)
         stats = getattr(img, "last_sector_walk_stats", {}) or {}
         extra_stats = getattr(img, "last_extra_container_walk_stats", {}) or {}
@@ -6287,7 +6568,11 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     LVZ.dbg("[progress] building LVZ resource MDLs")
     if LVZ.DEBUG is not None:
         LVZ.DEBUG.flush()
-    built_by_res = build_lvz_resource_mdl_objects(lvz, rows)
+    built_by_res = build_lvz_resource_mdl_objects(
+        lvz,
+        rows,
+        progress_callback=lambda index, total: progress.update_range(28, 40, index, total, "Building LVZ model resources"),
+    )
     stamp_source_paths(built_by_res, lvz_path, img_name)
 
     built_by_cont: Dict[int, bpy.types.Object] = {}
@@ -6325,6 +6610,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             # overlay pass.  Without this, many sector‑local resources in the
             # alternate tables are skipped entirely, leaving large holes.
             include_alt_12_layouts=True,
+            progress_callback=lambda index, total: progress.update_range(41, 52, index, total, "Building exact IMG resource models"),
         )
         log_overlay_resource_stats(img, "sector")
 
@@ -6341,6 +6627,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             if len(detail) > 15 and int(detail[15]) < 0
         }
         if extra_container_records and needed_extra_sector_res_keys:
+            progress.update(53, "Building AREA resource models")
             LVZ.dbg("[progress] building exact AREA/triggered IMG resource MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
@@ -6355,6 +6642,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 img_name,
                 needed_sector_res_keys=needed_extra_sector_res_keys,
                 include_alt_12_layouts=True,
+                progress_callback=lambda index, total: progress.update_range(53, 58, index, total, "Building AREA resource models"),
             )
             merged_extra_exact = 0
             for key, obj in extra_exact_overlay_by_sector_res.items():
@@ -6412,6 +6700,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         )
 
         if continues_img_wanted_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
+            progress.update(58, "Resolving IMG continuation resources")
             LVZ.dbg(f"[progress] building empty-resource CONTINUES-IN-IMG descriptor MDLs wanted={len(continues_img_wanted_res_ids)}")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
@@ -6423,6 +6712,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 continues_img_wanted_res_ids,
                 lvz_path,
                 img_name,
+                progress_callback=lambda index, total: progress.update_range(58, 62, index, total, "Resolving IMG continuation resources"),
             )
             merged_continued_img = 0
             for key, obj in continued_img_overlay_by_sector_res.items():
@@ -6437,6 +6727,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             # even though the placement row's normal resource id is correct. Build one
             # best global exact-res candidate per missing resource id before falling back
             # to the more dangerous IPL/model-id interpretation.
+            progress.update(62, "Building global exact-resource models")
             LVZ.dbg("[progress] exact-res IMG fallback MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
@@ -6460,6 +6751,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 include_alt_12_layouts=True,
                 wanted_res_ids=needed_deep_res_ids,
                 collapse_by_res_id=True,
+                progress_callback=lambda index, total: progress.update_range(62, 67, index, total, "Building global exact-resource models"),
             )
             merged_global_exact = 0
             for key, obj in global_exact_overlay_by_sector_res.items():
@@ -6508,6 +6800,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             log_overlay_resource_stats(img, "ipl-sector")
 
         if ENABLE_NESTED_CHILD_FALLBACK_MDLS:
+            progress.update(67, "Building nested exact-resource models")
             LVZ.dbg("[progress] building nested-child fallback MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
@@ -6521,6 +6814,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 needed_row_res_keys=needed_deep_row_res_keys,
                 include_alt_12_layouts=True,
                 wanted_res_ids=needed_deep_res_ids,
+                progress_callback=lambda index, total: progress.update_range(67, 71, index, total, "Building nested exact-resource models"),
             )
             log_overlay_resource_stats(img, "nested")
         elif needed_deep_row_res_keys or needed_deep_res_ids:
@@ -6545,6 +6839,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                     pass
             log_overlay_resource_stats(img, "ipl-nested")
         if ENABLE_ROW_SHARED_FALLBACK_MDLS:
+            progress.update(71, "Building row-shared exact-resource models")
             LVZ.dbg("[progress] building row-shared fallback MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
@@ -6560,6 +6855,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 needed_row_res_keys=needed_deep_row_res_keys,
                 include_alt_12_layouts=True,
                 wanted_res_ids=needed_deep_res_ids,
+                progress_callback=lambda index, total: progress.update_range(71, 75, index, total, "Building row-shared exact-resource models"),
             )
             log_overlay_resource_stats(img, "row")
         elif needed_deep_row_res_keys or needed_deep_res_ids:
@@ -6585,6 +6881,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 except Exception:
                     pass
             log_overlay_resource_stats(img, "ipl-row")
+        progress.update(75, "Building AREA direct-resource models")
         LVZ.dbg("[progress] building structured AREA IMG resource MDLs")
         if LVZ.DEBUG is not None:
             LVZ.DEBUG.flush()
@@ -6600,6 +6897,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             # Enable alternate layout resource search for extra/AREA containers.
             include_alt_12_layouts=True,
             wanted_res_ids=needed_deep_res_ids,
+            progress_callback=lambda index, total: progress.update_range(75, 79, index, total, "Building AREA direct-resource models"),
         )
         log_overlay_resource_stats(img, "area")
         if needed_ipl_res_ids and ENABLE_INTERNAL_IPL_MODEL_FALLBACK_MDLS:
@@ -6653,6 +6951,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             LVZ.dbg(f"[apply] Stories IPL sidecar placement pass failed: {exc}")
     elif apply_img_transforms and details:
         try:
+            progress.update(80, "Placing IMG instances")
             LVZ.dbg("[progress] applying IMG placement transforms / linked duplicates")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
@@ -6670,6 +6969,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 stem,
                 ide_ipl_to_res,
                 ide_ipl_to_name,
+                progress_callback=lambda index, total: progress.update_range(80, 98, index, total, "Placing IMG instances"),
             )
             removed_unplaced += purge_stale_raw_parser_bases(stem, reason="post-apply")
             LVZ.dbg(f"[apply] IMG placement rows applied: {applied}")
@@ -6679,6 +6979,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     elif apply_img_transforms:
         LVZ.dbg("[apply] no IMG transforms available to apply")
 
+    progress.update(99, "Finalizing imported objects", force=True)
     elapsed = time.time() - t0
     LVZ.dbg(f"[summary] LVZ-table MDL resource objects parsed: {len(built_by_res)}")
     LVZ.dbg(f"[summary] IMG sector overlay MDL objects parsed: {len(overlay_by_sector_res)}")
@@ -6754,4 +7055,5 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         except Exception:
             LVZ.DEBUG.flush()
     operator.report({'INFO'}, f"Imported LVZ+IMG: {len(details)} visible placements, {linked_instances} linked duplicates, {len(overlay_by_sector_res)} sector MDLs, {len(ipl_overlay_by_sector_res)} IPL fallback MDLs, {len(nested_overlay_by_res)} nested-child MDLs, {len(row_overlay_by_res)} row-shared MDLs, {len(area_direct_objects)} AREA/direct fallback MDLs, {removed_unplaced} unplaced resources removed ({platform}).")
+    progress.finish(succeeded=True, message="Import complete")
     return {'FINISHED'}

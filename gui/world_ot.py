@@ -26,6 +26,7 @@ class IMPORT_OT_leeds_world(Operator, ImportHelper):
 
     bl_idname = "import_scene.leeds_world"
     bl_label = "Import World"
+    bl_description = "Import a Rockstar Leeds world level from a WRLD file"
     bl_options = {"UNDO"}
     filename_ext = ".wrld"
     filter_glob: StringProperty(

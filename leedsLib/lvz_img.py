@@ -29,14 +29,14 @@ from dataclasses import dataclass
 from typing import Tuple, List, Dict, Optional, Iterable
 
 import bpy
-from ..compat import setMeshAutoSmooth
+from .. import set_mesh_auto_smooth
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper
 from bpy.props import StringProperty, BoolProperty
 from mathutils import Matrix
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .IMG & .LVZ - file formats for Stories/MH2 worlds            #  
+#   This script is for .IMG & .LVZ - file formats for Stories/MH2 worlds            #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/Relocatable_chunk (pre-process for included formats)
@@ -2099,7 +2099,7 @@ class read_lvz:
 
         return blob[src_index_start:src_index_end] + palette
 
-    def decode_textures(self, rows: List[Dict]) -> int:
+    def decode_textures(self, rows: List[Dict], progress_callback=None) -> int:
         direct_rows = [r for r in rows if r.get("kind") == "TEX"]
         tex_ref_rows = [r for r in rows if r.get("kind") == "TEX_REF"]
         if not direct_rows and not tex_ref_rows:
@@ -2108,8 +2108,31 @@ class read_lvz:
 
         dbg(f"[tex] direct TEX rows: {len(direct_rows)}  TEX_REF rows: {len(tex_ref_rows)}")
         decoded = 0
+        direct_sorted = sorted(direct_rows, key=lambda r: int(r.get("res_id", r.get("index", -1))))
+        unique_reference_rows = []
+        if tex_ref_rows:
+            reference_sorted = sorted(
+                [{"i": r["index"], "ref_addr": r.get("ref_addr", -1), "res_id": r.get("res_id", -1),
+                  "embedded": r.get("embedded_res_id", None)} for r in tex_ref_rows],
+                key=lambda d: d["ref_addr"]
+            )
+            seen_reference_addresses = set()
+            for reference_row in reference_sorted:
+                reference_address = reference_row["ref_addr"]
+                if not isinstance(reference_address, int) or not (0 <= reference_address < len(self.decomp)):
+                    continue
+                if reference_address in seen_reference_addresses:
+                    continue
+                seen_reference_addresses.add(reference_address)
+                unique_reference_rows.append(reference_row)
 
-        for row in sorted(direct_rows, key=lambda r: int(r.get("res_id", r.get("index", -1)))):
+        texture_row_total = len(direct_sorted) + len(unique_reference_rows)
+        for direct_index, row in enumerate(direct_sorted):
+            if progress_callback is not None:
+                try:
+                    progress_callback(direct_index, texture_row_total)
+                except Exception:
+                    pass
             res_index = int(row.get("res_id", row.get("index", -1)))
             start = int(row.get("res_addr", 0) or 0)
             end = int(row.get("res_end", len(self.decomp)) or len(self.decomp))
@@ -2209,26 +2232,16 @@ class read_lvz:
                     mat["blds_lvz_texture_direct"] = True
                     self.material_by_res_index[res_index] = mat
 
-        if tex_ref_rows:
-            tex_sorted = sorted(
-                [{"i": r["index"], "ref_addr": r.get("ref_addr", -1), "res_id": r.get("res_id", -1),
-                  "embedded": r.get("embedded_res_id", None)} for r in tex_ref_rows],
-                key=lambda d: d["ref_addr"]
-            )
-            uniq = []
-            seen_ref_addrs = set()
-            for t in tex_sorted:
-                ra = t["ref_addr"]
-                if not isinstance(ra, int) or not (0 <= ra < len(self.decomp)):
-                    continue
-                if ra in seen_ref_addrs:
-                    continue
-                seen_ref_addrs.add(ra)
-                uniq.append(t)
-
-            for idx, r in enumerate(uniq):
+        if unique_reference_rows:
+            direct_count = len(direct_sorted)
+            for idx, r in enumerate(unique_reference_rows):
+                if progress_callback is not None:
+                    try:
+                        progress_callback(direct_count + idx, texture_row_total)
+                    except Exception:
+                        pass
                 start = r["ref_addr"]
-                end = uniq[idx+1]["ref_addr"] if idx+1 < len(uniq) else len(self.decomp)
+                end = unique_reference_rows[idx+1]["ref_addr"] if idx+1 < len(unique_reference_rows) else len(self.decomp)
                 blob_len = end - start
                 if end <= start or blob_len < 64:
                     continue
@@ -2291,6 +2304,11 @@ class read_lvz:
                         mat["blds_lvz_ref_addr"] = int(start)
                         mat["blds_lvz_texture_blob_len"] = int(end - start)
                         self.material_by_res_index[res_index] = mat
+        if progress_callback is not None:
+            try:
+                progress_callback(texture_row_total, texture_row_total)
+            except Exception:
+                pass
         dbg(f"[tex] total decoded: {decoded}")
         return decoded
 
@@ -2838,7 +2856,7 @@ class read_lvz:
         mesh_name = f"{self.stem}{res_index:0d}"
         me = bpy.data.meshes.new(mesh_name)
         me.from_pydata(vertices, [], faces)
-        setMeshAutoSmooth(me, True)
+        set_mesh_auto_smooth(me, True)
         me.validate(clean_customdata=False)
         me.update()
 
@@ -3375,7 +3393,13 @@ class read_img:
                 if suffix:
                     self.last_overlay_resource_stats["pointer_variants"] += 1
 
-        for sector in sector_records:
+        sector_total = len(sector_records)
+        for sector_number, sector in enumerate(sector_records):
+            if progress_callback is not None:
+                try:
+                    progress_callback(sector_number, sector_total)
+                except Exception:
+                    pass
             cont = int(sector.get("cont", -1))
             declared_end = min(len(img), int(sector.get("end", len(img))))
             end = expanded_container_end(cont, declared_end)
@@ -3546,7 +3570,7 @@ class read_img:
         return overlays
 
 
-    def enumerate_sector_details(self, max_resource_id: Optional[int] = None, include_lod: bool = False, dedupe_visible: bool = True):
+    def enumerate_sector_details(self, max_resource_id: Optional[int] = None, include_lod: bool = False, dedupe_visible: bool = True, progress_callback=None):
         img = self.img_bytes
         details = []
         stats = {
@@ -3610,6 +3634,11 @@ class read_img:
                     ))
                     stats["kept_rows"] += 1
                     off += 0x50
+        if progress_callback is not None:
+            try:
+                progress_callback(sector_total, sector_total)
+            except Exception:
+                pass
         details.sort(key=lambda t: (int(t[15]), int(t[13]), int(t[2])))
         self.last_sector_walk_stats = stats
         return details
@@ -3725,7 +3754,7 @@ class read_img:
                 break
         return spans
 
-    def enumerate_extra_container_details(self, container_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None, include_lod: bool = False):
+    def enumerate_extra_container_details(self, container_records: Optional[List[Dict[str, int]]] = None, max_resource_id: Optional[int] = None, include_lod: bool = False, progress_callback=None):
         img = self.img_bytes
         details = []
         stats = {
@@ -3739,7 +3768,13 @@ class read_img:
         if container_records is None:
             container_records = self.find_extra_container_records_from_lvz()
         stats["container_records"] = len(container_records)
-        for container in container_records:
+        container_total = len(container_records)
+        for container_number, container in enumerate(container_records):
+            if progress_callback is not None:
+                try:
+                    progress_callback(container_number, container_total)
+                except Exception:
+                    pass
             cont = int(container.get("cont", -1))
             origin = tuple(container.get("origin", (0.0, 0.0, 0.0)))
             if any(abs(float(v)) > 0.0001 for v in origin[:3]):
@@ -3784,6 +3819,11 @@ class read_img:
                     ))
                     stats["kept_rows"] += 1
                     off += 0x50
+        if progress_callback is not None:
+            try:
+                progress_callback(container_total, container_total)
+            except Exception:
+                pass
         details.sort(key=lambda t: (int(t[15]), int(t[13]), int(t[2])))
         self.last_extra_container_walk_stats = stats
         return details

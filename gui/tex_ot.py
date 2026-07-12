@@ -16,6 +16,7 @@ class IMPORT_OT_tex(Operator, ImportHelper):
 
     bl_idname = "import_scene.leeds_tex"
     bl_label = "Import Texture List"
+    bl_description = "Import textures from a Rockstar Leeds CHK, XTX, or TEX file"
     bl_options = {'PRESET', 'UNDO'}
 
     filename_ext = ".xtx"

@@ -25,7 +25,7 @@ from mathutils import Matrix, Vector
 
 from ..leedsLib import mdl as stories_mdl
 from ..leedsLib import lvz_img as embedded_mdl
-from ..compat import ensureMeshAttribute, getMeshAttribute, removeMeshAttribute, getOrCreateCornerColorLayer, setActiveObject, safeSelectObject
+from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 #   This script is for Stories .MDLs, the file format for actors & props            #
@@ -1260,7 +1260,7 @@ def createVehicleAtomicMeshObject(
                     uv_data[loop_index].uv = (float(u), 1.0 - float(v))
 
     if merged_colors:
-        color_attr = getOrCreateCornerColorLayer(me, "Col")
+        color_attr = get_or_create_corner_color_layer(me, "Col")
         if color_attr is None:
             col_data = []
         else:
@@ -1472,7 +1472,7 @@ def build_ps2_cutscene_actor_mesh(
                     uv_data[loop_index].uv = (u, 1.0 - v)
 
     if merged_colors and len(me.loops) > 0:
-        color_attr = getOrCreateCornerColorLayer(me, "Col")
+        color_attr = get_or_create_corner_color_layer(me, "Col")
         if color_attr is None:
             col_data = []
         else:
@@ -1602,7 +1602,7 @@ def ensureMdlIntAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any:
             pass
 
     expected_count = getMdlAttributeDomainSize(mesh, domain_key)
-    attribute = getMeshAttribute(mesh, name)
+    attribute = get_mesh_attribute(mesh, name)
 
     if attribute is not None:
         try:
@@ -1612,14 +1612,14 @@ def ensureMdlIntAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any:
 
         if existing_domain and existing_domain != domain_key:
             try:
-                removeMeshAttribute(mesh, attribute)
+                remove_mesh_attribute(mesh, attribute)
                 attribute = None
             except Exception:
                 return attribute
 
     if attribute is None:
         try:
-            attribute = ensureMeshAttribute(mesh, name, 'INT', domain_key)
+            attribute = ensure_mesh_attribute(mesh, name, 'INT', domain_key)
         except Exception:
             return None
 
@@ -1643,8 +1643,8 @@ def ensureMdlIntAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any:
 
     if expected_count > 0 and current_count == 0:
         try:
-            removeMeshAttribute(mesh, attribute)
-            attribute = ensureMeshAttribute(mesh, name, 'INT', domain_key)
+            remove_mesh_attribute(mesh, attribute)
+            attribute = ensure_mesh_attribute(mesh, name, 'INT', domain_key)
         except Exception:
             pass
 
@@ -1682,7 +1682,7 @@ def ensureMdlFloatAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any
         expected_count = 0
 
     try:
-        attribute = getMeshAttribute(mesh, name)
+        attribute = get_mesh_attribute(mesh, name)
     except Exception:
         attribute = None
 
@@ -1695,14 +1695,14 @@ def ensureMdlFloatAttribute(mesh: bpy.types.Mesh, name: str, domain: str) -> Any
             existing_type = 'FLOAT'
         if (existing_domain and existing_domain != domain_key) or (existing_type and existing_type != 'FLOAT'):
             try:
-                removeMeshAttribute(mesh, attribute)
+                remove_mesh_attribute(mesh, attribute)
                 attribute = None
             except Exception:
                 return attribute
 
     if attribute is None:
         try:
-            attribute = ensureMeshAttribute(mesh, name, 'FLOAT', domain_key)
+            attribute = ensure_mesh_attribute(mesh, name, 'FLOAT', domain_key)
         except Exception:
             return None
 
@@ -2210,7 +2210,7 @@ def build_ps2_meshes(
         if not colors:
             colors = getattr(part, "loop_colors", None)
         if colors:
-            color_attr = getOrCreateCornerColorLayer(me, "Col")
+            color_attr = get_or_create_corner_color_layer(me, "Col")
             if color_attr is None:
                 col_data = []
             else:
@@ -2373,7 +2373,7 @@ def build_psp_meshes(
 
         colors = getattr(mesh_data, "colors", None)
         if colors:
-            color_attr = getOrCreateCornerColorLayer(me, "Col")
+            color_attr = get_or_create_corner_color_layer(me, "Col")
             if color_attr is None:
                 col_data = []
             else:
@@ -2428,8 +2428,8 @@ def build_stories_armature_from_frame_mats(
 
     bones_by_ptr: Dict[int, bpy.types.EditBone] = {}
 
-    setActiveObject(context, armature_obj)
-    safeSelectObject(armature_obj, True)
+    set_active_object(context, armature_obj)
+    set_object_selected(armature_obj, True)
     bpy.ops.object.mode_set(mode='EDIT')
 
     for frame_ptr, name in frame_names.items():
@@ -2665,7 +2665,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
 
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(vertices, [], faces)
-    setMeshAutoSmoothIfAvailable(mesh)
+    set_mesh_auto_smooth_if_available(mesh)
     mesh.validate(clean_customdata=False)
     mesh.update()
 
@@ -2679,7 +2679,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
 
     if colors:
         try:
-            color_layer = getOrCreateCornerColorLayer(mesh, "Color")
+            color_layer = get_or_create_corner_color_layer(mesh, "Color")
             for polygon in mesh.polygons:
                 loop_start = polygon.loop_start
                 for loop_offset, vertex_index in enumerate(polygon.vertices):
@@ -2722,10 +2722,9 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
     obj["blds_verts"] = int(len(vertices))
     return [obj]
 
-def setMeshAutoSmoothIfAvailable(mesh: bpy.types.Mesh) -> None:
+def set_mesh_auto_smooth_if_available(mesh: bpy.types.Mesh) -> None:
     try:
-        from ..compat import setMeshAutoSmooth
-        setMeshAutoSmooth(mesh, True)
+        set_mesh_auto_smooth(mesh, True)
     except Exception:
         pass
 
@@ -3227,7 +3226,7 @@ def import_stories_mdl(
 
     created_objects: List[bpy.types.Object] = []
 
-    strip_counts: list[int] = []
+    strip_counts = []
     try:
         dbg = getattr(stories_ctx, "debug_log", None)
         if dbg:

@@ -31,10 +31,383 @@ bl_info = {
 
 import bpy
 from bpy.utils import register_class, unregister_class
-from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, IntProperty, StringProperty
+
+
+# Blender 2.90 stores custom mesh attributes as ID properties because the
+# generic Mesh.attributes API was added later.  These helpers keep the
+# fallback in the package root so the add-on has no external compatibility
+# module and can import under Blender 2.90's Python 3.7 runtime.
+def get_blender_version():
+    return tuple(getattr(bpy.app, "version", (0, 0, 0)))
+
+
+def set_mesh_auto_smooth(mesh, enabled=True):
+    if mesh is None:
+        return
+    if hasattr(mesh, "use_auto_smooth"):
+        try:
+            mesh.use_auto_smooth = bool(enabled)
+        except Exception:
+            pass
+
+
+def get_file_import_menu_type():
+    return getattr(bpy.types, "TOPBAR_MT_file_import", getattr(bpy.types, "INFO_MT_file_import", None))
+
+
+def get_file_export_menu_type():
+    return getattr(bpy.types, "TOPBAR_MT_file_export", getattr(bpy.types, "INFO_MT_file_export", None))
+
+
+def append_menu_callback(menu_type, draw_function):
+    if menu_type is None or draw_function is None:
+        return
+    try:
+        menu_type.append(draw_function)
+    except Exception:
+        pass
+
+
+def remove_menu_callback(menu_type, draw_function):
+    if menu_type is None or draw_function is None:
+        return
+    try:
+        menu_type.remove(draw_function)
+    except Exception:
+        pass
+
+
+def update_mesh_data(mesh):
+    if mesh is None:
+        return
+    try:
+        mesh.update(calc_edges=False)
+        return
+    except TypeError:
+        pass
+    except Exception:
+        return
+    try:
+        mesh.update()
+    except Exception:
+        pass
+
+
+def get_mesh_domain_size(mesh, domain):
+    if mesh is None:
+        return 0
+    domain_name = str(domain or "POINT").upper().strip()
+    try:
+        if domain_name == "POINT":
+            return len(mesh.vertices)
+        if domain_name == "FACE":
+            return len(mesh.polygons)
+        if domain_name == "CORNER":
+            return len(mesh.loops)
+        if domain_name == "EDGE":
+            return len(mesh.edges)
+    except Exception:
+        return 0
+    return 0
+
+
+def mesh_has_native_attributes(mesh):
+    return mesh is not None and hasattr(mesh, "attributes") and getattr(mesh, "attributes", None) is not None
+
+
+def get_native_mesh_attribute(mesh, name):
+    if not mesh_has_native_attributes(mesh):
+        return None
+    try:
+        return mesh.attributes.get(name)
+    except Exception:
+        return None
+
+
+def remove_native_mesh_attribute(mesh, attribute):
+    if not mesh_has_native_attributes(mesh) or attribute is None:
+        return
+    try:
+        mesh.attributes.remove(attribute)
+    except Exception:
+        pass
+
+
+def create_native_mesh_attribute(mesh, name, data_type, domain):
+    if not mesh_has_native_attributes(mesh):
+        return None
+    try:
+        return mesh.attributes.new(
+            name=name,
+            type=str(data_type or "INT").upper(),
+            domain=str(domain or "POINT").upper(),
+        )
+    except Exception:
+        return None
+
+
+def get_fallback_attribute_key(name, suffix):
+    safe_name = str(name).replace("\\", "_").replace("/", "_").replace('"', "_")
+    return "bleeds_mesh_attribute_{}_{}".format(safe_name, suffix)
+
+
+class FallbackMeshAttributeElement:
+    def __init__(self, attribute, index):
+        self.attribute = attribute
+        self.index = int(index)
+
+    @property
+    def value(self):
+        values = self.attribute.get_values()
+        if 0 <= self.index < len(values):
+            return values[self.index]
+        return self.attribute.default_value()
+
+    @value.setter
+    def value(self, new_value):
+        values = self.attribute.get_values()
+        target_length = max(len(values), self.index + 1)
+        if len(values) < target_length:
+            values.extend([self.attribute.default_value()] * (target_length - len(values)))
+        if self.attribute.data_type == "FLOAT":
+            try:
+                values[self.index] = float(new_value)
+            except Exception:
+                values[self.index] = 0.0
+        else:
+            try:
+                values[self.index] = int(new_value)
+            except Exception:
+                values[self.index] = 0
+        self.attribute.set_values(values)
+
+
+class FallbackMeshAttributeData:
+    def __init__(self, attribute):
+        self.attribute = attribute
+
+    def __len__(self):
+        return len(self.attribute.get_values())
+
+    def __getitem__(self, index):
+        item_index = int(index)
+        if item_index < 0:
+            item_index += len(self)
+        if item_index < 0 or item_index >= len(self):
+            raise IndexError(item_index)
+        return FallbackMeshAttributeElement(self.attribute, item_index)
+
+    def __iter__(self):
+        for item_index in range(len(self)):
+            yield FallbackMeshAttributeElement(self.attribute, item_index)
+
+    def foreach_get(self, property_name, values):
+        if str(property_name) != "value":
+            raise AttributeError(property_name)
+        source_values = self.attribute.get_values()
+        limit = min(len(source_values), len(values))
+        for item_index in range(limit):
+            values[item_index] = source_values[item_index]
+
+    def foreach_set(self, property_name, values):
+        if str(property_name) != "value":
+            raise AttributeError(property_name)
+        self.attribute.set_values(list(values))
+
+
+class FallbackMeshAttribute:
+    def __init__(self, mesh, name, data_type="INT", domain="POINT"):
+        self.mesh = mesh
+        self.name = str(name)
+        self.data_type = str(data_type or "INT").upper().strip()
+        self.domain = str(domain or "POINT").upper().strip()
+        self.data = FallbackMeshAttributeData(self)
+
+    def default_value(self):
+        return 0.0 if self.data_type == "FLOAT" else 0
+
+    def value_key(self):
+        return get_fallback_attribute_key(self.name, "values")
+
+    def type_key(self):
+        return get_fallback_attribute_key(self.name, "type")
+
+    def domain_key(self):
+        return get_fallback_attribute_key(self.name, "domain")
+
+    def get_values(self):
+        if self.mesh is None:
+            return []
+        try:
+            raw_values = self.mesh.get(self.value_key(), [])
+        except Exception:
+            raw_values = []
+        try:
+            return list(raw_values)
+        except Exception:
+            return []
+
+    def set_values(self, values):
+        if self.mesh is None:
+            return
+        cleaned_values = []
+        if self.data_type == "FLOAT":
+            for value in values:
+                try:
+                    cleaned_values.append(float(value))
+                except Exception:
+                    cleaned_values.append(0.0)
+        else:
+            for value in values:
+                try:
+                    cleaned_values.append(int(value))
+                except Exception:
+                    cleaned_values.append(0)
+        try:
+            self.mesh[self.value_key()] = cleaned_values
+            self.mesh[self.type_key()] = self.data_type
+            self.mesh[self.domain_key()] = self.domain
+        except Exception:
+            pass
+
+    def ensure_length(self, count):
+        values = self.get_values()
+        count = max(0, int(count or 0))
+        if len(values) < count:
+            values.extend([self.default_value()] * (count - len(values)))
+        elif len(values) > count and count > 0:
+            values = values[:count]
+        self.set_values(values)
+        return self
+
+
+def get_fallback_mesh_attribute(mesh, name):
+    if mesh is None:
+        return None
+    value_key = get_fallback_attribute_key(name, "values")
+    try:
+        if value_key not in mesh:
+            return None
+        data_type = str(mesh.get(get_fallback_attribute_key(name, "type"), "INT") or "INT")
+        domain = str(mesh.get(get_fallback_attribute_key(name, "domain"), "POINT") or "POINT")
+        return FallbackMeshAttribute(mesh, name, data_type, domain).ensure_length(
+            get_mesh_domain_size(mesh, domain)
+        )
+    except Exception:
+        return None
+
+
+def get_mesh_attribute(mesh, name):
+    attribute = get_native_mesh_attribute(mesh, name)
+    if attribute is not None:
+        return attribute
+    return get_fallback_mesh_attribute(mesh, name)
+
+
+def remove_mesh_attribute(mesh, attribute):
+    if attribute is None:
+        return
+    if isinstance(attribute, FallbackMeshAttribute):
+        for suffix in ("values", "type", "domain"):
+            key = get_fallback_attribute_key(attribute.name, suffix)
+            try:
+                if key in mesh:
+                    del mesh[key]
+            except Exception:
+                pass
+        return
+    remove_native_mesh_attribute(mesh, attribute)
+
+
+def ensure_mesh_attribute(mesh, name, data_type, domain="POINT"):
+    if mesh is None:
+        return None
+    data_type_name = str(data_type or "INT").upper().strip()
+    domain_name = str(domain or "POINT").upper().strip()
+    update_mesh_data(mesh)
+    expected_count = get_mesh_domain_size(mesh, domain_name)
+
+    if mesh_has_native_attributes(mesh):
+        attribute = get_native_mesh_attribute(mesh, name)
+        if attribute is not None:
+            existing_domain = str(getattr(attribute, "domain", domain_name) or domain_name).upper().strip()
+            existing_type = str(getattr(attribute, "data_type", data_type_name) or data_type_name).upper().strip()
+            if existing_domain != domain_name or existing_type != data_type_name:
+                remove_native_mesh_attribute(mesh, attribute)
+                attribute = None
+        if attribute is None:
+            attribute = create_native_mesh_attribute(mesh, name, data_type_name, domain_name)
+        if attribute is not None:
+            return attribute
+
+    return FallbackMeshAttribute(mesh, name, data_type_name, domain_name).ensure_length(expected_count)
+
+
+def get_or_create_corner_color_layer(mesh, name="Col"):
+    if mesh is None:
+        return None
+    if hasattr(mesh, "color_attributes"):
+        try:
+            existing = mesh.color_attributes.get(name)
+            if existing is not None:
+                return existing
+        except Exception:
+            pass
+        try:
+            return mesh.color_attributes.new(name=name, type="BYTE_COLOR", domain="CORNER")
+        except Exception:
+            pass
+    if hasattr(mesh, "vertex_colors"):
+        try:
+            existing = mesh.vertex_colors.get(name)
+            if existing is not None:
+                return existing
+        except Exception:
+            pass
+        try:
+            return mesh.vertex_colors.new(name=name)
+        except TypeError:
+            try:
+                return mesh.vertex_colors.new(name)
+            except Exception:
+                return None
+        except Exception:
+            return None
+    return None
+
+
+def set_active_object(context, obj):
+    if obj is None:
+        return
+    try:
+        context.view_layer.objects.active = obj
+        return
+    except Exception:
+        pass
+    try:
+        bpy.context.scene.objects.active = obj
+    except Exception:
+        pass
+
+
+def set_object_selected(obj, selected=True):
+    if obj is None:
+        return
+    if hasattr(obj, "select_set"):
+        try:
+            obj.select_set(bool(selected))
+            return
+        except Exception:
+            pass
+    try:
+        obj.select = bool(selected)
+    except Exception:
+        pass
+
 
 from .gui import gui
-from .compat import getFileImportMenuType, getFileExportMenuType, appendMenu, removeMenu
+
 
 _classes = [
     gui.IMPORT_OT_Stories_mdl,
@@ -59,6 +432,30 @@ _classes = [
     gui.EXPORT_SCENE_OT_stories_lvz_img,
     gui.EXPORT_SCENE_OT_stories_mdl_ps2,
 ]
+
+def register_lvz_img_progress_properties():
+    if not hasattr(bpy.types.WindowManager, "bleeds_lvz_img_progress"):
+        bpy.types.WindowManager.bleeds_lvz_img_progress = IntProperty(
+            name="LVZ + IMG Import Progress",
+            description="Current LVZ + IMG import completion percentage",
+            default=0,
+            min=0,
+            max=100,
+            subtype="PERCENTAGE",
+        )
+    if not hasattr(bpy.types.WindowManager, "bleeds_lvz_img_stage"):
+        bpy.types.WindowManager.bleeds_lvz_img_stage = StringProperty(
+            name="LVZ + IMG Import Stage",
+            description="Current LVZ + IMG import stage",
+            default="",
+        )
+
+
+def unregister_lvz_img_progress_properties():
+    for property_name in ("bleeds_lvz_img_progress", "bleeds_lvz_img_stage"):
+        if hasattr(bpy.types.WindowManager, property_name):
+            delattr(bpy.types.WindowManager, property_name)
+
 
 def register_bleeds_mdl_object_props():
     if not hasattr(bpy.types.Object, "bleeds_is_mdl_root"):
@@ -161,6 +558,7 @@ def unregister_bleeds_mdl_object_props():
 
 def register():
     register_bleeds_mdl_object_props()
+    register_lvz_img_progress_properties()
 
     for cls in _classes:
         register_class(cls)
@@ -169,12 +567,12 @@ def register():
         type=gui.CW_InstanceProps
     )
 
-    appendMenu(getFileImportMenuType(), gui.cw_menu_import)
-    appendMenu(getFileExportMenuType(), gui.cw_menu_export)
+    append_menu_callback(get_file_import_menu_type(), gui.cw_menu_import)
+    append_menu_callback(get_file_export_menu_type(), gui.cw_menu_export)
 
 def unregister():
-    removeMenu(getFileImportMenuType(), gui.cw_menu_import)
-    removeMenu(getFileExportMenuType(), gui.cw_menu_export)
+    remove_menu_callback(get_file_import_menu_type(), gui.cw_menu_import)
+    remove_menu_callback(get_file_export_menu_type(), gui.cw_menu_export)
 
     if hasattr(bpy.types.Object, "cw_instance"):
         del bpy.types.Object.cw_instance
@@ -183,3 +581,4 @@ def unregister():
         unregister_class(cls)
 
     unregister_bleeds_mdl_object_props()
+    unregister_lvz_img_progress_properties()

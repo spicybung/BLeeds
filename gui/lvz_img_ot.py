@@ -27,6 +27,7 @@ from ..ops import lvz_img_importer
 class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_lvz_img"
     bl_label = "Import LVZ + IMG"
+    bl_description = "Import a map from a matching Rockstar Leeds LVZ and IMG pair"
     bl_options = {'REGISTER'}
 
     filename_ext = ".lvz"
@@ -69,20 +70,28 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         layout.prop(self, "write_debug_log")
 
     def execute(self, context):
-        return lvz_img_importer.import_lvz_img_archive(
-            operator=self,
-            context=context,
-            lvz_path=self.filepath,
-            csv_dedup_res_ids=self.csv_dedup_res_ids,
-            apply_img_transforms=self.apply_img_transforms,
-            debug_print=self.debug_print,
-            write_debug_log=self.write_debug_log,
-            import_img_container_mdls=self.import_img_container_mdls,
-        )
+        try:
+            return lvz_img_importer.import_lvz_img_archive(
+                operator=self,
+                context=context,
+                lvz_path=self.filepath,
+                csv_dedup_res_ids=self.csv_dedup_res_ids,
+                apply_img_transforms=self.apply_img_transforms,
+                debug_print=self.debug_print,
+                write_debug_log=self.write_debug_log,
+                import_img_container_mdls=self.import_img_container_mdls,
+            )
+        except Exception as exc:
+            lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import failed")
+            self.report({'ERROR'}, "LVZ + IMG import failed: {}".format(exc))
+            return {'CANCELLED'}
+        finally:
+            lvz_img_importer.finish_active_import_progress(context)
 
 class EXPORT_SCENE_OT_stories_lvz_img(Operator, ExportHelper):
     bl_idname = "export_scene.leeds_lvz_img"
     bl_label = "Export LVZ + IMG"
+    bl_description = "Export map data to a Rockstar Leeds LVZ and IMG pair"
     bl_options = {'REGISTER', 'UNDO'}
 
     filename_ext = ".lvz"

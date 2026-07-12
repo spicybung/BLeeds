@@ -25,6 +25,7 @@ from ..ops import col2_importer, col2_exporter
 class IMPORT_OT_COL2(Operator, ImportHelper):
     bl_idname = "import_scene.col2_leeds"
     bl_label = "Rockstar Leeds Collision"
+    bl_description = "Import collision geometry from a Rockstar Leeds COL2 file"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".col2"
@@ -63,6 +64,7 @@ class IMPORT_OT_COL2(Operator, ImportHelper):
 class EXPORT_OT_COL2(Operator, ExportHelper):
     bl_idname = "export_scene.col2_leeds"
     bl_label = "Rockstar Leeds Collision"
+    bl_description = "Export collision geometry to a Rockstar Leeds COL2 file"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".col2"

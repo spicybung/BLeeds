@@ -23,7 +23,7 @@ from dataclasses import dataclass
 import numpy as np
 
 import bpy
-from ..compat import setMeshAutoSmooth
+from .. import set_mesh_auto_smooth
 from mathutils import Matrix
 
 from pathlib import Path
@@ -33,7 +33,7 @@ from typing import List, Tuple, Dict, Optional
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 #   This script is for .wrld's - the file format for GTA Stories world sectors      #
-#   TODO: .BSP worlds maybe?                                                        # 
+#   TODO: .BSP worlds maybe?                                                        #
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 # - Script resources:
 # • https://gtamods.com/wiki/IMG_archive
@@ -399,7 +399,7 @@ class MDLParser:
         mesh_name = f"{self.stem}_mdl{res_index}"
         me = bpy.data.meshes.new(mesh_name)
         me.from_pydata(vertices, [], faces)
-        setMeshAutoSmooth(me, True)
+        set_mesh_auto_smooth(me, True)
         me.validate(clean_customdata=False)
         me.update()
 
@@ -625,11 +625,11 @@ class ResourceEntry:
     b32: int
     kind: str = ""
     ref_addr: int = -1
-    image: bpy.types.Image | None = None
-    material: bpy.types.Material | None = None
-    tex_size: tuple | None = None
+    image = None
+    material = None
+    tex_size = None
     note: str = ""
-    mdl_info: dict | None = None
+    mdl_info = None
 
 def parse_world_header(data: bytes) -> WorldHeader:
     return WorldHeader(

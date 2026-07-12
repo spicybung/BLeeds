@@ -134,6 +134,7 @@ class IMPORT_OT_wbl(Operator, ImportHelper):
 
     bl_idname = "import_scene.cw_worldblock"
     bl_label = "R* Leeds: Worldblock (.wbl)"
+    bl_description = "Import objects from a Chinatown Wars WBL file"
     filename_ext = ".wbl"
 
     filter_glob: StringProperty(

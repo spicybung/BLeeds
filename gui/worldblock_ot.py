@@ -38,6 +38,7 @@ def _ensure_bytes(d):
 class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.cw_wbl"
     bl_label = "Import Worldblock"
+    bl_description = "Import objects from a Chinatown Wars WBL file"
     filename_ext = ".wbl"
     filter_glob: StringProperty(default="*.wbl", options={'HIDDEN'})
     files: CollectionProperty(type=bpy.types.PropertyGroup)
@@ -303,6 +304,7 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
 class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.cw_wbl"
     bl_label = "Export CW Worldblock (.wbl)"
+    bl_description = "Export selected objects to a Chinatown Wars WBL file"
     filename_ext = ".wbl"
     filter_glob: StringProperty(default="*.wbl", options={'HIDDEN'})
 

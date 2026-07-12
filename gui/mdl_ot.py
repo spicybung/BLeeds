@@ -32,7 +32,7 @@ from bpy.props import (
     CollectionProperty,
 )
 
-def resolve_export_defaults_from_root(context: bpy.types.Context) -> tuple[str, bool]:
+def resolve_export_defaults_from_root(context):
     from ..ops import mdl_exporter
 
     try:
@@ -69,6 +69,7 @@ def resolve_export_defaults_from_root(context: bpy.types.Context) -> tuple[str, 
 class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
     bl_idname = "import_scene.bleeds_stories_mdl"
     bl_label = "Import Leeds MDL"
+    bl_description = "Import a Rockstar Leeds model from an MDL file"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".mdl"
@@ -94,42 +95,83 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         name="Type",
         description="Leeds game family to import",
         items=(
-            ("AUTO", "Auto", "Auto-detect from the MDL header"),
+            ("AUTO", "Detect from header", "Determine the game family from the MDL container structure"),
             ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),
             ("VCS", "VCS", "Grand Theft Auto: Vice City Stories"),
             ("MH2", "MH2", "Manhunt 2"),
         ),
         default="AUTO",
+        options={"HIDDEN"},
     )
 
     platform: EnumProperty(
         name="Platform",
         description="Platform this Stories MDL was built for",
         items=(
-            ("AUTO", "Auto", "Auto-detect PS2 or PSP from the MDL header"),
+            ("AUTO", "Detect from header", "Determine PS2 or PSP from the Stories MDL header"),
             ("PS2", "PS2", "PlayStation 2 (Liberty City Stories / Vice City Stories)"),
             ("PSP", "PSP", "PlayStation Portable (Liberty City Stories / Vice City Stories)"),
         ),
         default="AUTO",
+        options={"HIDDEN"},
     )
 
     mdl_type: EnumProperty(
         name="Model Type",
         description="Whether this MDL is a ped/actor or a prop",
         items=(
-            ("AUTO", "Auto", "Auto-detect SimpleModel / PedModel / CutsceneModel / VehicleModel"),
+            ("AUTO", "Detect from structure", "Determine SimpleModel, PedModel, CutsceneModel, or VehicleModel from the MDL structure"),
             ("SIM", "SimpleModel", "Simple / prop model without bones"),
             ("PED", "PedModel / Actor", "Pedestrian / actor model with bones"),
             ("CUT", "CutsceneModel / Actor", "Cutscene / actor model with bones"),
             ("VEH", "VehicleModel", "Vehicle model"),
         ),
         default="AUTO",
+        options={"HIDDEN"},
     )
 
     import_texture: BoolProperty(
         name="Import Texture",
         description="Attempt to import a same-name Leeds texture dictionary (.xtx/.chk/.tex) beside the MDL and apply it to matching MDL materials",
         default=False,
+    )
+
+    mh2_layout: EnumProperty(
+        name="PMLC Structure",
+        description="Manhunt 2 PC PMLC entry, bone, material-ID, and vertex-record structure",
+        items=(
+            (
+                "DETECT",
+                "Determine from file",
+                "Validate the entry list, bone record, material-ID record, vertex stride, position offset, and UV offset against the file",
+            ),
+            (
+                "PC_RETAIL",
+                "Retail PC PMLC",
+                "Prefer the retail PC PMLC structure and accept another validated structure only when the retail structure does not fit",
+            ),
+            (
+                "PC_BETA",
+                "Beta / prototype PMLC",
+                "Prefer compact or extended beta/prototype PMLC structures and validate each table boundary before import",
+            ),
+        ),
+        default="DETECT",
+        options={"HIDDEN"},
+    )
+
+    mh2_import_armature: BoolProperty(
+        name="Import Bone Hierarchy",
+        description="Create the PMLC bone hierarchy and parent the imported mesh objects to it",
+        default=True,
+        options={"HIDDEN"},
+    )
+
+    mh2_import_materials: BoolProperty(
+        name="Import Material Tables",
+        description="Read PMLC material and material-ID tables and assign polygon material slots",
+        default=True,
+        options={"HIDDEN"},
     )
 
     create_armature: BoolProperty(
@@ -158,15 +200,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
-
-        col = layout.column(align=True)
-        col.prop(self, "import_game")
-
-        if self.import_game != "MH2":
-            col.prop(self, "platform")
-            col.prop(self, "mdl_type")
-
-        col.prop(self, "import_texture")
+        layout.prop(self, "import_texture")
 
     def gatherImportFilepaths(self):
         paths = []
@@ -205,6 +239,9 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
             clean_paths.append(norm)
         return clean_paths
 
+    def isManhunt2PcContainer(self, filepath):
+        return bool(mdl_core.is_manhunt2_pc_mdl(filepath))
+
     def execute(self, context):
         filepaths = self.gatherImportFilepaths()
         collection_name = self.collection_name
@@ -224,12 +261,20 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
         for filepath in filepaths:
             try:
-                if self.import_game == "MH2":
-                    mdl_core.import_mh2(
+                use_manhunt2_pc_reader = (
+                    self.import_game == "MH2"
+                    or (self.import_game == "AUTO" and self.isManhunt2PcContainer(filepath))
+                )
+                if use_manhunt2_pc_reader:
+                    imported_objects = mdl_core.import_mh2(
                         path=filepath,
                         context=context,
                         collection_name=(collection_name or None),
+                        layout_mode=self.mh2_layout,
+                        import_armature=self.mh2_import_armature,
+                        import_materials=self.mh2_import_materials,
                     )
+                    all_created_objects.extend(imported_objects or [])
                     imported_count += 1
                     continue
 
@@ -295,6 +340,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_stories_mdl"
     bl_label = "Export R* Leeds Stories MDL"
+    bl_description = "Export the active model to a Rockstar Leeds MDL file"
     bl_options = {"UNDO"}
 
     filename_ext = ".mdl"
@@ -392,6 +438,13 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
+
+    def filepathUsesManhunt2PcContainer(self, filepath):
+        try:
+            with open(filepath, "rb") as input_file:
+                return input_file.read(4) == b"PMLC"
+        except Exception:
+            return False
 
     def execute(self, context):
         from ..ops import mdl_exporter

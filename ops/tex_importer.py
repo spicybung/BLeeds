@@ -394,7 +394,7 @@ def decode_chk_to_blender_images(
     }
     first_slot = hdr['first_slot']
     last_slot = hdr['last_slot']
-    visited: set[int] = set()
+    visited = set()
 
     textures: List[Tuple[str, int, object]] = []
     base = slot_base_from_slot_ptr(first_slot)
