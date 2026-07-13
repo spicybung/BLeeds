@@ -61,9 +61,6 @@ from mathutils import Matrix
 
 #######################################################
 
-# Normal import logs keep the useful parser and placement totals, but translate
-# internal development labels into readable messages.  Raw patch names, policy
-# notes, and implementation-only fallback names stay out of user logs.
 CONCISE_IMPORT_LOG = True
 
 

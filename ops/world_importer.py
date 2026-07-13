@@ -17,10 +17,12 @@
 
 import bpy
 import numpy as np
+import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from ..leedsLib import world
+from .. import get_or_create_corner_color_layer, set_mesh_auto_smooth, stamp_bleeds_entity_type
+from ..leedsLib import bsp, world
 
 def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
 
@@ -258,7 +260,375 @@ def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
             "pairs": pairs,
         }
 
-def log_and_import(path: str, decode_textures: bool = True, write_log: bool = True, build_models: bool = True) -> None:
+
+def _source_stem(path: str) -> str:
+    """Use a stable source name without browser-copy suffixes such as '(1)'."""
+    stem = Path(path).stem.strip()
+    cleaned = re.sub(r"\s*\(\d+\)$", "", stem).strip()
+    return cleaned or stem or "WorldLevel"
+
+
+def _remove_collection_recursive(collection: bpy.types.Collection) -> None:
+    if collection is None:
+        return
+    for child in list(collection.children):
+        _remove_collection_recursive(child)
+    for obj in list(collection.objects):
+        try:
+            bpy.data.objects.remove(obj, do_unlink=True)
+        except Exception:
+            try:
+                collection.objects.unlink(obj)
+            except Exception:
+                pass
+    try:
+        bpy.data.collections.remove(collection)
+    except Exception:
+        pass
+
+
+def _new_world_level_collections(stem: str, collision_only: bool = False):
+    root_name = f"{stem} [World Level]"
+    existing = bpy.data.collections.get(root_name)
+    if existing is not None:
+        _remove_collection_recursive(existing)
+
+    root = bpy.data.collections.new(root_name)
+    bpy.context.scene.collection.children.link(root)
+
+    objects = bpy.data.collections.new(f"{stem} Objects")
+    root.children.link(objects)
+
+    collision = bpy.data.collections.new(f"{stem} Collision")
+    root.children.link(collision)
+    return root, objects, collision
+
+
+def _set_material_base_color(material, rgba) -> None:
+    color = tuple(float(v) / 255.0 for v in rgba)
+    try:
+        material.diffuse_color = color
+    except Exception:
+        pass
+    if not getattr(material, "use_nodes", False):
+        return
+    try:
+        node = material.node_tree.nodes.get("Principled BSDF")
+        if node is not None and "Base Color" in node.inputs:
+            node.inputs["Base Color"].default_value = color
+    except Exception:
+        pass
+
+
+def _create_bsp_material(
+    stem: str,
+    record: bsp.BSPMaterialRecord,
+    image: Optional[bpy.types.Image],
+) -> bpy.types.Material:
+    source_name = record.name.strip() or f"Material_{record.index:03d}"
+    material = bpy.data.materials.new(f"{stem}_{source_name}")
+    material.use_nodes = True
+    _set_material_base_color(material, record.color_rgba)
+    material["blds_kind"] = "PSP_BSP_MATERIAL"
+    material["blds_bsp_material_index"] = int(record.index)
+    material["blds_bsp_material_name"] = str(record.name)
+    material["blds_bsp_material_flags"] = int(record.flags)
+
+    if image is None:
+        return material
+
+    try:
+        nodes = material.node_tree.nodes
+        links = material.node_tree.links
+        output = next((node for node in nodes if node.type == "OUTPUT_MATERIAL"), None)
+        principled = next((node for node in nodes if node.type == "BSDF_PRINCIPLED"), None)
+        if output is None:
+            output = nodes.new("ShaderNodeOutputMaterial")
+        if principled is None:
+            principled = nodes.new("ShaderNodeBsdfPrincipled")
+        texture = nodes.new("ShaderNodeTexImage")
+        texture.image = image
+        texture.label = record.name or image.name
+        links.new(texture.outputs["Color"], principled.inputs["Base Color"])
+        if "Alpha" in texture.outputs and "Alpha" in principled.inputs:
+            links.new(texture.outputs["Alpha"], principled.inputs["Alpha"])
+            try:
+                material.blend_method = "BLEND"
+            except Exception:
+                pass
+        if not principled.outputs["BSDF"].is_linked:
+            links.new(principled.outputs["BSDF"], output.inputs["Surface"])
+    except Exception:
+        pass
+    return material
+
+
+def _decode_bsp_txd(txd_path: Optional[Path], stem: str, lines: List[str]):
+    images_by_name: Dict[str, bpy.types.Image] = {}
+    images_by_index: Dict[int, bpy.types.Image] = {}
+    if txd_path is None:
+        lines.append("[bsp-txd] no matching PSP TXD found beside the BSP")
+        return images_by_name, images_by_index
+
+    try:
+        dictionary = bsp.parse_tcdt(str(txd_path))
+    except Exception as exc:
+        lines.append(f"[bsp-txd] failed to parse '{txd_path}': {exc}")
+        return images_by_name, images_by_index
+
+    lines.append(
+        f"[bsp-txd] source='{txd_path}' textures={len(dictionary.textures)} "
+        f"wrapped_z2hm={dictionary.header.wrapped_z2hm}"
+    )
+    for texture in dictionary.textures:
+        try:
+            rgba = bsp.decode_tcdt_texture(dictionary, texture)
+            image_name = texture.name.strip() or f"Texture_{texture.index:03d}"
+            image = image_from_rgba_uint8(
+                rgba,
+                f"{stem}_{image_name}",
+                int(texture.width),
+                int(texture.height),
+            )
+            image["blds_kind"] = "PSP_TCDT_TEXTURE"
+            image["blds_tcdt_index"] = int(texture.index)
+            image["blds_tcdt_name"] = str(texture.name)
+            image["blds_tcdt_source"] = str(txd_path)
+            images_by_index[int(texture.index)] = image
+            normalized = bsp.normalize_asset_name(texture.name)
+            if normalized:
+                images_by_name[normalized] = image
+            lines.append(
+                f"[bsp-txd] index={texture.index} name='{texture.name}' "
+                f"size={texture.width}x{texture.height} bpp={texture.bits_per_pixel} decoded=yes"
+            )
+        except Exception as exc:
+            lines.append(
+                f"[bsp-txd] index={texture.index} name='{texture.name}' decoded=no error={exc}"
+            )
+    return images_by_name, images_by_index
+
+
+def _assign_corner_colors(mesh, block: bsp.BSPGeometryBlock) -> None:
+    layer = get_or_create_corner_color_layer(mesh, "Color")
+    if layer is None:
+        return
+    try:
+        data = layer.data
+        for loop_index, loop in enumerate(mesh.loops):
+            rgba = block.vertices[int(loop.vertex_index)].color
+            color = tuple(float(value) / 255.0 for value in rgba)
+            data[loop_index].color = color
+    except Exception:
+        pass
+
+
+def _build_bsp_mesh_object(
+    stem: str,
+    source_path: str,
+    block_index: int,
+    block: bsp.BSPGeometryBlock,
+    materials: List[bpy.types.Material],
+    collection: bpy.types.Collection,
+    txd_path: Optional[Path],
+):
+    faces, face_materials = bsp.triangle_strip_faces(block)
+    if not faces:
+        return None, 0
+
+    object_name = f"{stem}_BSP_{block_index:03d}_{block.file_offset:08X}"
+    mesh = bpy.data.meshes.new(object_name)
+    mesh.from_pydata([vertex.position for vertex in block.vertices], [], faces)
+    mesh.update()
+
+    for material in materials:
+        mesh.materials.append(material)
+    for polygon_index, polygon in enumerate(mesh.polygons):
+        source_index = face_materials[polygon_index] if polygon_index < len(face_materials) else 0
+        polygon.material_index = int(source_index) if 0 <= int(source_index) < len(materials) else 0
+        try:
+            polygon.use_smooth = False
+        except Exception:
+            pass
+
+    try:
+        uv_layer = mesh.uv_layers.new(name="UVMap")
+        for loop_index, loop in enumerate(mesh.loops):
+            uv_layer.data[loop_index].uv = block.vertices[int(loop.vertex_index)].uv
+    except Exception:
+        pass
+    _assign_corner_colors(mesh, block)
+    set_mesh_auto_smooth(mesh, False)
+
+    obj = bpy.data.objects.new(object_name, mesh)
+    collection.objects.link(obj)
+    stamp_bleeds_entity_type(obj, "OBJECT")
+    obj["blds_kind"] = "PSP_BSP_WORLD"
+    obj["blds_source"] = str(source_path)
+    obj["blds_bsp_block_index"] = int(block_index)
+    obj["blds_bsp_block_offset"] = int(block.file_offset)
+    obj["blds_bsp_block_size"] = int(block.size)
+    obj["blds_bsp_flags"] = int(block.flags)
+    obj["blds_bsp_strip_count"] = int(block.strip_count)
+    obj["blds_bsp_vertex_count"] = int(block.vertex_count)
+    obj["blds_bsp_face_count"] = int(len(faces))
+    obj["blds_platform"] = "PSP"
+    if txd_path is not None:
+        obj["blds_txd_source"] = str(txd_path)
+    return obj, len(faces)
+
+
+def _discover_psp_bsp_scene_set(path: str):
+    selected = Path(path)
+    clean_stem = _source_stem(path)
+    match = re.match(r"^(.*?)(\d+)$", clean_stem, re.IGNORECASE)
+    scene_stem = match.group(1).rstrip(" _-.") if match else clean_stem
+    if not scene_stem:
+        scene_stem = clean_stem
+
+    candidates = []
+    if match:
+        prefix = match.group(1)
+        for sibling in selected.parent.iterdir():
+            if not sibling.is_file() or sibling.suffix.lower() != ".bsp":
+                continue
+            sibling_stem = re.sub(r"\s*\(\d+\)$", "", sibling.stem).strip()
+            sibling_match = re.match(r"^(.*?)(\d+)$", sibling_stem, re.IGNORECASE)
+            if sibling_match and sibling_match.group(1).lower() == prefix.lower():
+                candidates.append((int(sibling_match.group(2)), sibling.name.lower(), sibling))
+    if not candidates:
+        candidates.append((0, selected.name.lower(), selected))
+
+    ordered = []
+    seen = set()
+    for _number, _name, candidate in sorted(candidates):
+        resolved = str(candidate.resolve()).lower()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        ordered.append(candidate)
+    return scene_stem, ordered
+
+
+def import_psp_bsp(
+    path: str,
+    decode_textures: bool = True,
+    write_log: bool = True,
+    build_models: bool = True,
+) -> None:
+    selected_path = Path(path)
+    scene_stem, bsp_paths = _discover_psp_bsp_scene_set(path)
+
+    parsed_files = []
+    material_names = []
+    for bsp_path in bsp_paths:
+        parsed = bsp.parse_psp_bsp(str(bsp_path))
+        parsed_files.append((bsp_path, parsed))
+        material_names.extend(item.name for item in parsed.materials)
+
+    txd_path = bsp.find_best_companion_txd(str(selected_path), material_names) if decode_textures else None
+    root, objects_collection, collision_collection = _new_world_level_collections(scene_stem, collision_only=True)
+    root["blds_kind"] = "PSP_BSP_WORLD_LEVEL"
+    root["blds_source"] = str(selected_path)
+    root["blds_platform"] = "PSP"
+    root["blds_world_level_format"] = "BSP"
+    root["blds_bsp_scene_files"] = "|".join(str(item[0]) for item in parsed_files)
+
+    lines: List[str] = []
+    lines.append("===== R* Leeds PSP BSP World Level Import =====")
+    lines.append(f"[bsp-set] selected='{selected_path}' scene='{scene_stem}' files={len(parsed_files)}")
+    for bsp_path, parsed in parsed_files:
+        lines.append(
+            f"[bsp] source='{bsp_path}' packed={parsed.header.packed_size} "
+            f"unpacked={parsed.header.unpacked_size} wrapped_z2hm={parsed.header.wrapped_z2hm} "
+            f"magic={parsed.header.magic} version={parsed.header.version} "
+            f"relocations={parsed.header.relocation_count} root=0x{parsed.root_offset:08X} "
+            f"materials={len(parsed.materials)} render_blocks={len(parsed.geometry)}"
+        )
+
+    images_by_name: Dict[str, bpy.types.Image] = {}
+    images_by_index: Dict[int, bpy.types.Image] = {}
+    if decode_textures:
+        images_by_name, images_by_index = _decode_bsp_txd(txd_path, scene_stem, lines)
+
+    material_cache = {}
+    object_count = 0
+    vertex_count = 0
+    face_count = 0
+    collision_sources = 0
+
+    for bsp_path, parsed in parsed_files:
+        file_stem = _source_stem(str(bsp_path))
+        materials: List[bpy.types.Material] = []
+        for record in parsed.materials:
+            normalized = bsp.normalize_asset_name(record.name)
+            cache_key = (normalized, int(record.flags), tuple(record.color_rgba))
+            material = material_cache.get(cache_key)
+            if material is None:
+                image = images_by_name.get(normalized) if normalized else images_by_index.get(int(record.index))
+                material = _create_bsp_material(scene_stem, record, image)
+                material_cache[cache_key] = material
+                lines.append(
+                    f"[bsp-material] source='{bsp_path.name}' index={record.index} "
+                    f"name='{record.name}' flags=0x{record.flags:08X} "
+                    f"texture={'yes' if image is not None else 'no'}"
+                )
+            materials.append(material)
+
+        if build_models and parsed.geometry:
+            for block_index, block in enumerate(parsed.geometry):
+                obj, block_faces = _build_bsp_mesh_object(
+                    file_stem,
+                    str(bsp_path),
+                    block_index,
+                    block,
+                    materials,
+                    objects_collection,
+                    txd_path,
+                )
+                if obj is None:
+                    lines.append(
+                        f"[bsp-geometry] source='{bsp_path.name}' block={block_index} "
+                        f"offset=0x{block.file_offset:08X} vertices={block.vertex_count} "
+                        "faces=0 skipped=degenerate"
+                    )
+                    continue
+                object_count += 1
+                vertex_count += int(block.vertex_count)
+                face_count += int(block_faces)
+                lines.append(
+                    f"[bsp-geometry] source='{bsp_path.name}' block={block_index} "
+                    f"offset=0x{block.file_offset:08X} strips={block.strip_count} "
+                    f"vertices={block.vertex_count} faces={block_faces} object='{obj.name}'"
+                )
+        elif not parsed.geometry:
+            collision_sources += 1
+            lines.append(
+                f"[bsp-collision] source='{bsp_path.name}' contains no PSP render blocks; "
+                "kept as a collision source for scene-set decoding, with no fake placeholder object"
+            )
+
+    lines.append(
+        f"[summary] collection='{root.name}' bsp_files={len(parsed_files)} "
+        f"objects={object_count} vertices={vertex_count} faces={face_count} "
+        f"collision_sources={collision_sources} textures={len(images_by_index)}"
+    )
+    if object_count == 0:
+        lines.append(
+            "[warning] no render geometry was decoded from any BSP in the discovered scene set; "
+            "the importer did not create an empty cube or claim a successful mesh import"
+        )
+
+    for line in lines:
+        print(line)
+    if write_log:
+        output = selected_path.with_suffix(".bsp_full_log.txt")
+        try:
+            output.write_text("\n".join(lines), encoding="utf-8")
+        except Exception as exc:
+            print(f"[log] failed to write '{output}': {exc}")
+
+def _import_wrld(path: str, decode_textures: bool = True, write_log: bool = True, build_models: bool = True) -> None:
     data = Path(path).read_bytes()
     header = world.parse_world_header(data)
     ext = world.parse_extended_header(data)
@@ -339,3 +709,27 @@ def log_and_import(path: str, decode_textures: bool = True, write_log: bool = Tr
             out_path.write_text("\n".join(lines), encoding="utf-8")
         except Exception as exc:
             print(f"[log] failed to write '{out_path}': {exc}")
+
+
+
+def log_and_import(
+    path: str,
+    decode_textures: bool = True,
+    write_log: bool = True,
+    build_models: bool = True,
+) -> None:
+    source = Path(path)
+    suffix = source.suffix.lower()
+    magic = source.read_bytes()[:4]
+    if suffix == ".bsp" or magic == bsp.Z2HM_MAGIC:
+        # Z2HM can wrap more than one Leeds resource type. Confirm the
+        # decompressed payload before routing it to the BSP reader.
+        if suffix == ".bsp":
+            return import_psp_bsp(path, decode_textures, write_log, build_models)
+        try:
+            payload, _wrapped, _size = bsp.load_resource_file(path)
+        except Exception:
+            payload = b""
+        if payload[:4] == bsp.DLRW_MAGIC:
+            return import_psp_bsp(path, decode_textures, write_log, build_models)
+    return _import_wrld(path, decode_textures, write_log, build_models)

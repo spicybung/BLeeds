@@ -199,7 +199,7 @@ class TOPBAR_MT_file_import_bleeds(Menu):
         )
         layout.operator(
             "import_scene.leeds_world",
-            text="R* Leeds: World Level (.wrld)",
+            text="R* Leeds: World Level (.wrld, .bsp)",
         )
         layout.operator(
             "import_scene.cw_wbl",

@@ -25,12 +25,12 @@ from ..ops import world_importer
 class IMPORT_OT_leeds_world(Operator, ImportHelper):
 
     bl_idname = "import_scene.leeds_world"
-    bl_label = "Import World"
-    bl_description = "Import a Rockstar Leeds world level from a WRLD file"
+    bl_label = "Import World Level"
+    bl_description = "Import a Rockstar Leeds world level from a WRLD or PSP BSP file"
     bl_options = {"UNDO"}
     filename_ext = ".wrld"
     filter_glob: StringProperty(
-        default="*.wrld",
+        default="*.wrld;*.bsp;*.WRLD;*.BSP",
         options={"HIDDEN"},
         maxlen=255,
     )
@@ -45,12 +45,12 @@ class IMPORT_OT_leeds_world(Operator, ImportHelper):
                 build_models=True,
             )
         except Exception as exc:
-            self.report({'ERROR'}, f"Failed to import WRLD: {exc}")
+            self.report({'ERROR'}, f"Failed to import World Level: {exc}")
             raise
         return {'FINISHED'}
 
 def menu_func_import(self, context):
-    self.layout.operator(IMPORT_OT_leeds_world.bl_idname, text="R* Leeds: World (.wrld)")
+    self.layout.operator(IMPORT_OT_leeds_world.bl_idname, text="R* Leeds: World Level (.wrld, .bsp)")
 
 classes = (IMPORT_OT_leeds_world,)
 
