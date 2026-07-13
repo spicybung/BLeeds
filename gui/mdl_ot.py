@@ -138,7 +138,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
     mh2_layout: EnumProperty(
         name="PMLC Structure",
-        description="Manhunt 2 PC PMLC entry, bone, material-ID, and vertex-record structure",
+        description="Manhunt 2 PMLC entry, bone, material-ID, and vertex-record structure",
         items=(
             (
                 "DETECT",
@@ -151,9 +151,9 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                 "Prefer the retail PC PMLC structure and accept another validated structure only when the retail structure does not fit",
             ),
             (
-                "PC_BETA",
-                "Beta / prototype PMLC",
-                "Prefer compact or extended beta/prototype PMLC structures and validate each table boundary before import",
+                "PSP_BETA",
+                "PSP beta / prototype PMLC",
+                "Prefer the PSP beta/prototype PMLC structures and validate each table boundary before import",
             ),
         ),
         default="DETECT",
@@ -240,7 +240,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         return clean_paths
 
     def isManhunt2PcContainer(self, filepath):
-        return bool(mdl_core.is_manhunt2_pc_mdl(filepath))
+        return bool(mdl_core.is_manhunt2_pmlc_mdl(filepath))
 
     def execute(self, context):
         filepaths = self.gatherImportFilepaths()

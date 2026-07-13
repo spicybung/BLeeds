@@ -1,22 +1,21 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# BLeeds - R* Leeds tools for Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
-#
+
 # This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License
-# as published by the Free Software Foundation, either version 3 of the License,
-# or (at your option) any later version.
-#
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
 # This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty
-# of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-# See the GNU General Public License for more details.
-#
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.0.8"
+__version__ = "1.0.21"
 
 bl_info = {
     "name": "BLeeds",
@@ -406,6 +405,58 @@ def set_object_selected(obj, selected=True):
         pass
 
 
+_BLEEDS_ENTITY_TYPE_VALUES = {"UNKNOWN", "OBJECT", "COLLISION", "2DFX"}
+
+
+def stamp_bleeds_entity_type(obj, entity_type):
+    """Persist BLeeds' own object classification without touching DemonFF RNA."""
+    if obj is None:
+        return
+    value = str(entity_type or "UNKNOWN").upper().strip()
+    if value not in _BLEEDS_ENTITY_TYPE_VALUES:
+        value = "UNKNOWN"
+    try:
+        obj.bleeds_entity_type = value
+    except Exception:
+        pass
+    try:
+        obj["blds_entity_type"] = value
+    except Exception:
+        pass
+
+
+def infer_bleeds_entity_type(obj):
+    if obj is None:
+        return "UNKNOWN"
+    try:
+        explicit = str(getattr(obj, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
+        if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
+            return explicit
+    except Exception:
+        pass
+    try:
+        explicit = str(obj.get("blds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
+        if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
+            return explicit
+    except Exception:
+        pass
+    try:
+        if bool(obj.get("bleeds_col2_object", False)):
+            return "COLLISION"
+        if str(obj.get("blds_kind", "")).upper().strip() == "LEEDS_2DFX":
+            return "2DFX"
+        if (
+            obj.get("blds_kind") is not None
+            or obj.get("blds_res_id") is not None
+            or obj.get("bleeds_is_mdl_root") is not None
+            or bool(getattr(obj, "bleeds_is_mdl_root", False))
+        ):
+            return "OBJECT"
+    except Exception:
+        pass
+    return "UNKNOWN"
+
+
 from .gui import gui
 
 
@@ -424,6 +475,7 @@ _classes = [
     gui.EXPORT_OT_MDL_StampSemanticAttributes,
     gui.EXPORT_PT_MDL_SemanticAttributes,
     gui.CW_InstanceProps,
+    gui.OBJECT_PT_bleeds_entity_stamp,
     gui.CW_OT_LoadFromCustom,
     gui.CW_OT_SaveToCustom,
     gui.CW_MT_ExportChoice,
@@ -451,13 +503,29 @@ def register_lvz_img_progress_properties():
         )
 
 
+
 def unregister_lvz_img_progress_properties():
-    for property_name in ("bleeds_lvz_img_progress", "bleeds_lvz_img_stage"):
+    for property_name in (
+        "bleeds_lvz_img_progress", "bleeds_lvz_img_stage",
+    ):
         if hasattr(bpy.types.WindowManager, property_name):
             delattr(bpy.types.WindowManager, property_name)
 
 
 def register_bleeds_mdl_object_props():
+    if not hasattr(bpy.types.Object, "bleeds_entity_type"):
+        bpy.types.Object.bleeds_entity_type = EnumProperty(
+            name="Type",
+            description="BLeeds object classification stamp",
+            items=[
+                ("UNKNOWN", "Unknown", "Not classified by BLeeds"),
+                ("OBJECT", "Object", "Renderable Leeds model or map object"),
+                ("COLLISION", "Collision", "Leeds collision object"),
+                ("2DFX", "2DFX", "Leeds 2D effect helper"),
+            ],
+            default="UNKNOWN",
+        )
+
     if not hasattr(bpy.types.Object, "bleeds_is_mdl_root"):
         bpy.types.Object.bleeds_is_mdl_root = BoolProperty(
             name="BLeeds MDL Root",
@@ -543,6 +611,7 @@ def register_bleeds_mdl_object_props():
 
 def unregister_bleeds_mdl_object_props():
     for prop_name in (
+        "bleeds_entity_type",
         "bleeds_is_mdl_root",
         "bleeds_mdl_platform",
         "bleeds_model_game",

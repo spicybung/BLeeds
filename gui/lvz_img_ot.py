@@ -7,14 +7,6 @@
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-# GNU General Public License for more details.
-
-# You should have received a copy of the GNU General Public License
-# along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 from pathlib import Path
 
 import bpy
@@ -23,6 +15,7 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import StringProperty, BoolProperty
 from ..leedsLib import lvz_img as LVZ
 from ..ops import lvz_img_importer
+
 
 class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_lvz_img"
@@ -34,24 +27,19 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
 
     csv_dedup_res_ids: BoolProperty(
         name="CSV unique + log detailed blocks",
-        default=True
+        default=True,
     )
     apply_img_transforms: BoolProperty(
         name="Apply IMG transforms to MDL objects",
-        default=True
-    )
-    import_img_container_mdls: BoolProperty(
-        name="Loose IMG container MDLs (debug)",
-        description="Raw LVZ-referenced IMG container payload parse for inspection only. Leave off for world import; structured IMG resource-table MDLs are still parsed and placed.",
-        default=False
+        default=True,
     )
     debug_print: BoolProperty(
         name="Debug print",
-        default=False
+        default=False,
     )
     write_debug_log: BoolProperty(
         name="Write debug log next to LVZ",
-        default=True
+        default=True,
     )
 
     filter_glob: StringProperty(
@@ -64,10 +52,10 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         layout = self.layout
         layout.prop(self, "csv_dedup_res_ids")
         layout.prop(self, "apply_img_transforms")
-        layout.prop(self, "import_img_container_mdls")
-        layout.separator()
         layout.prop(self, "debug_print")
         layout.prop(self, "write_debug_log")
+        layout.separator()
+        layout.label(text="IMG and GAME.DTZ are auto-detected beside the LVZ.", icon='INFO')
 
     def execute(self, context):
         try:
@@ -79,7 +67,8 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
                 apply_img_transforms=self.apply_img_transforms,
                 debug_print=self.debug_print,
                 write_debug_log=self.write_debug_log,
-                import_img_container_mdls=self.import_img_container_mdls,
+                game_dtz_path="",
+                import_game_dtz_2dfx=True,
             )
         except Exception as exc:
             lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import failed")

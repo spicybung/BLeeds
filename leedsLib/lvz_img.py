@@ -21,6 +21,7 @@ import zlib
 import time
 import math
 import csv
+import re
 import zipfile
 import numpy as np
 
@@ -60,6 +61,229 @@ from mathutils import Matrix
 
 #######################################################
 
+# Normal import logs keep the useful parser and placement totals, but translate
+# internal development labels into readable messages.  Raw patch names, policy
+# notes, and implementation-only fallback names stay out of user logs.
+CONCISE_IMPORT_LOG = True
+
+
+def _concise_import_log_message(message):
+    text = str(message)
+    stripped = text.strip()
+    if not CONCISE_IMPORT_LOG:
+        return text
+    if not stripped:
+        return ""
+    if text.startswith(("  ", "\t")):
+        return None
+
+    hidden_prefixes = (
+        "Patch:", "[policy]", "[mode]", "[ide]", "[wrldtool-offset]",
+        "[res ", "[overlay-bounds]", "[2dfx]", "[img-mdl]", "[matrix]",
+        "[matrix-log]", "[resolver]", "[submodel]", "[geometry-recovery]",
+        "[compare]", "[ids]", "[mdl]", "[unpack]", "[overlay]",
+        "[row-overlay]", "[nested]", "[area-mdl]", "[ipl-mdl]",
+        "[aggregate]", "[cleanup]", "[reference-dff-compare]",
+        "[apply] RES=", "[apply] matrix_world", "[apply] global IPL",
+        "[apply] reused ", "[apply] IPL/model", "[apply] exact missing",
+        "[apply] final missing", "[apply] recovered WRLD",
+        "[apply] imported missing", "[apply] first ",
+    )
+    if stripped.startswith(hidden_prefixes):
+        return None
+
+    if stripped.startswith(("— Master Resource Table", "— FILTERED VISIBLE RESOURCE IDs", "— Slave Group Table")):
+        return None
+    if stripped.startswith((
+        "LIGHTS-SKIP ", "SKIP_DUP ", "SUBMODEL ", "REJECT ",
+        "EXACT MISSING ", "FINAL MISSING ", "MISSING MDL ", "ROW_MATRIX ",
+    )):
+        return None
+
+    if stripped in ("===== LVZ Walk + IMG Match/Apply =====", "===== LVZ + IMG Import ====="):
+        return "===== LVZ + IMG Import ====="
+    if stripped.startswith("[log] live import log:"):
+        return "Log: " + stripped.split(":", 1)[1].strip()
+    if stripped.startswith("[io] LVZ bytes in:"):
+        match = re.search(r"LVZ bytes in:\s*(\d+)\s+decomp:\s*(\d+)(.*)$", stripped)
+        if match:
+            suffix = match.group(3).strip()
+            return "LVZ size: {} bytes -> {} bytes{}".format(
+                match.group(1), match.group(2), (" " + suffix) if suffix else ""
+            )
+    if stripped.startswith("[lvz] master Resource[]:"):
+        match = re.search(r"count=(\d+).*?game_hint=([^ ]+)", stripped)
+        if match:
+            return "Resource entries: {} ({})".format(match.group(1), match.group(2).upper())
+    if stripped.startswith("— IMG Read —"):
+        match = re.search(r"source:\s*(.*?)\s+bytes=(\d+)", stripped)
+        if match:
+            return "IMG: {} ({} bytes)".format(match.group(1), match.group(2))
+    if stripped.startswith("[platform] auto-detected"):
+        match = re.search(r"auto-detected\s+([^;]+)", stripped)
+        return "Platform: " + (match.group(1).strip() if match else stripped)
+    if stripped.startswith("[platform] resource dialects:"):
+        match = re.search(r"final platform=([^;]+)", stripped)
+        return "Platform confirmed: " + (match.group(1).strip() if match else stripped)
+    if stripped.startswith("[continues-img] proof scan:"):
+        match = re.search(r"empty_resource_ids=(\d+).*?proven=(\d+).*?new=(\d+)", stripped)
+        if match:
+            return "Empty LVZ model entries checked: {}; IMG matches found: {} ({} new)".format(
+                match.group(1), match.group(2), match.group(3)
+            )
+        return None
+    if stripped.startswith("IMG-backed models found:"):
+        return "IMG-backed model entries: " + stripped.split(":", 1)[1].strip()
+    if stripped.startswith("[img] sector row directories:"):
+        return "World sector rows: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[img] concrete sector headers:"):
+        return "Static map blocks: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[img] extra AREA/triggered candidate containers:"):
+        return "Additional IMG model-data blocks: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[speed] exact duplicate visible placement rows removed:"):
+        match = re.search(r"removed:\s*(\d+).*?retained=(\d+)", stripped)
+        if match:
+            return "Repeated sector copies removed: {}\nStatic placements kept: {}".format(
+                match.group(1), match.group(2)
+            )
+    if stripped.startswith("[img] sector rows candidate="):
+        match = re.search(
+            r"candidate=(\d+)\s+valid=(\d+)\s+kept=(\d+)\s+skipped_lod=(\d+)\s+skipped_dupes=(\d+)",
+            stripped,
+        )
+        if match:
+            return (
+                "Placement rows scanned: {}\n"
+                "Valid rows: {}\n"
+                "LOD rows ignored: {}\n"
+                "Repeated rows ignored: {}"
+            ).format(match.group(1), match.group(2), match.group(4), match.group(5))
+        return None
+    if stripped.startswith("[img] extra rows candidate="):
+        return None
+    if stripped.startswith("[img] IMG placement rows kept after pass filtering:"):
+        return "Placements ready: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[img] resource-id dump skipped"):
+        return None
+    if stripped.startswith("[img] LIGHTS mesh placements kept:"):
+        return "LIGHTS mesh placements kept: " + stripped.rsplit(":", 1)[1].strip() + " (2DFX effects are separate)"
+    if stripped.startswith("[model-lookup] after LVZ and same-sector IMG:"):
+        match = re.search(r"details=(\d+).*?row/res=(\d+).*?res=(\d+)", stripped)
+        if match:
+            return (
+                "Model lookup after LVZ and matching sector tables: {} placements still need models; "
+                "{} row-specific keys and {} resource IDs will be checked in the remaining exact tables."
+            ).format(match.group(1), match.group(2), match.group(3))
+        return None
+    if stripped.startswith("[exact-models] other map blocks added:"):
+        return "Exact models added from other static map blocks: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[exact-models] conflicting resource IDs skipped:"):
+        return "Conflicting model entries ignored during the cross-sector search: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[exact-models] conflicting static resource IDs not used outside their own sector:"):
+        return "Resource IDs with different sector-specific models kept local to their own sectors: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[exact-models] conflicting linked resource IDs skipped:"):
+        return "Linked model IDs with conflicting geometry left unresolved: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[exact-models] ambiguous unresolved resource IDs left unplaced:"):
+        return "Placements left missing instead of using conflicting model data: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[exact-resolution] unresolved placements="):
+        match = re.search(r"unresolved placements=(\d+)\s+resource_ids=(\d+)", stripped)
+        if match:
+            return "After all exact WRLD resource tables: {} placements still lack models ({} resource IDs).".format(
+                match.group(1), match.group(2)
+            )
+        return None
+    if stripped.startswith("[raw-img-models] recovered="):
+        match = re.search(r"recovered=(\d+)\s+requested=(\d+)", stripped)
+        if match:
+            return "Models found in the remaining raw IMG data: {} of {} requested resource IDs.".format(
+                match.group(1), match.group(2)
+            )
+        return None
+    if stripped.startswith("[raw-img-models] final-choice model pool:"):
+        return "Raw IMG models available only for unresolved IDs: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[progress]"):
+        lower = stripped.lower()
+        if "applying img placement" in lower:
+            return "Placing objects..."
+        if "building lvz resource" in lower:
+            return "Building LVZ models..."
+        if "same-sector img resource" in lower:
+            return "Building IMG models used by static map blocks..."
+        if "raw img model data" in lower:
+            return "Checking remaining raw IMG model data for unresolved resource IDs..."
+        if "exact img resource models from other map blocks" in lower:
+            return "Checking exact resource tables in other static map blocks..."
+        if "child resource records" in lower:
+            return "Checking exact child resource records..."
+        if "shared resource records" in lower:
+            return "Checking exact shared resource records..."
+        if "linked area records" in lower:
+            return "Checking exact linked AREA resource records..."
+        return None
+    if stripped.startswith("[speed] disabled Blender global undo"):
+        return "Speed mode: Blender global undo temporarily disabled."
+    if stripped.startswith("[speed] linked duplicate placements"):
+        return "Speed mode: linked placement copies are batched until placement finishes."
+    if stripped.startswith("[speed] hidden placement collection setup failed"):
+        return "Warning: placement batching could not be enabled."
+    if stripped.startswith("[apply-progress] placed="):
+        match = re.search(r"placed=(\d+)/(\d+).*?missing=(\d+)", stripped)
+        if match:
+            return "Placed {} of {} objects; {} still missing".format(
+                match.group(1), match.group(2), match.group(3)
+            )
+    if stripped.startswith("[apply-progress] finished placement loop"):
+        return None
+    if stripped.startswith("[apply] skipped missing mesh/resource rows:"):
+        return "Missing placements: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[apply] skipped LIGHTS-pass IPL mesh rows:"):
+        return "LIGHTS mesh rows skipped: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[apply] raw parser base cleanup:"):
+        return None
+    if stripped.startswith("[apply] IMG placement rows applied:"):
+        return "Objects placed: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[apply] linked duplicate placement objects created:"):
+        return "Linked placement copies created: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("Warning: parse failed at"):
+        match = re.search(
+            r"Warning: parse failed at (0x[0-9A-Fa-f]+): unsupported or implausible WRLD material list at (0x[0-9A-Fa-f]+): count16=(\d+) size16=(\d+)",
+            stripped,
+        )
+        if match:
+            return "Warning: model data at {} has an invalid material table (count={}, size={}).".format(
+                match.group(1), match.group(3), match.group(4)
+            )
+        return stripped.replace("unsupported or implausible WRLD", "invalid WRLD")
+    if stripped.startswith("[summary] LVZ-table MDL resource objects parsed:"):
+        return "LVZ models built: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[summary] IMG sector overlay MDL objects parsed:"):
+        return "IMG models built for static map blocks: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[summary] IMG child-record exact models parsed:"):
+        return "Exact IMG models from child resource records: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[summary] IMG shared-record exact models parsed:"):
+        return "Exact IMG models from shared resource records: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[summary] IMG linked AREA exact models parsed:"):
+        return "Exact IMG models from linked AREA records: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[summary] deleted unplaced resource objects:"):
+        return "Unused model bases cleaned up: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[summary] linked IMG placement duplicates:"):
+        return "Linked placement copies: " + stripped.rsplit(":", 1)[1].strip()
+    if stripped.startswith("[summary]"):
+        return None
+    if stripped.startswith("[done]"):
+        return None
+    if stripped.startswith("[total] finished in"):
+        parts = stripped.rsplit(" in ", 1)
+        return "Total time: " + (parts[1] if len(parts) > 1 else stripped)
+    if stripped.startswith("[speed] restored Blender global undo"):
+        return "Speed mode: Blender global undo restored."
+    if stripped.startswith("[") or stripped.startswith("—"):
+        return None
+    if stripped.startswith("Warning: exact missing IMG MDL"):
+        return None
+    return text
+
+
 class DebugOut:
     def __init__(self, enable_console: bool, write_file: bool, file_path: Optional[str]):
         self.enable_console = enable_console
@@ -68,6 +292,7 @@ class DebugOut:
         self._buf: List[str] = []
         self._line_count = 0
         self._fh = None
+        self._concise_seen = set()
         if self.write_file and self.file_path:
             self._open_live_log()
 
@@ -101,6 +326,25 @@ class DebugOut:
         self._fh = None
 
     def log(self, msg: str):
+        msg = _concise_import_log_message(msg)
+        if msg is None:
+            return
+        once_prefixes = (
+            "Resource entries:", "IMG-backed model entries:",
+            "Building LVZ models...", "Building IMG models used by static map blocks...",
+            "Checking remaining raw IMG model data for unresolved resource IDs...",
+            "Checking exact resource tables in other static map blocks...",
+            "Checking exact child resource records...",
+            "Checking exact shared resource records...",
+            "Checking exact linked AREA resource records...",
+            "Placing objects...", "LVZ models built:",
+            "IMG models built for static map blocks:",
+            "Additional exact IMG models built:",
+        )
+        if str(msg).startswith(once_prefixes):
+            if msg in self._concise_seen:
+                return
+            self._concise_seen.add(msg)
         if self.enable_console:
             print(msg)
         if self.write_file:
@@ -185,9 +429,8 @@ IMG_PASS_NAMES_LCS = (
     "LIGHTS",
     "TRANSPARENT",
 )
-# V48 / V79 behavior restored:
-# LIGHTS is a WRLD IPL placement pass here, not a 2DFX table.  Dropping it
-# removes real mesh/light-card placements and creates visible holes.
+# LIGHTS is a normal WRLD mesh pass. It is separate from model-attached 2DFX
+# associations loaded from GAME.DTZ and must remain available during map import.
 IMG_VISIBLE_PASS_NAMES_DEFAULT = {
     "UNDERWATER",
     "ROADS",
@@ -3570,6 +3813,343 @@ class read_img:
         return overlays
 
 
+    def find_area_info_records_from_lvz(self) -> List[Dict[str, int]]:
+        """Return the master sLevelChunk AreaInfo[] rows backed by AERA chunks.
+
+        VCS stores an AreaInfo table in the master LVZ.  Each AreaInfo points to
+        an AERA relocatable chunk in the companion IMG.  This is distinct from a
+        Sector/WRLD overlay table: an Area contains ``AreaResource`` rows shaped
+        as ``s16 resourceId, s16 secondaryId, u32 dataPointer``.  Treating these
+        rows as Sector ``s32 id, u32 pointer`` records loses the exact high-number
+        resource IDs and is the reason models such as Beach1887 and Beach1725
+        were reported missing.
+        """
+        lvz = self.lvz_bytes
+        img = self.img_bytes
+        if len(lvz) < 0x40 or len(img) < 0x40:
+            return []
+
+        # Known VCS master offsets first.  The fallback scan keeps the reader
+        # usable with other regional builds without adding any importer option.
+        pair_offsets = [0x2F0]
+        scan_end = min(len(lvz) - 8, 0x500)
+        for off in range(0x150, max(0x150, scan_end + 1), 4):
+            if off not in pair_offsets:
+                pair_offsets.append(off)
+
+        best = []
+        best_score = -1
+        for pair_off in pair_offsets:
+            if pair_off < 0 or pair_off + 8 > len(lvz):
+                continue
+            count = read_u32(lvz, pair_off)
+            table_ptr = read_u32(lvz, pair_off + 4)
+            if count <= 0 or count > 1024:
+                continue
+            if table_ptr < 0x20 or table_ptr + count * 16 > len(lvz):
+                continue
+
+            records = []
+            valid = 0
+            for area_index in range(int(count)):
+                row_off = int(table_ptr) + area_index * 16
+                try:
+                    cell_x, cell_y = struct.unpack_from("<hh", lvz, row_off)
+                    file_offset, file_size, declared_resources = struct.unpack_from("<IIi", lvz, row_off + 4)
+                except Exception:
+                    continue
+                if file_offset < 0 or file_size < 0x28 or file_offset + file_size > len(img):
+                    continue
+                if img[file_offset:file_offset + 4] != b"AERA":
+                    continue
+                header_file_size = read_u32(img, file_offset + 0x08)
+                data_size = read_u32(img, file_offset + 0x0C)
+                reloc_tab = read_u32(img, file_offset + 0x10)
+                num_relocs = read_u32(img, file_offset + 0x14)
+                area_resources = struct.unpack_from("<i", img, file_offset + 0x20)[0]
+                resources_ptr = read_u32(img, file_offset + 0x24)
+                if area_resources < 0 or area_resources > 4096:
+                    continue
+                if declared_resources >= 0 and area_resources != declared_resources:
+                    # Keep the chunk only when both counts are at least plausible;
+                    # a mismatch is useful diagnostic data but not a reason to
+                    # reinterpret unrelated bytes as AreaInfo.
+                    if declared_resources > 4096:
+                        continue
+                resource_table_off = int(file_offset) + int(resources_ptr)
+                if resource_table_off < file_offset + 0x20 or resource_table_off + area_resources * 8 > file_offset + file_size:
+                    continue
+                data_end_rel = int(reloc_tab) if 0x20 <= int(reloc_tab) <= int(file_size) else int(file_size)
+                data_end = min(len(img), int(file_offset) + data_end_rel)
+                records.append({
+                    "area_index": int(area_index),
+                    "cell_x": int(cell_x),
+                    "cell_y": int(cell_y),
+                    "lvz_area_table_off": int(pair_off),
+                    "lvz_area_info_off": int(row_off),
+                    "file_offset": int(file_offset),
+                    "file_size": int(file_size),
+                    "header_file_size": int(header_file_size),
+                    "data_size": int(data_size),
+                    "reloc_tab": int(reloc_tab),
+                    "num_relocs": int(num_relocs),
+                    "declared_resources": int(declared_resources),
+                    "num_resources": int(area_resources),
+                    "resources_ptr": int(resources_ptr),
+                    "resource_table_off": int(resource_table_off),
+                    "data_end": int(data_end),
+                })
+                valid += 1
+
+            # Require a strong table-level proof.  The real beach VCS table has
+            # every row backed by an AERA chunk; random master values do not.
+            required = min(int(count), 3)
+            if valid < required:
+                continue
+            score = valid * 1000 - abs(int(count) - valid)
+            if pair_off == 0x2F0:
+                score += 100
+            if score > best_score:
+                best_score = score
+                best = records
+
+        best.sort(key=lambda record: int(record.get("area_index", -1)))
+        self.last_area_info_stats = {
+            "areas": len(best),
+            "table_off": int(best[0].get("lvz_area_table_off", -1)) if best else -1,
+            "resource_rows": sum(int(record.get("num_resources", 0)) for record in best),
+        }
+        return best
+
+    def collect_area_resources(self, area_records: Optional[List[Dict[str, int]]] = None,
+                               wanted_res_ids: Optional[set] = None,
+                               max_resource_id: Optional[int] = None,
+                               progress_callback=None) -> List[Dict[str, int]]:
+        """Parse exact ``AreaResource`` rows from IMG AERA chunks.
+
+        The data pointer is relative to the beginning of the AERA chunk,
+        including its 0x20 relocatable header.  The resource array pointer uses
+        the same base.  Only rows whose pointer resolves to a valid Leeds MDL
+        material descriptor are returned.
+        """
+        img = self.img_bytes
+        if area_records is None:
+            area_records = self.find_area_info_records_from_lvz()
+        wanted = None
+        if wanted_res_ids is not None:
+            try:
+                wanted = {int(value) for value in wanted_res_ids}
+            except Exception:
+                wanted = None
+
+        results: List[Dict[str, int]] = []
+        seen = set()
+        stats = {
+            "areas": len(area_records or []),
+            "rows": 0,
+            "wanted_rows": 0,
+            "accepted": 0,
+            "invalid_pointer": 0,
+            "non_geometry": 0,
+        }
+
+        total_areas = len(area_records or [])
+        for area_number, area in enumerate(area_records or []):
+            if progress_callback is not None:
+                try:
+                    progress_callback(area_number, total_areas)
+                except Exception:
+                    pass
+            area_index = int(area.get("area_index", -1))
+            base = int(area.get("file_offset", -1))
+            file_size = int(area.get("file_size", 0))
+            table_off = int(area.get("resource_table_off", -1))
+            count = int(area.get("num_resources", 0))
+            data_end = min(len(img), int(area.get("data_end", base + file_size)))
+            if base < 0 or table_off < 0 or count <= 0 or data_end <= base + 0x20:
+                continue
+
+            rows = []
+            payload_offsets = []
+            for resource_index in range(count):
+                row_off = table_off + resource_index * 8
+                if row_off < 0 or row_off + 8 > min(len(img), base + file_size):
+                    break
+                stats["rows"] += 1
+                res_id, secondary_id, raw_ptr = struct.unpack_from("<hhI", img, row_off)
+                if res_id < 0:
+                    continue
+                if max_resource_id is not None and int(res_id) >= int(max_resource_id):
+                    continue
+                if wanted is not None and int(res_id) not in wanted:
+                    continue
+                stats["wanted_rows"] += 1
+                raw_off = base + int(raw_ptr)
+                if raw_ptr < 0x20 or raw_off < base + 0x20 or raw_off + 8 > data_end:
+                    stats["invalid_pointer"] += 1
+                    continue
+                rows.append((resource_index, row_off, int(res_id), int(secondary_id), int(raw_ptr), int(raw_off)))
+                payload_offsets.append(int(raw_off))
+
+            unique_payloads = sorted(set(payload_offsets))
+            next_payload = {}
+            for payload_index, payload_off in enumerate(unique_payloads):
+                next_payload[payload_off] = unique_payloads[payload_index + 1] if payload_index + 1 < len(unique_payloads) else data_end
+
+            for resource_index, row_off, res_id, secondary_id, raw_ptr, raw_off in rows:
+                resource_end = min(data_end, int(next_payload.get(raw_off, data_end)))
+                if resource_end <= raw_off + 8:
+                    resource_end = data_end
+                descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=resource_end)
+                if descriptor_off is None and resource_end < data_end:
+                    # A few rows share auxiliary blocks between payloads.  The
+                    # exact pointer is still authoritative, so allow the full
+                    # AERA data span before rejecting it as non-geometry.
+                    descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=data_end)
+                    if descriptor_off is not None:
+                        resource_end = data_end
+                if descriptor_off is None:
+                    stats["non_geometry"] += 1
+                    continue
+                key = (area_index, res_id, int(descriptor_off))
+                if key in seen:
+                    continue
+                seen.add(key)
+                results.append({
+                    "sector_index": int(-200000 - area_index),
+                    "row_index": int(area.get("cell_y", -1)),
+                    "sector_x": int(area.get("cell_x", 0)),
+                    "sector_y": int(area.get("cell_y", 0)),
+                    "area_index": int(area_index),
+                    "area_cell_x": int(area.get("cell_x", 0)),
+                    "area_cell_y": int(area.get("cell_y", 0)),
+                    "cont": int(base),
+                    "sector_end": int(data_end),
+                    "resource_end": int(resource_end),
+                    "resource_index": int(resource_index),
+                    "res_id": int(res_id),
+                    "secondary_id": int(secondary_id),
+                    "raw_ptr": int(raw_ptr),
+                    "raw_off": int(descriptor_off),
+                    "resource_row_off": int(row_off),
+                    "resource_stride": 8,
+                    "resource_layout": "area_s16id_s16secondary_ptr",
+                    "area_file_size": int(file_size),
+                    "area_reloc_tab": int(area.get("reloc_tab", 0)),
+                })
+                stats["accepted"] += 1
+
+        if progress_callback is not None:
+            try:
+                progress_callback(total_areas, total_areas)
+            except Exception:
+                pass
+        results.sort(key=lambda row: (int(row.get("area_index", -1)), int(row.get("resource_index", -1))))
+        self.last_area_resource_stats = stats
+        return results
+
+    def build_area_model_info_map(self, area_records: Optional[List[Dict[str, int]]] = None,
+                                  wanted_res_ids: Optional[set] = None,
+                                  max_resource_id: Optional[int] = None):
+        """Build the authoritative streamed RES -> GAME.DTZ model-info map.
+
+        In VCS ``AreaResource.id1`` is the streamed resource identity and
+        ``AreaResource.id2`` is the ``CBaseModelInfo`` index used by world
+        entities and GAME.DTZ.  This identity is carried by the AERA row
+        itself; it does not depend on the resource payload being geometry.
+
+        Every accepted row must still come from the master AreaInfo table, a
+        validated AERA chunk, and an in-bounds chunk-relative payload pointer.
+        Conflicting secondary IDs are omitted rather than guessed.
+        """
+        img = self.img_bytes
+        if area_records is None:
+            area_records = self.find_area_info_records_from_lvz()
+        wanted = None
+        if wanted_res_ids is not None:
+            try:
+                wanted = {int(value) for value in wanted_res_ids}
+            except Exception:
+                wanted = None
+
+        by_res: Dict[int, int] = {}
+        provenance: Dict[int, Dict[str, int]] = {}
+        conflicts: Dict[int, set] = {}
+        stats = {
+            "areas": len(area_records or []),
+            "rows": 0,
+            "wanted_rows": 0,
+            "valid_pointer_rows": 0,
+            "mapped_res_ids": 0,
+            "conflicting_res_ids": 0,
+        }
+
+        for area in area_records or []:
+            area_index = int(area.get("area_index", -1))
+            base = int(area.get("file_offset", -1))
+            file_size = int(area.get("file_size", 0))
+            table_off = int(area.get("resource_table_off", -1))
+            count = int(area.get("num_resources", 0))
+            data_end = min(len(img), int(area.get("data_end", base + file_size)))
+            if base < 0 or table_off < 0 or count <= 0 or data_end <= base + 0x20:
+                continue
+            chunk_end = min(len(img), base + file_size)
+            for resource_index in range(count):
+                row_off = table_off + resource_index * 8
+                if row_off < 0 or row_off + 8 > chunk_end:
+                    break
+                stats["rows"] += 1
+                try:
+                    res_id, model_info_id, raw_ptr = struct.unpack_from("<hhI", img, row_off)
+                except Exception:
+                    continue
+                res_id = int(res_id)
+                model_info_id = int(model_info_id)
+                raw_ptr = int(raw_ptr)
+                if res_id < 0 or model_info_id < 0:
+                    continue
+                if max_resource_id is not None and res_id >= int(max_resource_id):
+                    continue
+                if wanted is not None and res_id not in wanted:
+                    continue
+                stats["wanted_rows"] += 1
+                raw_off = base + raw_ptr
+                if raw_ptr >= 0x20 and raw_off >= base + 0x20 and raw_off < data_end:
+                    stats["valid_pointer_rows"] += 1
+
+                # Identity belongs to the validated AERA row itself.  Some
+                # AreaResource entries intentionally have no geometry payload,
+                # but their secondaryId still owns model metadata and 2DFX.
+                previous = by_res.get(res_id)
+                if previous is None:
+                    by_res[res_id] = model_info_id
+                    provenance[res_id] = {
+                        "area_index": area_index,
+                        "resource_index": int(resource_index),
+                        "resource_row_off": int(row_off),
+                        "raw_ptr": raw_ptr,
+                        "raw_off": int(raw_off),
+                        "model_info_id": model_info_id,
+                    }
+                elif int(previous) != model_info_id:
+                    values = conflicts.setdefault(res_id, {int(previous)})
+                    values.add(model_info_id)
+
+        for res_id in conflicts:
+            by_res.pop(int(res_id), None)
+            provenance.pop(int(res_id), None)
+
+        stats["mapped_res_ids"] = len(by_res)
+        stats["conflicting_res_ids"] = len(conflicts)
+        stats["conflicts"] = {
+            int(key): sorted(int(value) for value in values)
+            for key, values in conflicts.items()
+        }
+        self.last_area_model_info_stats = stats
+        return by_res, provenance, conflicts
+
+
+
     def enumerate_sector_details(self, max_resource_id: Optional[int] = None, include_lod: bool = False, dedupe_visible: bool = True, progress_callback=None):
         img = self.img_bytes
         details = []
@@ -3579,6 +4159,7 @@ class read_img:
             "valid_rows": 0,
             "kept_rows": 0,
             "skipped_lod_rows": 0,
+            "skipped_light_rows": 0,
             "skipped_duplicate_rows": 0,
         }
         seen_keys = set()
@@ -3610,24 +4191,40 @@ class read_img:
                         off += 0x50
                         continue
                     if str(pass_name) in IMG_NON_MODEL_PASS_NAMES:
-                        stats["skipped_lod_rows"] += 1
+                        if str(pass_name).upper() == "LIGHTS":
+                            stats["skipped_light_rows"] += 1
+                        else:
+                            stats["skipped_lod_rows"] += 1
                         off += 0x50
                         continue
                     if (not include_lod) and str(pass_name) not in IMG_MODEL_PASS_NAMES_DEFAULT:
                         stats["skipped_lod_rows"] += 1
                         off += 0x50
                         continue
-                    dedupe_key = (sector_index, int(pass_index), ipl_id, int(res_id))
-                    if dedupe_visible and dedupe_key in seen_keys:
-                        stats["skipped_duplicate_rows"] += 1
-                        off += 0x50
-                        continue
-                    seen_keys.add(dedupe_key)
                     sx = half_to_float(read_u16(img, off + 0x04))
                     sy = half_to_float(read_u16(img, off + 0x06))
                     sz = half_to_float(read_u16(img, off + 0x08))
                     sr = half_to_float(read_u16(img, off + 0x0A))
                     m = struct.unpack_from("<16f", img, off + 0x10)
+                    # The same static IPL row is copied into every sector block it
+                    # overlaps.  Sector-relative translation can differ by a tiny
+                    # floating-point amount after the sector origin is added, which
+                    # previously left near-identical .001 copies such as Beach4292.
+                    # The row sphere is stored in world coordinates and is stable
+                    # across those copies, so combine it with the full 3x3 basis.
+                    dedupe_key = (
+                        int(ipl_id), int(res_id), str(pass_name),
+                        round(float(sx), 4), round(float(sy), 4),
+                        round(float(sz), 4), round(float(sr), 4),
+                        round(float(m[0]), 4), round(float(m[1]), 4), round(float(m[2]), 4),
+                        round(float(m[4]), 4), round(float(m[5]), 4), round(float(m[6]), 4),
+                        round(float(m[8]), 4), round(float(m[9]), 4), round(float(m[10]), 4),
+                    )
+                    if dedupe_visible and dedupe_key in seen_keys:
+                        stats["skipped_duplicate_rows"] += 1
+                        off += 0x50
+                        continue
+                    seen_keys.add(dedupe_key)
                     s0 = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
                     s1 = math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])
                     s2 = math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])
@@ -3769,6 +4366,7 @@ class read_img:
             "valid_rows": 0,
             "kept_rows": 0,
             "skipped_lod_rows": 0,
+            "skipped_light_rows": 0,
             "nonzero_origin_containers": 0,
         }
         if container_records is None:
@@ -3802,7 +4400,10 @@ class read_img:
                         off += 0x50
                         continue
                     if str(pass_name) in IMG_NON_MODEL_PASS_NAMES:
-                        stats["skipped_lod_rows"] += 1
+                        if str(pass_name).upper() == "LIGHTS":
+                            stats["skipped_light_rows"] += 1
+                        else:
+                            stats["skipped_lod_rows"] += 1
                         off += 0x50
                         continue
                     if (not include_lod) and str(pass_name) not in IMG_MODEL_PASS_NAMES_DEFAULT:
@@ -3836,15 +4437,46 @@ class read_img:
 
     def merge_instance_details(self, *detail_lists):
         merged = []
-        seen = set()
+        seen_source_rows = set()
+        seen_visible_rows = set()
+        duplicate_source_rows = 0
+        duplicate_visible_rows = 0
+
         for detail_list in detail_lists:
             for detail in detail_list:
-                key = (int(detail[1]), int(detail[2]), int(detail[3]), int(detail[0]))
-                if key in seen:
+                source_key = (int(detail[1]), int(detail[2]), int(detail[3]), int(detail[0]))
+                if source_key in seen_source_rows:
+                    duplicate_source_rows += 1
                     continue
-                seen.add(key)
+                seen_source_rows.add(source_key)
+
+                values = detail[12]
+                sphere_key = tuple(round(float(value), 4) for value in detail[5:9])
+                basis_key = (
+                    round(float(values[0]), 4), round(float(values[1]), 4), round(float(values[2]), 4),
+                    round(float(values[4]), 4), round(float(values[5]), 4), round(float(values[6]), 4),
+                    round(float(values[8]), 4), round(float(values[9]), 4), round(float(values[10]), 4),
+                )
+                visible_key = (
+                    int(detail[4]),
+                    int(detail[0]),
+                    str(detail[14]),
+                    sphere_key,
+                    basis_key,
+                )
+                if visible_key in seen_visible_rows:
+                    duplicate_visible_rows += 1
+                    continue
+                seen_visible_rows.add(visible_key)
                 merged.append(detail)
+
         merged.sort(key=lambda t: (int(t[15]), int(t[13]), int(t[1]), int(t[2])))
+        self.last_merge_instance_stats = {
+            "source_rows": sum(len(detail_list) for detail_list in detail_lists),
+            "duplicate_source_rows": int(duplicate_source_rows),
+            "duplicate_visible_rows": int(duplicate_visible_rows),
+            "kept_rows": len(merged),
+        }
         return merged
 
     def write_sector_csvs(self, lvz_path: str, details, enable_unique: bool):

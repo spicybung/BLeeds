@@ -12,17 +12,29 @@ import struct
 import time
 import zipfile
 import hashlib
+import math
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import bpy
-from mathutils import Matrix
+from mathutils import Matrix, Vector
 
-from .. import set_mesh_auto_smooth
+try:
+    import numpy as np
+except Exception:
+    np = None
+
+from .. import set_mesh_auto_smooth, stamp_bleeds_entity_type
 from ..leedsLib import lvz_img as LVZ
 
 _ACTIVE_IMPORT_PROGRESS = None
 _ACTIVE_IMPORT_UNDO_STATE = None
+_ACTIVE_IMPORT_ROOT_COLLECTION = None
+_ACTIVE_IMPORT_OBJECTS_COLLECTION = None
+_ACTIVE_IMPORT_LINKED_COLLECTION = None
+_ACTIVE_IMPORT_2DFX_COLLECTION = None
+_CURRENT_PLACED_OBJECT_RECORDS = []
 
 
 def draw_lvz_img_import_progress_popup(menu, context):
@@ -47,6 +59,7 @@ class LvzImgImportProgress:
         self.value = -1
         self.stage = ""
         self.last_redraw_time = 0.0
+        self.redraw_interval = 0.25
         self.last_report_bucket = -1
         self.initial_object_names = set()
         self.initial_mesh_names = set()
@@ -148,9 +161,12 @@ class LvzImgImportProgress:
             value = max(0, self.value)
         if not force and self.value >= 0 and value < self.value:
             value = self.value
-        if stage is not None:
-            self.stage = str(stage)
+        new_stage = self.stage if stage is None else str(stage)
         changed = value != self.value
+        stage_changed = new_stage != self.stage
+        if not force and not changed and not stage_changed:
+            return
+        self.stage = new_stage
         self.value = value
 
         if self.window_manager is not None:
@@ -173,7 +189,7 @@ class LvzImgImportProgress:
             pass
 
         current_time = time.monotonic()
-        should_redraw = force or (changed and current_time - self.last_redraw_time >= 0.08)
+        should_redraw = force or (changed and current_time - self.last_redraw_time >= self.redraw_interval)
         if should_redraw:
             self.last_redraw_time = current_time
             self.redraw()
@@ -197,6 +213,8 @@ class LvzImgImportProgress:
         self.update(value, stage)
 
     def redraw(self):
+        if self.window_manager is None:
+            return
         try:
             for window in self.window_manager.windows:
                 screen = getattr(window, "screen", None)
@@ -204,11 +222,6 @@ class LvzImgImportProgress:
                     continue
                 for area in screen.areas:
                     area.tag_redraw()
-        except Exception:
-            pass
-        try:
-            if bpy.ops.wm.redraw_timer.poll():
-                bpy.ops.wm.redraw_timer(type="DRAW_WIN_SWAP", iterations=1)
         except Exception:
             pass
 
@@ -289,14 +302,14 @@ IMPORT_DEBUG_MATRIX_SET_LIMIT = 96
 IMPORT_APPLY_PROGRESS_EVERY = 5000
 IMPORT_STAMP_DUPLICATE_IMG_PROPS = False
 IMPORT_HIDE_UNPLACED_BASES_INSTEAD_OF_DELETE = False
-IMPORT_LINK_DUPLICATES_IN_HIDDEN_COLLECTION = False
+IMPORT_LINK_DUPLICATES_IN_HIDDEN_COLLECTION = True
 IMPORT_DEFER_BASE_VISIBILITY_DURING_APPLY = False
 IMPORT_KEEP_UNPLACED_BASES_VISIBLE = False
 IMPORT_VERBOSE_MDL_DEBUG = False
 IMPORT_MDL_DEBUG_LIMIT = 48
 IMPORT_VERBOSE_RESOURCE_BUILD_LOGS = False
 
-# Keep the BestIPLModel global IPL/model fallback path, but stop IPL fallback
+# Keep the legacy ROWLINK fallback structures compiled, but the path is disabled
 # instances from inheriting 32/64/128 WRLD cell basis as object scale.
 # That was the source of the big wall/slab buildings while BestIPLModel's
 # candidate choice was still the least broken branch.
@@ -367,7 +380,25 @@ ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG = True
 CONTINUES_IN_IMG_SCAN_STRIDE = 0x10
 CONTINUES_IN_IMG_MAX_LOG_ROWS = 128
 CONTINUES_IN_IMG_TEXTURE_ID_DELTAS = (1, 0)
-CONTINUES_IN_IMG_PROOF_CACHE: Dict[int, dict] = {}
+# Keep several exact-RES raw IMG descriptor variants.  A texture-number match
+# alone is not enough to identify geometry; the row's own sphere and 4x4 matrix
+# select the matching variant during placement.
+CONTINUES_IN_IMG_MAX_VARIANTS_PER_RES = 6
+CONTINUES_IN_IMG_MAX_FIT_DETAILS_PER_RES = 24
+CONTINUES_IN_IMG_MAX_PLACEMENT_FIT_SCORE = 5.0
+CONTINUES_IN_IMG_PROOF_CACHE: Dict[int, List[dict]] = {}
+# Exact WRLD submodels are normalized model data.  Their 16/32/64/128 basis is
+# the real model transform, not a scale value to discard.  Preserve it and
+# compensate any bbox-center origin rebase in matrix space.
+PRESERVE_EXACT_WRLD_SUBMODEL_ROW_MATRIX = True
+# A same-RES WRLD submodel can be a small aggregate slice rather than the full
+# object represented by the placement row.  Only in that case, scan for more
+# exact-RES IMG variants and compare them using the row sphere/matrix.  This is
+# still strict RES matching; the internal ROWLINK never substitutes geometry.
+EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_RADIUS_RATIO = 0.42
+EXACT_WRLD_SUBMODEL_RAW_VARIANT_MAX_RADIUS_RATIO = 2.75
+EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_TARGET_RADIUS = 4.0
+EXACT_WRLD_SUBMODEL_RAW_VARIANT_SPARSE_FACE_LIMIT = 18
 # V97: keep the dangerous IPL/IDE/neighbor guess paths off, but restore the real
 # structured exact-RES IMG table paths.  V96 disabled these as debugging bloat and
 # left rows such as RES 4477/4478/4494/4495 missing even though the IMG has real
@@ -384,7 +415,7 @@ ENABLE_ROW_SHARED_FALLBACK_MDLS = True
 OBJECT_MATRIX_TRANSFORM_LOG_ENABLED = False
 OBJECT_MATRIX_TRANSFORM_LOG_FULL_VISIBLE = False
 OBJECT_MATRIX_TRANSFORM_LOG_MAX_GENERIC_ROWS = 256
-OBJECT_MATRIX_TRANSFORM_LOG_ALWAYS_RES_IDS = {1881}
+OBJECT_MATRIX_TRANSFORM_LOG_ALWAYS_RES_IDS = {1179, 1725, 1881, 1887, 1989, 2184, 3528}
 OBJECT_MATRIX_TRANSFORM_LOG_TO_CSV = False
 OBJECT_MATRIX_TRANSFORM_LOG_TO_BLENDER_LOG = True
 OBJECT_MATRIX_TRANSFORM_LOG_BLENDER_MAX_LINES = 256
@@ -396,16 +427,30 @@ RAW_PARSER_BASE_CLEANUP_MODE = "hide"  # "hide" or "delete"
 # V60: keep diagnostics in Blender log only. No CSV pile by default.
 DIAGNOSTIC_CSV_LOGS_ENABLED = False
 
+# 1.0.21 identity/2DFX rule. The first placement u16 is an internal ROWLINK
+# and the second is the streamed geometry RES. GAME.DTZ ownership comes from the
+# matching master AreaInfo -> AERA AreaResource.secondaryId row. GAME.DTZ effect
+# positions are native model-space units: the streamed row basis contains an
+# additional per-axis geometry-normalization scale and must be normalized before
+# it is applied to C2dEffect positions. Split opaque/transparent resources that
+# share one runtime model placement emit one helper set, not duplicate sets.
+PLACEMENT_RES_TXT_REPORT_ENABLED = True
+CREATE_GAME_DTZ_2DFX_HELPERS = True
+PLACEMENT_RES_REPORT_EFFECT_LIMIT = 8
+PLACEMENT_RES_REPORT_CANDIDATE_LIMIT = 24
+PLACEMENT_RES_REPORT_TARGET_IDS = {1179, 1725, 1881, 1887, 1989, 2184, 3528}
+_CURRENT_PLACEMENT_REPORT_ROWS = {}
+
 # V60: geometry data prints in Blender console/log. No recovery guesses.
 GEOMETRY_OBJECT_LOG_ENABLED = False
 GEOMETRY_OBJECT_LOG_MAX_LINES = 2048
-GEOMETRY_OBJECT_LOG_ALWAYS_RES_IDS = {1881, 1887, 1888, 4294, 5045}
+GEOMETRY_OBJECT_LOG_ALWAYS_RES_IDS = {1179, 1725, 1881, 1887, 1888, 1989, 2184, 3528, 4294, 5045}
 
 # V66: resolver audit. Logs the actual row -> candidate geometry chain
 # in Blender's console. No guesses are imported.
 RESOLVER_AUDIT_ENABLED = False
 RESOLVER_AUDIT_MAX_ROWS = 4096
-RESOLVER_AUDIT_ALWAYS_RES_IDS = {1019, 1033, 1287, 1511, 1586, 1612, 1633, 1670, 1881, 1887, 1888, 1961, 2082, 4294, 5045}
+RESOLVER_AUDIT_ALWAYS_RES_IDS = {1019, 1033, 1179, 1287, 1511, 1586, 1612, 1633, 1670, 1725, 1881, 1887, 1888, 1961, 1989, 2082, 2184, 3528, 4294, 5045}
 RESOLVER_AUDIT_ALWAYS_IPL_IDS = {436, 437, 438, 439, 562, 825, 840, 856, 864, 892, 1280, 1281, 1285, 1322, 1479}
 RESOLVER_AUDIT_CANDIDATE_LIMIT_PER_ROW = 48
 # V67: target-only. Do not audit every row just because chosen_obj is None.
@@ -414,11 +459,11 @@ RESOLVER_AUDIT_TARGET_ONLY = True
 RESOLVER_AUDIT_TARGET_PASSES = {"NORMAL", "ROADS", "TRANSPARENT"}
 
 # V68: actual recovery path for the pattern proven by V67:
-# RES has only a tiny sparse WRLD fragment, but the row's IPL/model id has a
+# RES has only a tiny sparse WRLD fragment. Legacy code once treated ROWLINK as a
 # rich internal LVZ+IMG model. Use that internal model with the full row matrix.
 ENABLE_RICH_IPL_OVER_SPARSE_RECOVERY = False
 # V71: real-new-found recovery. Never import WRLD sparse fragments as buildings.
-# If the row's IPL/model id resolves to a real parsed MDL payload, use that.
+# This legacy ROWLINK-as-model path is disabled; GAME_MODEL identity is handled separately.
 # Global/area parsed MDLs are allowed again because they are actual payloads,
 # but WRLD_SUBMODEL_GROUP and submodel-slice junk are always rejected.
 RICH_IPL_RECOVERY_STRICT_SAME_SECTOR_OR_ROW = False
@@ -446,10 +491,10 @@ RICH_IPL_RECOVERY_MIN_VERT_RATIO = 3.0
 RICH_IPL_RECOVERY_MIN_FACE_RATIO = 3.0
 
 # V72: direct row IPL recovery. The 80-byte WRLD placement row has BOTH:
-#   +0x00 = IPL/model id
+#   +0x00 = internal ROWLINK (not the GTA IDE model id)
 #   +0x02 = resource id
 # Some rows have no usable RES candidate and never enter the sparse-fragment
-# branch. If the IPL/model id already resolves to a real parsed MDL payload,
+# branch. The legacy ROWLINK-as-model interpretation is disabled;
 # place that real MDL instead of leaving the row missing.
 ENABLE_REAL_IPL_FOR_MISSING_RES_ROWS = False
 REAL_IPL_FOR_MISSING_ALLOWED_PASSES = {"NORMAL", "ROADS", "TRANSPARENT"}
@@ -488,7 +533,7 @@ FINAL_VERIFIED_RENDER_PAIR_ALIAS = {
 }
 
 # Last-resort import for placement rows that still have no direct RES model.
-# This uses the row's IPL/model ID as the authoritative model key and records
+# Legacy disabled path that treated ROWLINK as an authoritative model key and records
 # every imported row in *_blds_imported_missing_mdl_report.csv.
 ENABLE_FORCE_IMPORT_MISSING_IMG_MDLS = False
 FORCE_IMPORT_MISSING_IMG_MDL_LOG_LIMIT = 512
@@ -499,7 +544,7 @@ FORCE_IMPORT_MISSING_IMG_MDL_LOG_LIMIT = 512
 EXACT_ONLY_REAL_MISSING_MDL_RECOVERY = True
 ENABLE_EXACT_IPL_RECOVERY_FOR_MISSING_ROWS = False
 
-# V7 final-missing fallback. If the exact IPL/model-id is absent from every
+# Legacy V7 fallback. If the exact ROWLINK-as-model value is absent from every
 # parsed resource table, clone the nearest already-imported IMG MDL and place it
 # with the missing row matrix. These clones are deliberately named Beach*_... and
 # marked/reported so they can be audited instead of silently hidden.
@@ -540,6 +585,68 @@ WRLD_SUBMODEL_GROUP_INFER_ROWS: List[dict] = []
 
 def normalized_copy_stem(name: str) -> str:
     return re.sub(r"\s*\(\d+\)$", "", str(name or "").strip())
+
+
+def find_stories_companion_file(lvz_path: str, extension: str, stem: str = "", explicit_path: str = "") -> Optional[Path]:
+    """Find an IDE/IPL companion without confusing copy suffixes with identity.
+
+    Exact names are preferred. Blender/browser copies such as beach(1).ide and
+    beach (2).ipl are accepted when their normalized stem matches the LVZ stem.
+    An explicit path selected with the separate BLeeds picker always wins.
+    """
+    ext = str(extension or "").lower().lstrip(".")
+    if not ext:
+        return None
+
+    selected = str(explicit_path or "").strip()
+    if selected:
+        candidate = Path(selected).expanduser()
+        try:
+            if candidate.exists() and candidate.is_file() and candidate.suffix.lower() == "." + ext:
+                return candidate
+        except Exception:
+            pass
+
+    lvz_p = Path(lvz_path)
+    folder = lvz_p.parent
+    exact_stem = str(stem or lvz_p.stem or "")
+    base_stem = normalized_copy_stem(exact_stem)
+    ordered: List[Path] = []
+    seen = set()
+
+    def add(candidate: Path):
+        key = str(candidate).lower()
+        if key in seen:
+            return
+        seen.add(key)
+        ordered.append(candidate)
+
+    for candidate_stem in (exact_stem, base_stem):
+        if candidate_stem:
+            add(folder / (candidate_stem + "." + ext))
+    if base_stem:
+        add(folder / (base_stem.lower() + "." + ext))
+
+    for candidate in ordered:
+        try:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+        except Exception:
+            pass
+
+    copy_variants: List[Path] = []
+    try:
+        for child in folder.iterdir():
+            if not child.is_file() or child.suffix.lower() != "." + ext:
+                continue
+            if normalized_copy_stem(child.stem).lower() == base_stem.lower():
+                copy_variants.append(child)
+    except Exception:
+        copy_variants = []
+
+    # Deterministic choice: lower copy number/name first. Exact files already won.
+    copy_variants.sort(key=lambda item: item.name.lower())
+    return copy_variants[0] if copy_variants else None
 
 def read_img_from_zip(candidate: Path) -> Tuple[Optional[bytes], Optional[str]]:
     with zipfile.ZipFile(candidate, "r") as zf:
@@ -622,7 +729,7 @@ def read_img_next_to_lvz(lvz_path: str) -> Tuple[Optional[bytes], Optional[str]]
     return None, None
 
 
-def read_ide_object_id_map_next_to_lvz(lvz_path: str):
+def read_ide_object_id_map_next_to_lvz(lvz_path: str, explicit_path: str = "", stem: str = ""):
     """Read converter IDE beside LVZ.
 
     Stories Map Converter IDE lines look like:
@@ -631,29 +738,9 @@ def read_ide_object_id_map_next_to_lvz(lvz_path: str):
     The first number is the converter/IPL object id. The model name suffix is
     the real beach resource id to try in LVZ/IMG.
     """
-    lvz_p = Path(lvz_path)
-    candidates = [
-        lvz_p.with_suffix(".ide"),
-        lvz_p.with_name(f"{lvz_p.stem}.ide"),
-        lvz_p.with_name("beach.ide"),
-        lvz_p.with_name("mainla.ide"),
-    ]
-    seen = set()
-    paths = []
-    for c in candidates:
-        if c in seen:
-            continue
-        seen.add(c)
-        paths.append(c)
-
-    ide_path = None
-    for c in paths:
-        try:
-            if c.exists() and c.is_file():
-                ide_path = c
-                break
-        except Exception:
-            pass
+    ide_path = find_stories_companion_file(
+        lvz_path, "ide", stem=stem or Path(lvz_path).stem, explicit_path=explicit_path
+    )
     if ide_path is None:
         return {}, {}, None
 
@@ -816,6 +903,152 @@ def find_stories_ipl_sidecar(lvz_path: str, stem: str) -> Optional[Path]:
         if candidate.exists() and candidate.is_file():
             return candidate
     return None
+
+
+
+def build_ide_res_to_model_id_map(id_to_res: Dict[int, int], id_to_name: Dict[int, str], stem: str):
+    """Build the exact reverse identity map: streamed/name RES -> GTA IDE model id.
+
+    The IDE object id is not the streamed row's first u16. Prefer the exact map
+    prefix (for example beach1887) and reject ambiguous competing non-LOD names.
+    """
+    stem_low = str(stem or "").lower()
+    choices: Dict[int, List[Tuple[int, str, int]]] = {}
+    for model_id, res_id in (id_to_res or {}).items():
+        try:
+            model_id = int(model_id)
+            res_id = int(res_id)
+        except Exception:
+            continue
+        name = str((id_to_name or {}).get(model_id, ""))
+        low = name.lower()
+        exact_name = bool(stem_low and low == f"{stem_low}{res_id}")
+        is_lod = low.startswith("lod") or "_lod" in low
+        score = 0
+        if exact_name:
+            score += 100
+        if not is_lod:
+            score += 20
+        if low.startswith(stem_low) and stem_low:
+            score += 10
+        choices.setdefault(res_id, []).append((score, name, model_id))
+
+    res_to_model: Dict[int, int] = {}
+    res_to_name: Dict[int, str] = {}
+    ambiguous: Dict[int, List[Tuple[int, str, int]]] = {}
+    for res_id, values in choices.items():
+        ordered = sorted(values, key=lambda item: (-int(item[0]), int(item[2]), str(item[1]).lower()))
+        if not ordered:
+            continue
+        best_score = int(ordered[0][0])
+        best = [item for item in ordered if int(item[0]) == best_score]
+        if len(best) > 1 and len({int(item[2]) for item in best}) > 1:
+            ambiguous[int(res_id)] = best
+            continue
+        res_to_model[int(res_id)] = int(ordered[0][2])
+        res_to_name[int(res_id)] = str(ordered[0][1])
+    return res_to_model, res_to_name, ambiguous
+
+
+def find_stories_identity_ipl_next_to_lvz(lvz_path: str, stem: str, explicit_path: str = "") -> Optional[Path]:
+    """Find an IPL only for exact identity/coordinate verification, never placement."""
+    return find_stories_companion_file(
+        lvz_path, "ipl", stem=stem or Path(lvz_path).stem, explicit_path=explicit_path
+    )
+
+
+def build_stories_placement_identity_map(details, lvz_path: str, stem: str,
+                                         ide_id_to_res: Dict[int, int],
+                                         ide_id_to_name: Dict[int, str],
+                                         ide_res_to_model: Dict[int, int],
+                                         ide_res_to_name: Dict[int, str],
+                                         explicit_ipl_path: str = ""):
+    """Match internal placement rows to sidecar IPL rows by RES/name and position.
+
+    Returns exact identity metadata keyed by the internal source-row key. The IPL
+    is never used to move an object or provide geometry. It only proves that, for
+    example, RES 1887 at the Beach1887 position is GTA model id 587 while the
+    internal row-link value is 1281.
+    """
+    result: Dict[Tuple[int, int, int, int], Dict[str, object]] = {}
+    ipl_path = find_stories_identity_ipl_next_to_lvz(lvz_path, stem, explicit_path=explicit_ipl_path)
+    rows = parse_stories_ipl_sidecar(ipl_path) if ipl_path is not None else []
+    by_res: Dict[int, List[Dict[str, object]]] = {}
+    for item in rows:
+        try:
+            res_id = int(item.get("model_id", -1))
+            game_model_id = int(item.get("inst_id", -1))
+        except Exception:
+            continue
+        if res_id < 0 or game_model_id < 0:
+            continue
+        # Require the IDE to agree with both the model id and the name suffix.
+        if int((ide_id_to_res or {}).get(game_model_id, -1)) != res_id:
+            continue
+        by_res.setdefault(res_id, []).append(item)
+
+    matched = 0
+    fallback = 0
+    unmatched = 0
+    for detail in details or []:
+        key = blds_placement_report_key(detail)
+        if key is None:
+            continue
+        res_id = int(detail[0])
+        row_link_id = int(detail[4])
+        identity = {
+            "res_id": res_id,
+            "row_link_id": row_link_id,
+            "game_model_id": int((ide_res_to_model or {}).get(res_id, -1)),
+            "model_name": str((ide_res_to_name or {}).get(res_id, "")),
+            "source": "IDE_NAME" if res_id in (ide_res_to_model or {}) else "UNRESOLVED",
+            "position_error": None,
+        }
+        candidates = by_res.get(res_id, [])
+        if candidates:
+            try:
+                matrix = matrix_from_img_detail(detail)
+                world = (float(matrix[0][3]), float(matrix[1][3]), float(matrix[2][3]))
+                ranked = []
+                for item in candidates:
+                    pos = item.get("location", (0.0, 0.0, 0.0))
+                    dx = world[0] - float(pos[0])
+                    dy = world[1] - float(pos[1])
+                    dz = world[2] - float(pos[2])
+                    distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+                    ranked.append((distance, item))
+                ranked.sort(key=lambda pair: pair[0])
+                if ranked and float(ranked[0][0]) <= 0.25:
+                    distance, item = ranked[0]
+                    identity.update({
+                        "game_model_id": int(item.get("inst_id", -1)),
+                        "model_name": str(item.get("model_name", "")),
+                        "source": "IDE+IPL_POSITION",
+                        "position_error": float(distance),
+                        "ipl_line": int(item.get("line", -1)),
+                    })
+                    matched += 1
+                elif identity["game_model_id"] >= 0:
+                    fallback += 1
+                else:
+                    unmatched += 1
+            except Exception:
+                if identity["game_model_id"] >= 0:
+                    fallback += 1
+                else:
+                    unmatched += 1
+        elif identity["game_model_id"] >= 0:
+            fallback += 1
+        else:
+            unmatched += 1
+        result[key] = identity
+    return result, {
+        "ipl_path": str(ipl_path) if ipl_path is not None else "",
+        "sidecar_rows": len(rows),
+        "matched_by_position": int(matched),
+        "ide_name_fallback": int(fallback),
+        "unresolved": int(unmatched),
+    }
 
 
 def get_object_model_id(obj) -> int:
@@ -1633,7 +1866,7 @@ def matrix_from_img_detail_centered_on_object(detail, obj) -> Matrix:
         return matrix
     if radius <= 0.0:
         return matrix
-    # Some VCS rows use IPL/model-id fallback resources whose mesh verts are not authored
+    # Legacy fallback resources can have mesh verts that are not authored
     # around 0,0,0. Applying the placement matrix directly then throws big slabs/walls
     # off to the side. Center the mesh's local bounds before applying the row matrix.
     return matrix @ Matrix.Translation((-float(cx), -float(cy), -float(cz)))
@@ -1723,7 +1956,11 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
                     uv_data[loop_start + loop_index].uv = uvs[vertex_index]
 
     obj = bpy.data.objects.new(mesh_name, mesh)
-    bpy.context.scene.collection.objects.link(obj)
+    target_collection = globals().get("_ACTIVE_IMPORT_OBJECTS_COLLECTION")
+    try:
+        (target_collection or bpy.context.scene.collection).objects.link(obj)
+    except Exception:
+        bpy.context.scene.collection.objects.link(obj)
     obj["blds_kind"] = "MDL"
     obj["blds_res_index"] = int(res_index)
     obj["blds_groups"] = len(groups)
@@ -1745,6 +1982,296 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
     obj["blds_bbox_min"] = (float(min(xs)), float(min(ys)), float(min(zs)))
     obj["blds_bbox_max"] = (float(max(xs)), float(max(ys)), float(max(zs)))
     return obj, face_ranges
+
+
+def mdl_groups_geometry_signature(material_list, groups):
+    """Stable geometry identity used to reject conflicting generic RES matches."""
+    vert_count = 0
+    face_count = 0
+    xs = []
+    ys = []
+    zs = []
+    try:
+        for group in groups or []:
+            for strip in getattr(group, "strips", []) or []:
+                verts = getattr(strip, "verts", []) or []
+                uvs = getattr(strip, "uvs", []) or []
+                try:
+                    count = int(getattr(strip, "count", len(verts)) or len(verts))
+                except Exception:
+                    count = len(verts)
+                count = min(count, len(verts))
+                if uvs:
+                    count = min(count, len(uvs))
+                if count <= 0:
+                    continue
+                vert_count += count
+                face_count += max(0, count - 2)
+                for x, y, z in verts[:count]:
+                    xs.append(float(x))
+                    ys.append(float(y))
+                    zs.append(float(z))
+    except Exception:
+        return None
+    if vert_count <= 0 or face_count <= 0 or not xs:
+        return None
+    material_ids = []
+    try:
+        for material in getattr(material_list, "materials", []) or []:
+            material_ids.append(int(getattr(material, "texture_id", -1)))
+    except Exception:
+        material_ids = []
+    bounds = (
+        round(min(xs), 4), round(min(ys), 4), round(min(zs), 4),
+        round(max(xs), 4), round(max(ys), 4), round(max(zs), 4),
+    )
+    return (int(vert_count), int(face_count), tuple(material_ids), bounds)
+
+
+def blds_object_geometry_signature(obj):
+    if obj is None:
+        return None
+    try:
+        verts = int(obj.get("blds_verts", 0))
+        faces = int(obj.get("blds_faces", 0))
+        bbox_min = obj.get("blds_bbox_min", None)
+        bbox_max = obj.get("blds_bbox_max", None)
+        if verts <= 0 or faces <= 0 or bbox_min is None or bbox_max is None:
+            return None
+        material_names = ()
+        try:
+            material_names = tuple(
+                str(getattr(material, "name", ""))
+                for material in getattr(getattr(obj, "data", None), "materials", [])
+            )
+        except Exception:
+            material_names = ()
+        return (
+            verts,
+            faces,
+            round(float(bbox_min[0]), 4), round(float(bbox_min[1]), 4), round(float(bbox_min[2]), 4),
+            round(float(bbox_max[0]), 4), round(float(bbox_max[1]), 4), round(float(bbox_max[2]), 4),
+            material_names,
+        )
+    except Exception:
+        return None
+
+
+def build_unambiguous_resource_object_map(objects):
+    """Return one object per RES only when every parsed candidate has the same mesh."""
+    candidates = {}
+    for obj in objects or []:
+        if obj is None:
+            continue
+        try:
+            res_id = int(obj.get("blds_res_index", -1))
+        except Exception:
+            continue
+        if res_id < 0:
+            continue
+        candidates.setdefault(res_id, []).append(obj)
+    result = {}
+    ambiguous = set()
+    for res_id, values in candidates.items():
+        signatures = {blds_object_geometry_signature(obj) for obj in values}
+        signatures.discard(None)
+        if len(signatures) > 1:
+            ambiguous.add(int(res_id))
+            continue
+        chosen = None
+        for obj in values:
+            chosen = choose_better_blds_candidate(chosen, obj)
+        if chosen is not None:
+            result[int(res_id)] = chosen
+    return result, ambiguous
+
+
+
+def build_resource_object_candidate_map(objects):
+    """Group exact resource-table models by resource ID and unique geometry."""
+    grouped = {}
+    for obj in objects or []:
+        if obj is None:
+            continue
+        try:
+            res_id = int(obj.get("blds_res_index", -1))
+        except Exception:
+            continue
+        if res_id < 0:
+            continue
+        signature = blds_object_geometry_signature(obj)
+        if signature is None:
+            signature = ("unknown",)
+        by_signature = grouped.setdefault(res_id, {})
+        previous = by_signature.get(signature)
+        by_signature[signature] = choose_better_blds_candidate(previous, obj)
+    return {
+        int(res_id): [obj for obj in by_signature.values() if obj is not None]
+        for res_id, by_signature in grouped.items()
+    }
+
+
+def placement_bbox_fit(bbox_min, bbox_max, detail):
+    """Compare local bounds transformed by a row matrix with its stored sphere."""
+    if bbox_min is None or bbox_max is None or detail is None:
+        return None
+    try:
+        x0, y0, z0 = float(bbox_min[0]), float(bbox_min[1]), float(bbox_min[2])
+        x1, y1, z1 = float(bbox_max[0]), float(bbox_max[1]), float(bbox_max[2])
+        m = detail[12]
+        origin = detail[18] if len(detail) > 18 else (0.0, 0.0, 0.0)
+        ox = float(origin[0]) if len(origin) > 0 else 0.0
+        oy = float(origin[1]) if len(origin) > 1 else 0.0
+        oz = float(origin[2]) if len(origin) > 2 else 0.0
+
+        transformed = []
+        for x in (x0, x1):
+            for y in (y0, y1):
+                for z in (z0, z1):
+                    transformed.append((
+                        float(m[0]) * x + float(m[4]) * y + float(m[8]) * z + float(m[12]) + ox,
+                        float(m[1]) * x + float(m[5]) * y + float(m[9]) * z + float(m[13]) + oy,
+                        float(m[2]) * x + float(m[6]) * y + float(m[10]) * z + float(m[14]) + oz,
+                    ))
+
+        wx0 = min(point[0] for point in transformed)
+        wy0 = min(point[1] for point in transformed)
+        wz0 = min(point[2] for point in transformed)
+        wx1 = max(point[0] for point in transformed)
+        wy1 = max(point[1] for point in transformed)
+        wz1 = max(point[2] for point in transformed)
+        center = ((wx0 + wx1) * 0.5, (wy0 + wy1) * 0.5, (wz0 + wz1) * 0.5)
+        radius = max(
+            math.sqrt(
+                (point[0] - center[0]) ** 2
+                + (point[1] - center[1]) ** 2
+                + (point[2] - center[2]) ** 2
+            )
+            for point in transformed
+        )
+
+        target = (float(detail[5]), float(detail[6]), float(detail[7]))
+        target_radius = max(abs(float(detail[8])), 0.0001)
+        center_error = math.sqrt(
+            (center[0] - target[0]) ** 2
+            + (center[1] - target[1]) ** 2
+            + (center[2] - target[2]) ** 2
+        )
+        radius_ratio = max(radius / target_radius, 0.000001)
+        score = (center_error / target_radius) + abs(math.log(radius_ratio))
+        if not math.isfinite(score):
+            return None
+        return float(score), float(center_error), float(radius_ratio), center, float(radius)
+    except Exception:
+        return None
+
+
+def placement_candidate_fit(obj, detail):
+    """Compare an exact model candidate with the row's world-space bounding sphere."""
+    if obj is None or detail is None:
+        return None
+    try:
+        return placement_bbox_fit(
+            obj.get("blds_bbox_min", None),
+            obj.get("blds_bbox_max", None),
+            detail,
+        )
+    except Exception:
+        return None
+
+
+def exact_candidate_needs_raw_variant(obj, detail):
+    """Return True only when an exact WRLD submodel looks like an incomplete slice."""
+    if obj is None or detail is None:
+        return False
+    try:
+        kind = str(obj.get("blds_kind", ""))
+    except Exception:
+        kind = ""
+    if kind != "IMG_WRLD_SUBMODEL_GROUP":
+        return False
+    try:
+        target_radius = abs(float(detail[8]))
+    except Exception:
+        target_radius = 0.0
+    if target_radius < float(EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_TARGET_RADIUS):
+        return False
+    fit = placement_candidate_fit(obj, detail)
+    if fit is not None:
+        ratio = float(fit[2])
+        if (
+            ratio < float(EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_RADIUS_RATIO)
+            or ratio > float(EXACT_WRLD_SUBMODEL_RAW_VARIANT_MAX_RADIUS_RATIO)
+        ):
+            return True
+    try:
+        _verts, faces, _radius = object_geometry_counts_radius(obj)
+    except Exception:
+        faces = 0
+    return bool(
+        int(faces) <= int(EXACT_WRLD_SUBMODEL_RAW_VARIANT_SPARSE_FACE_LIMIT)
+        and target_radius >= 8.0
+    )
+
+
+def choose_exact_resource_candidate(candidates, detail, max_fit_score=5.0):
+    """Choose among exact table-backed variants using the placement row's own bounds."""
+    unique = []
+    seen = set()
+    for item in candidates or []:
+        if isinstance(item, tuple):
+            obj = item[0]
+            source = item[1] if len(item) > 1 else "exact_model"
+            source_rank = int(item[2]) if len(item) > 2 else 0
+        else:
+            obj = item
+            source = "exact_model"
+            source_rank = 0
+        if obj is None:
+            continue
+        signature = blds_object_geometry_signature(obj)
+        key = signature if signature is not None else ("object", id(obj))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((obj, str(source), int(source_rank)))
+    if not unique:
+        return None, "", None, 0
+
+    ranked = []
+    for obj, source, source_rank in unique:
+        fit = placement_candidate_fit(obj, detail)
+        if fit is None:
+            continue
+        ranked.append((
+            float(fit[0]),
+            int(source_rank),
+            -float(blds_mesh_quality_score(obj)),
+            str(getattr(obj, "name", "")),
+            obj,
+            source,
+            fit,
+        ))
+    if not ranked:
+        chosen = None
+        chosen_source = ""
+        chosen_rank = 999999
+        for obj, source, source_rank in unique:
+            if chosen is None or source_rank < chosen_rank:
+                chosen = obj
+                chosen_source = source
+                chosen_rank = source_rank
+            elif source_rank == chosen_rank:
+                chosen = choose_better_blds_candidate(chosen, obj)
+                if chosen is obj:
+                    chosen_source = source
+        return chosen, chosen_source, None, len(unique)
+
+    ranked.sort(key=lambda item: item[:4])
+    best = ranked[0]
+    if max_fit_score is not None and float(best[0]) > float(max_fit_score):
+        return None, "", best[6], len(unique)
+    return best[4], best[5], best[6], len(unique)
 
 
 def score_mdl_groups_for_preselect(groups) -> float:
@@ -2149,7 +2676,7 @@ def lookup_aggregate_piece_base(detail, sector_index: int):
                 continue
             radius_score = abs(cr - sr) * 0.20
             # Prefer an origin-baked match over a raw local match if they tie.  This is the
-            # missing IPL path for VCS beach: rows such as RES=1828 / IPL=1222..1241 live
+            # missing IPL path for VCS beach: rows such as RES=1828 / ROWLINK=1222..1241 live
             # as pieces inside the sector aggregate, whose group centers need the sector
             # origin before comparing to the placement sphere.
             mode_bonus = -2.0 if mode == "origin" else 0.0
@@ -3046,7 +3573,7 @@ def _probe_ps2_img_descriptor_for_continuation(img_bytes: bytes, off: int) -> Op
     return None
 
 
-def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, wanted_res_ids, progress_callback=None) -> Dict[int, dict]:
+def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, wanted_res_ids, placement_details=None, progress_callback=None) -> Dict[int, List[dict]]:
     if not ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG or not img_bytes:
         return {}
     try:
@@ -3059,7 +3586,7 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
     cache = CONTINUES_IN_IMG_PROOF_CACHE
     remaining = {res_id for res_id in wanted if res_id not in cache}
     if not remaining:
-        return {res_id: cache[res_id] for res_id in wanted if res_id in cache}
+        return {res_id: list(cache.get(res_id) or []) for res_id in wanted if cache.get(res_id)}
 
     parser = LVZ.read_lvz(
         decomp_bytes=img_bytes,
@@ -3069,6 +3596,18 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
     )
     parser.material_by_res_index = lvz_reader.material_by_res_index
 
+    details_by_res: Dict[int, List[object]] = {}
+    for detail in placement_details or []:
+        try:
+            res_id = int(detail[0])
+        except Exception:
+            continue
+        if res_id not in remaining:
+            continue
+        values = details_by_res.setdefault(res_id, [])
+        if len(values) < int(CONTINUES_IN_IMG_MAX_FIT_DETAILS_PER_RES):
+            values.append(detail)
+
     probe_to_res: Dict[int, set] = {}
     for res_id in remaining:
         for delta in CONTINUES_IN_IMG_TEXTURE_ID_DELTAS:
@@ -3076,22 +3615,81 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
             if 0 <= probe <= 0xFFFF:
                 probe_to_res.setdefault(int(probe), set()).add(int(res_id))
 
-    best_by_res = {}
+    candidates_by_res: Dict[int, List[dict]] = {}
     n = len(img_bytes)
     stride = max(4, int(CONTINUES_IN_IMG_SCAN_STRIDE))
-    off = 0
     scanned_descriptors = 0
     matched_descriptors = 0
     parser_failures = 0
-    total_scan_steps = max(1, (max(0, n - 0x20) + stride - 1) // stride)
-    scan_step = 0
-    while off + 0x20 <= n:
-        scan_step += 1
-        if progress_callback is not None and (scan_step % 4096 == 0 or scan_step == total_scan_steps):
-            progress_callback(scan_step, total_scan_steps)
+
+    def candidate_descriptor_offsets():
+        # Filter descriptor headers in vectorized chunks before invoking the
+        # strict parser; a 200+ MB IMG otherwise requires millions of calls.
+        if np is None:
+            total = max(1, (max(0, n - 0x20) + stride - 1) // stride)
+            step = 0
+            off = 0
+            while off + 0x20 <= n:
+                step += 1
+                if progress_callback is not None and (step % 65536 == 0 or step == total):
+                    progress_callback(step, total)
+                count16 = LVZ.read_u16(img_bytes, off)
+                size16 = LVZ.read_u16(img_bytes, off + 2)
+                if 0 < count16 <= 256 and size16 <= 0x8000:
+                    expected24 = ((4 + count16 * 24 + 15) & ~15) - 4
+                    expected22 = ((4 + count16 * 22 + 15) & ~15) - 4
+                    if size16 == expected24 or size16 == expected22:
+                        yield off
+                off += stride
+            return
+
+        chunk_bytes = 8 * 1024 * 1024
+        chunk_count = max(1, (n + chunk_bytes - 1) // chunk_bytes)
+        for chunk_index, chunk_start in enumerate(range(0, n, chunk_bytes)):
+            aligned_start = ((int(chunk_start) + stride - 1) // stride) * stride
+            chunk_end = min(n, int(chunk_start) + chunk_bytes)
+            if aligned_start + 4 > chunk_end:
+                if progress_callback is not None:
+                    progress_callback(chunk_index + 1, chunk_count)
+                continue
+            item_count = 1 + ((chunk_end - aligned_start - 4) // stride)
+            words = np.ndarray(
+                shape=(int(item_count),),
+                dtype=np.dtype('<u4'),
+                buffer=img_bytes,
+                offset=int(aligned_start),
+                strides=(int(stride),),
+            )
+            counts = words & np.uint32(0xFFFF)
+            sizes = words >> np.uint32(16)
+            expected24 = ((np.uint32(4) + counts * np.uint32(24) + np.uint32(15)) & np.uint32(0xFFFFFFF0)) - np.uint32(4)
+            expected22 = ((np.uint32(4) + counts * np.uint32(22) + np.uint32(15)) & np.uint32(0xFFFFFFF0)) - np.uint32(4)
+            mask = (counts > 0) & (counts <= 256) & (sizes <= 0x8000) & ((sizes == expected24) | (sizes == expected22))
+            for relative_index in np.flatnonzero(mask):
+                yield int(aligned_start + int(relative_index) * stride)
+            if progress_callback is not None:
+                progress_callback(chunk_index + 1, chunk_count)
+
+    def register_candidate(target: int, candidate: dict):
+        target = int(target)
+        values = candidates_by_res.setdefault(target, [])
+        raw_key = (int(candidate.get('raw_off', -1)), int(candidate.get('packet_end', -1)))
+        replaced = False
+        for index, old in enumerate(values):
+            old_key = (int(old.get('raw_off', -1)), int(old.get('packet_end', -1)))
+            if old_key == raw_key:
+                if tuple(candidate.get('rank_key', ())) < tuple(old.get('rank_key', ())):
+                    values[index] = candidate
+                replaced = True
+                break
+        if not replaced:
+            values.append(candidate)
+        values.sort(key=lambda row: tuple(row.get('rank_key', (999999.0, 999999.0, 0.0))))
+        del values[max(1, int(CONTINUES_IN_IMG_MAX_VARIANTS_PER_RES)):]
+
+    for off in candidate_descriptor_offsets():
         descriptor = _probe_ps2_img_descriptor_for_continuation(img_bytes, off)
         if descriptor is None:
-            off += stride
             continue
         scanned_descriptors += 1
         tex_ids = set(int(x) for x in descriptor.get("tex_ids", set()))
@@ -3099,7 +3697,6 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
         for tex_id in tex_ids:
             target_res_ids.update(probe_to_res.get(int(tex_id), set()))
         if not target_res_ids:
-            off += stride
             continue
         matched_descriptors += 1
         raw_off = int(descriptor["raw_off"])
@@ -3110,15 +3707,16 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
             parser.assign_materials_by_strip_bytes(material_list, groups)
         except Exception:
             parser_failures += 1
-            off += stride
             continue
 
         score = score_mdl_groups_for_preselect(groups)
         if score < 0.0:
-            off += stride
             continue
         gv = 0
         gf = 0
+        xs = []
+        ys = []
+        zs = []
         try:
             for group in groups:
                 for strip in getattr(group, 'strips', []) or []:
@@ -3132,11 +3730,16 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
                         count = min(count, len(uvs))
                     gv += len(verts)
                     gf += max(0, count - 2)
+                    for x, y, z in verts:
+                        xs.append(float(x))
+                        ys.append(float(y))
+                        zs.append(float(z))
         except Exception:
             pass
-        if gv <= 0 or gf <= 0:
-            off += stride
+        if gv <= 0 or gf <= 0 or not xs:
             continue
+        bbox_min = (min(xs), min(ys), min(zs))
+        bbox_max = (max(xs), max(ys), max(zs))
 
         for target in target_res_ids:
             tex_score_bonus = 0.0
@@ -3148,38 +3751,53 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
                 nearest = min(abs(int(t) - int(target)) for t in tex_ids)
                 tex_score_bonus += max(0.0, 1000.0 - float(nearest))
             final_score = float(score) + tex_score_bonus + float(gv) * 0.01 + float(gf) * 0.01 + float(descriptor.get("packet_total", 0)) * 0.001
-            old = best_by_res.get(int(target))
-            if old is None or final_score > float(old.get('final_score', -1.0)):
-                best_by_res[int(target)] = {
-                    'final_score': final_score,
-                    'score': float(score),
-                    'raw_off': int(raw_off),
-                    'stream_start': int(descriptor.get('stream_start', -1)),
-                    'after': int(after),
-                    'packet_end': int(packet_end),
-                    'packet_total': int(descriptor.get('packet_total', 0)),
-                    'material_list': material_list,
-                    'groups': groups,
-                    'tex_ids': set(tex_ids),
-                    'verts': int(gv),
-                    'faces': int(gf),
-                    'format_tag': str(descriptor.get('format_tag', '')),
-                    'material_count': int(descriptor.get('count', 0)),
-                }
-        off += stride
 
-    for res_id, proof in best_by_res.items():
-        cache[int(res_id)] = proof
-    found = {res_id: cache[res_id] for res_id in wanted if res_id in cache}
+            fit_values = []
+            for detail in details_by_res.get(int(target), []):
+                fit = placement_bbox_fit(bbox_min, bbox_max, detail)
+                if fit is not None:
+                    fit_values.append(float(fit[0]))
+            best_fit = min(fit_values) if fit_values else None
+            # Placement fit is authoritative. Descriptor richness only breaks
+            # ties or ranks candidates when no row fit is available.
+            if best_fit is None:
+                rank_key = (1.0, 999999.0, -float(final_score))
+            else:
+                rank_key = (0.0, float(best_fit), -float(final_score))
+            register_candidate(int(target), {
+                'rank_key': rank_key,
+                'placement_fit': best_fit,
+                'final_score': final_score,
+                'score': float(score),
+                'raw_off': int(raw_off),
+                'stream_start': int(descriptor.get('stream_start', -1)),
+                'after': int(after),
+                'packet_end': int(packet_end),
+                'packet_total': int(descriptor.get('packet_total', 0)),
+                'material_list': material_list,
+                'groups': groups,
+                'tex_ids': set(tex_ids),
+                'verts': int(gv),
+                'faces': int(gf),
+                'bbox_min': bbox_min,
+                'bbox_max': bbox_max,
+                'format_tag': str(descriptor.get('format_tag', '')),
+                'material_count': int(descriptor.get('count', 0)),
+            })
+
+    for res_id in remaining:
+        cache[int(res_id)] = list(candidates_by_res.get(int(res_id), []))
+    found = {res_id: list(cache.get(res_id) or []) for res_id in wanted if cache.get(res_id)}
     if IMPORT_VERBOSE_RESOURCE_BUILD_LOGS:
         LVZ.dbg(
             f"[continues-img-scan] wanted={len(wanted)} scanned_descriptors={scanned_descriptors} "
-            f"matched_descriptors={matched_descriptors} parser_failures={parser_failures} found={len(found)}"
+            f"matched_descriptors={matched_descriptors} parser_failures={parser_failures} "
+            f"found_ids={len(found)} retained_variants={sum(len(v) for v in found.values())}"
         )
     return found
 
 
-def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str], progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
+def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str], placement_details=None, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
     if not ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
         return {}
     try:
@@ -3194,6 +3812,7 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
         img_bytes,
         lvz_reader,
         wanted,
+        placement_details=placement_details,
         progress_callback=progress_callback,
     )
     if not proofs:
@@ -3210,12 +3829,14 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
 
     out: Dict[Tuple[int, int], bpy.types.Object] = {}
     logged = 0
-    sorted_proof_ids = sorted(proofs)
-    total_proofs = len(sorted_proof_ids)
-    for index, res_id in enumerate(sorted_proof_ids):
+    flat_proofs = []
+    for res_id in sorted(proofs):
+        for variant_index, proof in enumerate(proofs[int(res_id)]):
+            flat_proofs.append((int(res_id), int(variant_index), proof))
+    total_proofs = len(flat_proofs)
+    for global_index, (res_id, variant_index, proof) in enumerate(flat_proofs):
         if progress_callback is not None:
-            progress_callback(index + 1, total_proofs)
-        proof = proofs[int(res_id)]
+            progress_callback(global_index + 1, max(1, total_proofs))
         raw_off = int(proof.get('raw_off', -1))
         after = int(proof.get('after', -1))
         material_list = proof.get('material_list')
@@ -3224,36 +3845,47 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
         gv = int(proof.get('verts', 0))
         gf = int(proof.get('faces', 0))
         score = float(proof.get('score', 0.0))
+        final_score = float(proof.get('final_score', score))
+        placement_fit = proof.get('placement_fit', None)
         if material_list is None or not groups:
             continue
         obj, face_ranges = build_mesh_from_mdl_groups(f"{stem}_continued_img_res", int(res_id), groups)
         if obj is None:
             continue
-        obj.name = f"{stem}{int(res_id)}"
+        obj.name = f"{stem}{int(res_id)}__raw{int(variant_index):02d}"
         obj.data.name = obj.name
         slots_added = add_material_slots(obj, parser.material_by_res_index, material_list, face_ranges)
         obj["blds_kind"] = "IMG_CONTINUES_IN_IMG_MDL"
         obj["blds_res_index"] = int(res_id)
         obj["blds_img_continues_in_img"] = True
+        obj["blds_img_continues_variant_index"] = int(variant_index)
         obj["blds_img_continues_raw_off"] = int(raw_off)
         obj["blds_img_continues_after"] = int(after)
+        obj["blds_img_continues_final_score"] = float(final_score)
+        if placement_fit is not None:
+            obj["blds_img_continues_best_scan_fit"] = float(placement_fit)
         obj["blds_img_continues_material_ids"] = ",".join(str(int(x)) for x in sorted(tex_ids))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
             obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
-        key = (-200000 - int(index), int(res_id))
+        key = (-200000 - int(global_index), int(res_id))
         out[key] = obj
         if logged < int(CONTINUES_IN_IMG_MAX_LOG_ROWS):
+            fit_text = "none" if placement_fit is None else f"{float(placement_fit):.3f}"
             LVZ.dbg(
-                f"[continues-img] RES={int(res_id)} reason=CONTINUES_IN_IMG "
+                f"[continues-img] RES={int(res_id)} variant={int(variant_index)} reason=CONTINUES_IN_IMG "
                 f"img={img_name or '<companion IMG>'} raw=0x{int(raw_off):08X} stream_end=0x{int(after):08X} "
                 f"materials={','.join(str(int(x)) for x in sorted(tex_ids))} geom={int(gv)}v/{int(gf)}f "
-                f"slots={int(slots_added)} score={float(score):.3f}"
+                f"slots={int(slots_added)} score={float(score):.3f} placementFit={fit_text}"
             )
             logged += 1
 
-    LVZ.dbg(f"[continues-img] descriptor scan wanted={len(wanted)} found={len(proofs)} created={len(out)}")
+    LVZ.dbg(
+        f"[continues-img] descriptor scan wanted={len(wanted)} "
+        f"found_ids={len(proofs)} variants={len(flat_proofs)} created={len(out)}"
+    )
     return out
+
 
 def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_sector_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, collapse_by_res_id: bool = False, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
     parser = LVZ.read_lvz(
@@ -3288,7 +3920,12 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
     preselect_dropped_rows = 0
 
     if collapse_by_res_id:
-        best_by_res = {}
+        # Keep one representative for every distinct exact geometry variant.
+        # Several sectors can legitimately store different models under the same
+        # resource ID; the placement row's world-space sphere chooses the correct
+        # variant later instead of discarding the whole resource ID.
+        best_by_res_signature = {}
+        signatures_by_res = {}
         preselect_input_rows = len(overlay_rows)
         preselect_total = len(overlay_rows)
         for overlay_index, overlay in enumerate(overlay_rows):
@@ -3316,18 +3953,49 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
             if score < 0.0:
                 skipped_non_geometry += 1
                 continue
-            previous = best_by_res.get(res_id)
+            signature = mdl_groups_geometry_signature(material_list, groups)
+            if signature is None:
+                skipped_non_geometry += 1
+                continue
+            signatures_by_res.setdefault(res_id, set()).add(signature)
+            candidate_key = (int(res_id), signature)
+            previous = best_by_res_signature.get(candidate_key)
             if previous is None or score > previous[0]:
-                best_by_res[res_id] = (score, overlay, material_list, groups)
+                best_by_res_signature[candidate_key] = (score, overlay, material_list, groups)
 
+        variant_res_ids = {
+            int(res_id) for res_id, signatures in signatures_by_res.items()
+            if len(signatures) > 1
+        }
+        try:
+            img_reader.last_ambiguous_overlay_res_ids = set(variant_res_ids)
+        except Exception:
+            pass
         overlay_rows = []
-        for score, overlay, material_list, groups in best_by_res.values():
+        for score, overlay, material_list, groups in best_by_res_signature.values():
             sector_index = int(overlay.get("sector_index", -1))
             res_id = int(overlay.get("res_id", -1))
             key = (sector_index, res_id)
+            # Resource tables normally contain one entry per ID in each sector.
+            # Keep the richer object only if malformed duplicate rows share a key.
+            existing = preselected_by_key.get(key)
+            if existing is not None:
+                existing_score = score_mdl_groups_for_preselect(existing[1])
+                if existing_score >= score:
+                    continue
+                try:
+                    old_index = next(
+                        index for index, row in enumerate(overlay_rows)
+                        if (int(row.get("sector_index", -1)), int(row.get("res_id", -1))) == key
+                    )
+                    overlay_rows.pop(old_index)
+                except Exception:
+                    pass
             overlay_rows.append(overlay)
             preselected_by_key[key] = (material_list, groups)
         preselect_dropped_rows = max(0, preselect_input_rows - len(overlay_rows))
+        if variant_res_ids:
+            LVZ.dbg(f"[exact-models] resource IDs with multiple exact variants retained: {len(variant_res_ids)}")
 
     LVZ.dbg("— IMG Sector Overlay Resource MDLs —")
     LVZ.dbg(f"[sector-mdl] overlay resource rows: {len(overlay_rows)}")
@@ -3624,6 +4292,116 @@ def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.
     return nested_by_row_res
 
 
+
+def build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
+                                             lvz_reader: LVZ.read_lvz,
+                                             img_reader: LVZ.read_img,
+                                             source_lvz_path: str,
+                                             img_name: Optional[str],
+                                             needed_res_ids=None,
+                                             progress_callback=None) -> List[bpy.types.Object]:
+    """Build exact models from the master AreaInfo[] -> AERA AreaResource[] path."""
+    area_records = img_reader.find_area_info_records_from_lvz()
+    if not area_records:
+        LVZ.dbg("[area-resource] no proven master AreaInfo/AERA table found")
+        return []
+
+    wanted = None
+    if needed_res_ids is not None:
+        wanted = {int(value) for value in needed_res_ids if int(value) >= 0}
+    rows = img_reader.collect_area_resources(
+        area_records,
+        wanted_res_ids=wanted,
+        max_resource_id=getattr(lvz_reader, "master_resource_count", None) or None,
+        progress_callback=progress_callback,
+    )
+
+    parser = LVZ.read_lvz(
+        decomp_bytes=img_bytes,
+        stem=stem,
+        use_swizzle=bool(lvz_reader.use_swizzle),
+        debug_print=False,
+    )
+    parser.material_by_res_index = lvz_reader.material_by_res_index
+
+    objects: List[bpy.types.Object] = []
+    seen = set()
+    skipped_non_geometry = 0
+    total_rows = len(rows)
+    for row_number, row in enumerate(rows):
+        if progress_callback is not None and (row_number % 8 == 0 or row_number + 1 == total_rows):
+            try:
+                progress_callback(row_number + 1, total_rows)
+            except Exception:
+                pass
+        area_index = int(row.get("area_index", -1))
+        resource_index = int(row.get("resource_index", -1))
+        res_id = int(row.get("res_id", -1))
+        raw_off = int(row.get("raw_off", -1))
+        resource_end = int(row.get("resource_end", len(img_bytes)))
+        key = (area_index, res_id, raw_off)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        try:
+            material_list = parser.parse_mdl_material_list(raw_off, max_end=resource_end)
+            groups, _after = parser.parse_mdl_geometry_after_list(material_list, max_end=resource_end)
+            parser.assign_materials_by_strip_bytes(material_list, groups)
+        except Exception as exc:
+            skipped_non_geometry += 1
+            if IMPORT_VERBOSE_RESOURCE_BUILD_LOGS:
+                LVZ.dbg(
+                    f"[area-resource] parse failed area={area_index} row={resource_index} "
+                    f"RES={res_id} raw=0x{raw_off:08X}: {exc}"
+                )
+            continue
+
+        obj, face_ranges = build_mesh_from_mdl_groups(
+            f"{stem}_aera{area_index:03d}_res", res_id, groups
+        )
+        if obj is None:
+            skipped_non_geometry += 1
+            continue
+
+        obj.name = f"{stem}_aera{area_index:03d}_res{res_id}_{len(objects):04d}"
+        obj.data.name = obj.name
+        slots_added = add_material_slots(
+            obj, parser.material_by_res_index, material_list, face_ranges
+        )
+        obj["blds_kind"] = "IMG_AERA_RESOURCE_MDL"
+        obj["blds_type"] = "OBJECT"
+        obj["blds_res_index"] = int(res_id)
+        obj["blds_img_area_index"] = int(area_index)
+        obj["blds_img_area_cell_x"] = int(row.get("area_cell_x", 0))
+        obj["blds_img_area_cell_y"] = int(row.get("area_cell_y", 0))
+        obj["blds_img_area_resource_index"] = int(resource_index)
+        obj["blds_img_area_secondary_id"] = int(row.get("secondary_id", -1))
+        obj["blds_img_area_resource_row_off"] = int(row.get("resource_row_off", -1))
+        obj["blds_img_area_raw_ptr"] = int(row.get("raw_ptr", 0))
+        obj["blds_img_area_raw_off"] = int(raw_off)
+        obj["blds_img_area_resource_end"] = int(resource_end)
+        obj["blds_img_area_cont"] = int(row.get("cont", 0))
+        obj["blds_source_lvz_path"] = str(source_lvz_path)
+        if img_name:
+            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+        objects.append(obj)
+
+        if res_id in (1179, 1725, 1802, 1828, 1881, 1887, 1989, 2184, 3528) or len(objects) <= 16:
+            LVZ.dbg(
+                f"[area-resource] exact RES={res_id} area={area_index} row={resource_index} "
+                f"raw=0x{raw_off:08X} format={material_list.format_tag} "
+                f"groups={len(groups)} materials={slots_added} object={obj.name}"
+            )
+
+    stats = getattr(img_reader, "last_area_resource_stats", {}) or {}
+    LVZ.dbg(
+        f"[area-resource] master AERA areas={len(area_records)} rows={stats.get('rows', 0)} "
+        f"wanted_rows={stats.get('wanted_rows', 0)} descriptor_rows={stats.get('accepted', 0)} "
+        f"models={len(objects)} skipped_non_geometry={skipped_non_geometry}"
+    )
+    return objects
+
 def build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, extra_container_records: List[Dict[str, int]], source_lvz_path: str, img_name: Optional[str], needed_res_ids=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None) -> List[bpy.types.Object]:
     if not extra_container_records:
         return []
@@ -3752,25 +4530,130 @@ def stamp_img_detail_on_object(obj: bpy.types.Object, detail, instance_index: in
             obj["blds_img_row_index"] = int(detail[19])
 
 
-def get_or_create_import_collection(collection_name: str):
+def get_or_create_import_collection(collection_name: str, parent_collection=None):
+    """Get/create one collection and link it under the requested parent only."""
     try:
-        scene = bpy.context.scene
-        root = scene.collection
+        parent = parent_collection or bpy.context.scene.collection
         existing = bpy.data.collections.get(collection_name)
         if existing is None:
             existing = bpy.data.collections.new(collection_name)
         try:
-            names = {child.name for child in root.children}
-            if existing.name not in names:
-                root.children.link(existing)
+            if existing.name not in {child.name for child in parent.children}:
+                parent.children.link(existing)
         except Exception:
             try:
-                root.children.link(existing)
+                parent.children.link(existing)
             except Exception:
                 pass
         return existing
     except Exception:
         return None
+
+
+def blds_clear_collection_tree_objects(collection):
+    if collection is None:
+        return
+    try:
+        for child in list(collection.children):
+            blds_clear_collection_tree_objects(child)
+    except Exception:
+        pass
+    try:
+        for obj in list(collection.objects):
+            try:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def blds_remove_legacy_import_collections():
+    """Remove collection names created by pre-1.0.21 LVZ imports.
+
+    Those collections were global rather than tied to one LVZ+IMG pair, so
+    leaving them in the scene makes a corrected import appear to have duplicate
+    or detached effects. Only exact BLeeds-owned legacy names are touched.
+    """
+    for collection_name in ("BLeeds Leeds 2DFX", "BLeeds IMG linked placements"):
+        try:
+            collection = bpy.data.collections.get(collection_name)
+        except Exception:
+            collection = None
+        if collection is None:
+            continue
+        blds_clear_collection_tree_objects(collection)
+        try:
+            bpy.data.collections.remove(collection, do_unlink=True)
+            LVZ.dbg(f"[collections] removed legacy global collection: {collection_name}")
+        except Exception:
+            try:
+                for owner in list(bpy.data.collections):
+                    try:
+                        if collection.name in {child.name for child in owner.children}:
+                            owner.children.unlink(collection)
+                    except Exception:
+                        pass
+                try:
+                    if collection.name in {child.name for child in bpy.context.scene.collection.children}:
+                        bpy.context.scene.collection.children.unlink(collection)
+                except Exception:
+                    pass
+                bpy.data.collections.remove(collection)
+            except Exception:
+                pass
+
+
+def blds_import_pair_base_name(lvz_path: str, img_name: Optional[str]) -> str:
+    lvz_stem = normalized_copy_stem(Path(lvz_path).stem).strip() or Path(lvz_path).stem
+    img_stem = normalized_copy_stem(Path(img_name).stem).strip() if img_name else ""
+    if img_stem and img_stem.lower() != lvz_stem.lower():
+        return f"{lvz_stem} + {img_stem}"
+    return lvz_stem
+
+
+def blds_prepare_import_collection_tree(lvz_path: str, img_name: Optional[str]):
+    """Create one source-named hierarchy for the LVZ+IMG pair.
+
+    Example:
+        beach [LVZ+IMG]
+          beach Objects
+          beach Linked Placements
+          beach 2DFX
+    """
+    global _ACTIVE_IMPORT_ROOT_COLLECTION
+    global _ACTIVE_IMPORT_OBJECTS_COLLECTION
+    global _ACTIVE_IMPORT_LINKED_COLLECTION
+    global _ACTIVE_IMPORT_2DFX_COLLECTION
+
+    blds_remove_legacy_import_collections()
+    base = blds_import_pair_base_name(lvz_path, img_name)
+    root_name = f"{base} [LVZ+IMG]"
+    scene_root = bpy.context.scene.collection
+    root = get_or_create_import_collection(root_name, scene_root)
+    objects = get_or_create_import_collection(f"{base} Objects", root)
+    linked = get_or_create_import_collection(f"{base} Linked Placements", root)
+    effects = get_or_create_import_collection(f"{base} 2DFX", root)
+
+    # A fresh import replaces only BLeeds-owned children for this exact pair.
+    for collection in (objects, linked, effects):
+        blds_clear_collection_tree_objects(collection)
+    try:
+        root["blds_kind"] = "LVZ_IMG_IMPORT_ROOT"
+        root["blds_source_lvz_path"] = str(lvz_path)
+        root["blds_source_img_path"] = str(Path(lvz_path).with_name(img_name)) if img_name else ""
+        root["blds_import_pair_name"] = str(base)
+        objects["blds_kind"] = "LVZ_IMG_OBJECTS_COLLECTION"
+        linked["blds_kind"] = "LVZ_IMG_LINKED_COLLECTION"
+        effects["blds_kind"] = "LVZ_IMG_2DFX_COLLECTION"
+    except Exception:
+        pass
+
+    _ACTIVE_IMPORT_ROOT_COLLECTION = root
+    _ACTIVE_IMPORT_OBJECTS_COLLECTION = objects
+    _ACTIVE_IMPORT_LINKED_COLLECTION = linked
+    _ACTIVE_IMPORT_2DFX_COLLECTION = effects
+    return root, objects, linked, effects
 
 
 def set_object_view_hidden(obj, hidden: bool):
@@ -4000,7 +4883,7 @@ def blds_mesh_quality_score(obj) -> float:
     except Exception:
         radius = 0.0
 
-    # Prefer the richest candidate for a shared IPL/model id.  VCS beach has
+    # Legacy helper for a shared internal ROWLINK value. VCS beach has
     # multiple sector resource-table candidates for the same model id.  Taking
     # the first one gives stripped/partial facades like beach model 562 from
     # sector 60; sector 61 has the fuller mesh.
@@ -4150,7 +5033,404 @@ def lookup_neighbor_alias_base(
     return None, -1, "", 0, rejected
 
 
-def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None, progress_callback=None) -> Tuple[int, int, int]:
+
+def blds_placement_report_key(detail):
+    try:
+        return (int(detail[1]), int(detail[2]), int(detail[3]), int(detail[0]))
+    except Exception:
+        return None
+
+
+def blds_make_placement_report_row(detail, index: int = -1) -> Dict[str, object]:
+    row: Dict[str, object] = {
+        "index": int(index),
+        "status": "NOT_PROCESSED",
+        "status_reason": "",
+    }
+    try:
+        matrix = tuple(float(value) for value in detail[12])
+        origin = detail[18] if len(detail) > 18 else (0.0, 0.0, 0.0)
+        origin = (float(origin[0]), float(origin[1]), float(origin[2]))
+        row.update({
+            "res_id": int(detail[0]),
+            "container": int(detail[1]),
+            "rel_off": int(detail[2]),
+            "abs_off": int(detail[1]) + int(detail[2]),
+            "row_link_raw": int(detail[3]),
+            "row_link_id": int(detail[4]),
+            "row_link_high_bit": bool(int(detail[3]) & 0x8000),
+            # Compatibility aliases for older scripts; UI/report labels no longer call this IPL.
+            "ipl_raw": int(detail[3]),
+            "ipl_id": int(detail[4]),
+            "ipl_high_bit": bool(int(detail[3]) & 0x8000),
+            "sphere_x": float(detail[5]),
+            "sphere_y": float(detail[6]),
+            "sphere_z": float(detail[7]),
+            "sphere_radius": float(detail[8]),
+            "basis_scale_x": float(detail[9]),
+            "basis_scale_y": float(detail[10]),
+            "basis_scale_z": float(detail[11]),
+            "matrix": matrix,
+            "pass_index": int(detail[13]),
+            "pass_name": str(detail[14]),
+            "sector_index": int(detail[15]),
+            "sector_x": int(detail[16]),
+            "sector_y": int(detail[17]),
+            "sector_origin": origin,
+            "sector_row_index": int(detail[19]) if len(detail) > 19 else -1,
+            "row_translation_x": float(matrix[12]),
+            "row_translation_y": float(matrix[13]),
+            "row_translation_z": float(matrix[14]),
+            "world_translation_x": float(matrix[12]) + origin[0],
+            "world_translation_y": float(matrix[13]) + origin[1],
+            "world_translation_z": float(matrix[14]) + origin[2],
+        })
+    except Exception as exc:
+        row["parse_error"] = str(exc)
+    return row
+
+
+def blds_report_object_prop(obj, key: str, default=None):
+    try:
+        return obj.get(key, default)
+    except Exception:
+        return default
+
+
+def blds_report_mark_status(report_row: Optional[Dict[str, object]], status: str, reason: str = ""):
+    if report_row is None:
+        return
+    report_row["status"] = str(status)
+    report_row["status_reason"] = str(reason or "")
+
+
+def blds_report_mark_placed(report_row: Optional[Dict[str, object]], obj, base_obj, source_model_id: int,
+                            source_label: str, matrix_mode: str, instance_index: int):
+    if report_row is None:
+        return
+    report_row["status"] = "PLACED"
+    report_row["status_reason"] = ""
+    report_row["object_name"] = str(getattr(obj, "name", ""))
+    report_row["base_object_name"] = str(getattr(base_obj, "name", ""))
+    report_row["source_model_id"] = int(source_model_id)
+    report_row["selected_source"] = str(source_label or "exact-res")
+    report_row["matrix_mode"] = str(matrix_mode or "")
+    report_row["instance_index"] = int(instance_index)
+    try:
+        report_row["base_kind"] = str(blds_report_object_prop(base_obj, "blds_kind", ""))
+        report_row["base_res_id"] = int(blds_report_object_prop(base_obj, "blds_res_index", -1))
+        report_row["base_parent_res_id"] = int(blds_report_object_prop(base_obj, "blds_parent_res_index", -1))
+        report_row["base_group_index"] = int(blds_report_object_prop(base_obj, "blds_group_index", -1))
+        report_row["base_continues_in_img"] = bool(blds_report_object_prop(base_obj, "blds_img_continues_in_img", False))
+        for prop_name in (
+            "blds_img_raw_off", "blds_raw_off", "blds_resource_row_off",
+            "blds_img_resource_row_off", "blds_img_cont", "blds_img_rel_off",
+            "blds_img_sector_index", "blds_img_row_index",
+        ):
+            value = blds_report_object_prop(base_obj, prop_name, None)
+            if value is not None:
+                report_row["base_" + prop_name] = value
+        gv, gf, gr = object_geometry_counts_radius(obj)
+        report_row["geometry_vertices"] = int(gv)
+        report_row["geometry_faces"] = int(gf)
+        report_row["geometry_radius"] = float(gr)
+    except Exception as exc:
+        report_row["placed_metadata_error"] = str(exc)
+    try:
+        matrix_values = matrix_to_report_values(obj.matrix_world)
+        report_row["applied_matrix"] = tuple(float(value) for value in matrix_values)
+    except Exception:
+        pass
+
+
+def blds_2dfx_effect_type_name(effect_type: int) -> str:
+    return {0: "LIGHT", 1: "PARTICLE", 2: "ATTRACTOR", 3: "PED_BEHAVIOUR"}.get(int(effect_type), "UNKNOWN")
+
+
+def blds_format_dtz_model_meta(model_id: int, model_meta_by_id: Dict[int, Dict[str, object]]) -> str:
+    meta = model_meta_by_id.get(int(model_id))
+    if not meta:
+        return "NO_MODEL_INFO"
+    return (
+        f"ptr=0x{int(meta.get('model_pointer_raw', 0)):08X} "
+        f"info=0x{int(meta.get('model_info_abs', 0)):08X} "
+        f"type={int(meta.get('model_type', -1))} "
+        f"num2dfx={int(meta.get('num_effects', 0))} "
+        f"first2dfx={int(meta.get('effect_index', -1))} "
+        f"raw20={str(meta.get('raw_0x20', ''))}"
+    )
+
+
+def blds_write_placement_res_report(lvz_path: str, details, report_rows_by_key: Dict[Tuple[int, int, int, int], Dict[str, object]],
+                                    model_2dfx_by_id: Optional[Dict[int, List[Dict[str, object]]]] = None,
+                                    model_2dfx_summary: Optional[Dict[str, object]] = None,
+                                    placement_identity_by_key: Optional[Dict[Tuple[int, int, int, int], Dict[str, object]]] = None,
+                                    identity_summary: Optional[Dict[str, object]] = None) -> str:
+    if not PLACEMENT_RES_TXT_REPORT_ENABLED or not lvz_path:
+        return ""
+    model_2dfx_by_id = model_2dfx_by_id or {}
+    model_2dfx_summary = model_2dfx_summary or {}
+    placement_identity_by_key = placement_identity_by_key or {}
+    identity_summary = identity_summary or {}
+    model_meta_by_id = model_2dfx_summary.get("model_meta_by_id", {}) or {}
+    out_path = str(Path(lvz_path).with_suffix("")) + "_blds_placement_res_report.txt"
+
+    ordered_rows = []
+    for index, detail in enumerate(details or []):
+        key = blds_placement_report_key(detail)
+        row = report_rows_by_key.get(key)
+        if row is None:
+            row = blds_make_placement_report_row(detail, index=index)
+        else:
+            row["index"] = int(index)
+        identity = placement_identity_by_key.get(key, {}) or {}
+        row["game_model_id"] = int(identity.get("game_model_id", -1))
+        row["model_name"] = str(identity.get("model_name", ""))
+        row["identity_source"] = str(identity.get("source", "UNRESOLVED"))
+        row["identity_area_index"] = int(identity.get("area_index", -1))
+        row["identity_area_resource_index"] = int(identity.get("area_resource_index", -1))
+        row["identity_area_resource_row_off"] = int(identity.get("area_resource_row_off", -1))
+        row["identity_area_resource_raw_off"] = int(identity.get("area_resource_raw_off", -1))
+        ordered_rows.append(row)
+
+    from collections import Counter, defaultdict
+    status_counts = Counter(str(row.get("status", "UNKNOWN")) for row in ordered_rows)
+    pair_rows = defaultdict(list)
+    res_rows = defaultdict(list)
+    rowlink_rows = defaultdict(list)
+    for row in ordered_rows:
+        res_id = int(row.get("res_id", -1))
+        rowlink = int(row.get("ipl_id", -1))
+        pair_rows[(res_id, rowlink)].append(row)
+        res_rows[res_id].append(row)
+        rowlink_rows[rowlink].append(row)
+
+    target_ids = set(int(value) for value in PLACEMENT_RES_REPORT_TARGET_IDS)
+    target_ids.update(
+        int(row.get("res_id", -1))
+        for row in ordered_rows
+        if str(row.get("status", "")) == "MISSING"
+    )
+
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("BLeeds 1.0.21 exact RES / GAME.DTZ entity-pool 2DFX / source collection report\n")
+        f.write("=" * 78 + "\n")
+        f.write(f"LVZ: {lvz_path}\n")
+        f.write(f"Placement rows retained: {len(ordered_rows)}\n")
+        f.write("Status counts: " + ", ".join(f"{key}={value}" for key, value in sorted(status_counts.items())) + "\n")
+        f.write(f"Unique RES ids: {len(res_rows)}\n")
+        f.write(f"Unique internal ROWLINK ids: {len(rowlink_rows)}\n")
+        f.write(f"Unique RES/ROWLINK pairs: {len(pair_rows)}\n")
+        f.write(f"Master AERA chunks: {int(identity_summary.get('areas', 0))}\n")
+        f.write(f"AERA RES secondary mappings used for geometry metadata: {int(identity_summary.get('mapped_res_ids', 0))}\n")
+        f.write(f"Placement rows carrying AERA secondary metadata: {int(identity_summary.get('matched_rows', 0))}\n")
+        f.write(f"Placement rows without AERA secondary metadata: {int(identity_summary.get('unresolved', 0))}\n")
+        f.write(f"AERA conflicting RES secondary values rejected: {int(identity_summary.get('conflicting_res_ids', 0))}\n")
+        f.write(f"GAME.DTZ: {model_2dfx_summary.get('source_path', '') or 'none'}\n")
+        f.write(f"GAME.DTZ status: {model_2dfx_summary.get('status', 'not parsed')}\n")
+        f.write(f"GAME.DTZ model infos: {int(model_2dfx_summary.get('ide_count', 0))}\n")
+        f.write(f"GAME.DTZ global C2dEffect rows: {int(model_2dfx_summary.get('effect_count', 0))}\n")
+        effect_type_counts = model_2dfx_summary.get("effect_type_counts", {}) or {}
+        f.write(
+            "GAME.DTZ effect types: "
+            f"LIGHT={int(effect_type_counts.get(0, 0))}, "
+            f"PARTICLE={int(effect_type_counts.get(1, 0))}, "
+            f"ATTRACTOR={int(effect_type_counts.get(2, 0))}, "
+            f"PED_BEHAVIOUR={int(effect_type_counts.get(3, 0))}\n"
+        )
+        f.write("2DFX Blender helpers: {}\n".format(
+            "ENABLED" if bool(model_2dfx_summary.get("helpers_enabled", False)) else "DISABLED FOR THIS IMPORT"
+        ))
+        f.write("2DFX ownership: allocated GAME.DTZ BUILDING/TREADABLE/DUMMY CEntity.modelIndex\n")
+        f.write("2DFX position transform: CEntity world matrix × native C2dEffect model-space position\n")
+        pool_stats = model_2dfx_summary.get("entity_pool_stats", {}) or {}
+        for pool_name in ("BUILDING", "TREADABLE", "DUMMY"):
+            stats = pool_stats.get(pool_name, {}) or {}
+            f.write(
+                f"GAME.DTZ {pool_name} pool: size={int(stats.get('size', 0))} "
+                f"allocated={int(stats.get('allocated', 0))} "
+                f"instances_with_effects={int(stats.get('with_effects', 0))} "
+                f"effect_helpers_global={int(stats.get('effect_rows', 0))}\n"
+            )
+        f.write(f"GAME.DTZ allocated entity instances with effects: {int(model_2dfx_summary.get('entity_instances_with_effects', 0))}\n")
+        f.write(f"GAME.DTZ entity effect helpers before level filtering: {int(model_2dfx_summary.get('entity_effect_rows', 0))}\n")
+        f.write(f"Current LVZ concrete sector cells: {int(model_2dfx_summary.get('active_sector_cells', 0))}\n")
+        f.write(f"2DFX entity instances selected for this LVZ: {int(model_2dfx_summary.get('entity_instances_selected', 0))}\n")
+        f.write(f"2DFX entity instances attached to matching map objects: {int(model_2dfx_summary.get('entity_instances_attached', 0))}\n")
+        f.write(f"2DFX independent entity instances kept in the map 2DFX collection: {int(model_2dfx_summary.get('entity_instances_unattached', 0))}\n")
+        f.write(f"2DFX helpers imported: {int(model_2dfx_summary.get('effects_imported', 0))}\n")
+        f.write(f"2DFX selected entity instances by pool: {model_2dfx_summary.get('entity_selected_by_pool', {}) or {}}\n")
+        f.write(f"2DFX selection reasons: {model_2dfx_summary.get('entity_selected_by_reason', {}) or {}}\n")
+        f.write(f"2DFX imported helpers by pool: {model_2dfx_summary.get('entity_imported_helpers_by_pool', {}) or {}}\n")
+        f.write("Collection ownership: one source-named LVZ+IMG root with Objects, Linked Placements, and 2DFX children.\n")
+        f.write("Visible geometry ownership: exact streamed RES only\n")
+        f.write("ROWLINK is diagnostic placement data only; it is never geometry or 2DFX identity.\n\n")
+
+        f.write("FIELD MEANINGS\n")
+        f.write("- RES: exact streamed geometry/resource id from placement row +0x02.\n")
+        f.write("- ROWLINK: internal placement row link from +0x00; not an IDE/model id.\n")
+        f.write("- AERA_SECONDARY: secondary value from the exact AERA resource row; retained as geometry metadata.\n")
+        f.write("- 2DFX GAME_MODEL: authoritative model index read from GAME.DTZ CEntity.modelIndex.\n")
+        f.write("- 2DFX entity pool/index: actual BUILDING, TREADABLE, or DUMMY instance that owns the effects.\n")
+        f.write("- selected geometry: exact-RES candidate actually placed, or MISSING.\n\n")
+
+        f.write("WATCHED / MISSING RES IDS\n")
+        f.write("-" * 78 + "\n")
+        for res_id in sorted(value for value in target_ids if value >= 0):
+            rows = res_rows.get(res_id, [])
+            if not rows:
+                f.write(f"RES={res_id}: NO RETAINED PLACEMENT ROW\n")
+                continue
+            statuses = Counter(str(row.get("status", "UNKNOWN")) for row in rows)
+            rowlinks = Counter(int(row.get("ipl_id", -1)) for row in rows)
+            game_models = Counter(int(row.get("game_model_id", -1)) for row in rows)
+            f.write(
+                f"RES={res_id}: rows={len(rows)} statuses={dict(sorted(statuses.items()))} "
+                f"ROWLINK={dict(sorted(rowlinks.items()))} AERA_SECONDARY={dict(sorted(game_models.items()))}\n"
+            )
+            for row in rows:
+                f.write(
+                    f"  index={int(row.get('index', -1))} status={row.get('status', '')} "
+                    f"ROWLINK={int(row.get('ipl_id', -1))} AERA_SECONDARY={int(row.get('game_model_id', -1))} "
+                    f"pass={row.get('pass_name', '')} sector={int(row.get('sector_index', -1))} "
+                    f"world=({float(row.get('world_translation_x', 0.0)):.6f},"
+                    f"{float(row.get('world_translation_y', 0.0)):.6f},"
+                    f"{float(row.get('world_translation_z', 0.0)):.6f}) "
+                    f"source={row.get('selected_source', '') or '-'} object={row.get('object_name', '') or '-'} "
+                    f"reason={row.get('status_reason', '')}\n"
+                )
+        f.write("\n")
+
+        f.write("RES / ROWLINK / AERA_SECONDARY SUMMARY\n")
+        f.write("-" * 78 + "\n")
+        for (res_id, rowlink), rows in sorted(pair_rows.items()):
+            statuses = Counter(str(row.get("status", "UNKNOWN")) for row in rows)
+            passes = Counter(str(row.get("pass_name", "UNKNOWN")) for row in rows)
+            game_model_id = int(rows[0].get("game_model_id", -1))
+            f.write(
+                f"RES={res_id} ROWLINK={rowlink} AERA_SECONDARY={game_model_id} rows={len(rows)} "
+                f"statuses={dict(sorted(statuses.items()))} passes={dict(sorted(passes.items()))} "
+                f"AERA_secondary_DTZ_range_diagnostic={len(model_2dfx_by_id.get(game_model_id, []))}\n"
+            )
+        f.write("\n")
+
+        f.write("ALL PLACEMENT ROWS\n")
+        f.write("=" * 78 + "\n")
+        for row in ordered_rows:
+            res_id = int(row.get("res_id", -1))
+            rowlink = int(row.get("ipl_id", -1))
+            game_model_id = int(row.get("game_model_id", -1))
+            f.write(
+                f"[{int(row.get('index', -1)):05d}] {row.get('status', 'UNKNOWN')} "
+                f"RES={res_id} ROWLINK={rowlink} "
+                f"ROWLINKraw=0x{int(row.get('row_link_raw', row.get('ipl_raw', 0))):04X} "
+                f"highbit={int(bool(row.get('row_link_high_bit', row.get('ipl_high_bit', False))))} "
+                f"AERA_SECONDARY={game_model_id}\n"
+            )
+            f.write(
+                f"  placement: sector={int(row.get('sector_index', -1))} "
+                f"sectorXY=({int(row.get('sector_x', 0))},{int(row.get('sector_y', 0))}) "
+                f"sectorRow={int(row.get('sector_row_index', -1))} "
+                f"pass={row.get('pass_name', '')}/{int(row.get('pass_index', -1))}\n"
+            )
+            f.write(
+                f"  offsets: contIMG=0x{int(row.get('container', 0)):08X} "
+                f"rel=0x{int(row.get('rel_off', 0)):08X} abs=0x{int(row.get('abs_off', 0)):08X}\n"
+            )
+            f.write(
+                f"  sphere: ({float(row.get('sphere_x', 0.0)):.9f}, {float(row.get('sphere_y', 0.0)):.9f}, "
+                f"{float(row.get('sphere_z', 0.0)):.9f}, r={float(row.get('sphere_radius', 0.0)):.9f})\n"
+            )
+            f.write(
+                f"  basisScale: ({float(row.get('basis_scale_x', 0.0)):.9f}, "
+                f"{float(row.get('basis_scale_y', 0.0)):.9f}, {float(row.get('basis_scale_z', 0.0)):.9f})\n"
+            )
+            origin = row.get("sector_origin", (0.0, 0.0, 0.0))
+            f.write(f"  sectorOrigin: ({float(origin[0]):.9f}, {float(origin[1]):.9f}, {float(origin[2]):.9f})\n")
+            f.write(
+                f"  rowTranslation: ({float(row.get('row_translation_x', 0.0)):.9f}, "
+                f"{float(row.get('row_translation_y', 0.0)):.9f}, {float(row.get('row_translation_z', 0.0)):.9f})\n"
+            )
+            f.write(
+                f"  worldTranslation: ({float(row.get('world_translation_x', 0.0)):.9f}, "
+                f"{float(row.get('world_translation_y', 0.0)):.9f}, {float(row.get('world_translation_z', 0.0)):.9f})\n"
+            )
+            matrix = tuple(row.get("matrix", ()))
+            if len(matrix) == 16:
+                f.write("  rowMatrix:\n")
+                for matrix_row in range(4):
+                    values = matrix[matrix_row * 4:(matrix_row + 1) * 4]
+                    f.write("    " + " ".join(f"{float(value): .9f}" for value in values) + "\n")
+            f.write(
+                f"  identity: source={row.get('identity_source', '') or 'UNRESOLVED'} "
+                f"AERA_SECONDARY={game_model_id} "
+                f"AERA_area={int(row.get('identity_area_index', -1))} "
+                f"AERA_resource={int(row.get('identity_area_resource_index', -1))} "
+                f"AERA_row=0x{int(row.get('identity_area_resource_row_off', -1)) & 0xFFFFFFFF:08X} "
+                f"AERA_payload=0x{int(row.get('identity_area_resource_raw_off', -1)) & 0xFFFFFFFF:08X}\n"
+            )
+            f.write(
+                f"  selectedGeometry: object={row.get('object_name', '') or '-'} "
+                f"base={row.get('base_object_name', '') or '-'} kind={row.get('base_kind', '') or '-'} "
+                f"baseRES={int(row.get('base_res_id', -1))} sourceModel={int(row.get('source_model_id', -1))} "
+                f"source={row.get('selected_source', '') or '-'} matrixMode={row.get('matrix_mode', '') or '-'}\n"
+            )
+            f.write(
+                f"  geometry: vertices={int(row.get('geometry_vertices', 0))} faces={int(row.get('geometry_faces', 0))} "
+                f"radius={float(row.get('geometry_radius', 0.0)):.9f} "
+                f"parentRES={int(row.get('base_parent_res_id', -1))} group={int(row.get('base_group_index', -1))} "
+                f"continuesIMG={int(bool(row.get('base_continues_in_img', False)))}\n"
+            )
+            candidate_rows = row.get("exact_candidates", []) or []
+            f.write(
+                f"  exactCandidatePool: captured={len(candidate_rows)} "
+                f"total={int(row.get('exact_candidate_total', len(candidate_rows)))}\n"
+            )
+            for candidate in candidate_rows:
+                fit_score = candidate.get("fit_score", None)
+                fit_text = "no-fit"
+                if fit_score is not None:
+                    fit_text = (
+                        f"score={float(fit_score):.9f} "
+                        f"centerError={float(candidate.get('fit_center_error', 0.0)):.9f} "
+                        f"radiusRatio={float(candidate.get('fit_radius_ratio', 0.0)):.9f}"
+                    )
+                f.write(
+                    f"    candidate source={candidate.get('source', '')} rank={int(candidate.get('rank', -1))} "
+                    f"name={candidate.get('name', '') or '-'} kind={candidate.get('kind', '') or '-'} "
+                    f"RES={int(candidate.get('res_id', -1))} parentRES={int(candidate.get('parent_res_id', -1))} "
+                    f"group={int(candidate.get('group_index', -1))} continuesIMG={int(bool(candidate.get('continues_img', False)))} "
+                    f"geom={int(candidate.get('vertices', 0))}v/{int(candidate.get('faces', 0))}f/"
+                    f"r{float(candidate.get('radius', 0.0)):.9f} {fit_text}\n"
+                )
+            if row.get("status_reason"):
+                f.write(f"  statusReason: {row.get('status_reason')}\n")
+            f.write(
+                f"  GAME.DTZ diagnostic range at AERA_SECONDARY={game_model_id}: "
+                f"{blds_format_dtz_model_meta(game_model_id, model_meta_by_id)}\n"
+            )
+            effects = model_2dfx_by_id.get(game_model_id, [])
+            f.write(f"  GAME.DTZ effect rows at this diagnostic AERA secondary: {len(effects)}\n")
+            for effect in effects[:int(PLACEMENT_RES_REPORT_EFFECT_LIMIT)]:
+                f.write(
+                    f"    effect global={int(effect.get('global_index', -1))} "
+                    f"modelLocal={int(effect.get('model_effect_index', -1))} "
+                    f"type={int(effect.get('effect_type', -1))}/"
+                    f"{blds_2dfx_effect_type_name(int(effect.get('effect_type', -1)))} "
+                    f"local=({float(effect.get('x', 0.0)):.9f}, {float(effect.get('y', 0.0)):.9f}, "
+                    f"{float(effect.get('z', 0.0)):.9f}) rgba=({int(effect.get('r', 0))},"
+                    f"{int(effect.get('g', 0))},{int(effect.get('b', 0))},{int(effect.get('a', 0))}) "
+                    f"raw={str(effect.get('raw_hex', ''))}\n"
+                )
+            if len(effects) > int(PLACEMENT_RES_REPORT_EFFECT_LIMIT):
+                f.write(f"    ... {len(effects) - int(PLACEMENT_RES_REPORT_EFFECT_LIMIT)} more effect rows\n")
+            f.write("\n")
+
+    LVZ.dbg(f"[placement-report] wrote exact RES/AERA-secondary/entity-2DFX report: {out_path}")
+    LVZ.dbg(f"[placement-report] rows={len(ordered_rows)} statuses={dict(sorted(status_counts.items()))}")
+    return out_path
+
+def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None, ide_res_to_model_id: Optional[Dict[int, int]] = None, ide_res_to_name: Optional[Dict[int, str]] = None, placement_identity_by_key: Optional[Dict[Tuple[int, int, int, int], Dict[str, object]]] = None, progress_callback=None, model_2dfx_by_game_model_id: Optional[Dict[int, List[Dict[str, object]]]] = None, model_2dfx_summary: Optional[Dict[str, object]] = None, model_2dfx_collection=None, create_game_dtz_2dfx_helpers: bool = True) -> Tuple[int, int, int]:
     if not details:
         return 0, 0, 0
 
@@ -4166,38 +5446,61 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
     # fallbacks so placement can never die from IDE debug/report metadata.
     ide_ipl_to_res = ide_ipl_to_res or {}
     ide_ipl_to_name = ide_ipl_to_name or {}
+    ide_res_to_model_id = ide_res_to_model_id or {}
+    ide_res_to_name = ide_res_to_name or {}
+    placement_identity_by_key = placement_identity_by_key or {}
+    model_2dfx_by_game_model_id = model_2dfx_by_game_model_id or {}
+    model_2dfx_summary = model_2dfx_summary if model_2dfx_summary is not None else {}
+    placement_report_rows = globals().get("_CURRENT_PLACEMENT_REPORT_ROWS", {}) or {}
 
-    overlay_by_res: Dict[int, bpy.types.Object] = {}
-    continuation_by_res: Dict[int, bpy.types.Object] = {}
+    exact_overlay_candidates = []
+    continuation_candidates = []
     for (sector_index, res_id), obj in overlay_by_sector_res.items():
         if obj is None:
             continue
         resource_id = int(res_id)
-        old_obj = overlay_by_res.get(resource_id)
-        overlay_by_res[resource_id] = choose_better_blds_candidate(old_obj, obj)
         try:
             is_continuation = bool(obj.get("blds_img_continues_in_img", False))
         except Exception:
             is_continuation = False
         if is_continuation:
-            old_continuation = continuation_by_res.get(resource_id)
-            continuation_by_res[resource_id] = choose_better_blds_candidate(old_continuation, obj)
+            continuation_candidates.append(obj)
+            continue
+        exact_overlay_candidates.append(obj)
 
-    if continuation_by_res:
-        LVZ.dbg(f"[continues-img] proven placement model pool: {len(continuation_by_res)} resource ids")
+    overlay_candidates_by_res = build_resource_object_candidate_map(exact_overlay_candidates)
+    overlay_by_res = {}
+    overlay_variant_res_ids = set()
+    for resource_id, candidates in overlay_candidates_by_res.items():
+        if len(candidates) > 1:
+            overlay_variant_res_ids.add(int(resource_id))
+        chosen = None
+        for candidate in candidates:
+            chosen = choose_better_blds_candidate(chosen, candidate)
+        if chosen is not None:
+            overlay_by_res[int(resource_id)] = chosen
+    if overlay_variant_res_ids:
+        LVZ.dbg(f"[exact-models] static resource IDs with placement-selected variants: {len(overlay_variant_res_ids)}")
+    continuation_candidates_by_res = build_resource_object_candidate_map(continuation_candidates)
+    if continuation_candidates_by_res:
+        LVZ.dbg(
+            f"[raw-img-models] placement-selected pool: {len(continuation_candidates_by_res)} resource ids, "
+            f"{sum(len(values) for values in continuation_candidates_by_res.values())} exact-RES variants"
+        )
 
-    extra_by_res: Dict[int, bpy.types.Object] = {}
-    for obj in extra_resource_objects:
-        if obj is None:
-            continue
-        try:
-            res_id = int(obj.get("blds_res_index", -1))
-        except Exception:
-            continue
-        if res_id < 0:
-            continue
-        old_obj = extra_by_res.get(res_id)
-        extra_by_res[res_id] = choose_better_blds_candidate(old_obj, obj)
+    extra_candidates_by_res = build_resource_object_candidate_map(extra_resource_objects)
+    extra_by_res = {}
+    extra_variant_res_ids = set()
+    for resource_id, candidates in extra_candidates_by_res.items():
+        if len(candidates) > 1:
+            extra_variant_res_ids.add(int(resource_id))
+        chosen = None
+        for candidate in candidates:
+            chosen = choose_better_blds_candidate(chosen, candidate)
+        if chosen is not None:
+            extra_by_res[int(resource_id)] = chosen
+    if extra_variant_res_ids:
+        LVZ.dbg(f"[exact-models] linked resource IDs with placement-selected variants: {len(extra_variant_res_ids)}")
 
     ipl_overlay_by_res: Dict[int, bpy.types.Object] = {}
     ipl_overlay_choice_replacements = 0
@@ -4546,13 +5849,13 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         except Exception:
             raw_scale = "?"
         LVZ.dbg(
-            f"[resolver] stage={stage} RES={res_id_a} IPL={ipl_id_a} IPLraw=0x{ipl_raw_a:04X} "
+            f"[resolver] stage={stage} RES={res_id_a} ROWLINK={ipl_id_a} IPLraw=0x{ipl_raw_a:04X} "
             f"sector={sector_index_a} row={row_index_a} pass={pass_name_a}/{pass_index_a} "
             f"rowAbs=0x{row_abs_a:08X} contIMG=0x{cont_a:08X} rel=0x{rel_a:08X} "
             f"sphere={sphere} rowMatrixScale={raw_scale} chosenSource={chosen_source or ''} note={extra_note or ''}"
         )
         resolver_audit_lines += 1
-        for field_name, model_id in (("RES", res_id_a), ("IPL", ipl_id_a)):
+        for field_name, model_id in (("RES", res_id_a), ("ROWLINK_DIAGNOSTIC", ipl_id_a)):
             shown = 0
             candidates = resolver_pool_candidates(model_id, sector_index_a, row_index_a)
             if not candidates:
@@ -4660,6 +5963,10 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
     fallback_neighbor = 0
     fallback_force_missing_img_mdl = 0
     fallback_final_missing_ipl_neighbor = 0
+    placement_variant_choices = 0
+    placement_variant_rejections = 0
+    placement_variant_max_score = 0.0
+    placement_source_counts = {}
     forced_missing_img_mdl_rows = []
     final_missing_ipl_neighbor_rows = []
     imported_missing_mdl_rows = []
@@ -4682,7 +5989,9 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         target_collection = bpy.context.collection
     if IMPORT_LINK_DUPLICATES_IN_HIDDEN_COLLECTION:
         try:
-            hidden_duplicate_collection = get_or_create_import_collection("BLeeds IMG linked placements")
+            hidden_duplicate_collection = globals().get("_ACTIVE_IMPORT_LINKED_COLLECTION")
+            if hidden_duplicate_collection is None:
+                hidden_duplicate_collection = get_or_create_import_collection("BLeeds IMG linked placements")
             if hidden_duplicate_collection is not None:
                 try:
                     hidden_duplicate_collection_was_hidden = bool(hidden_duplicate_collection.hide_viewport)
@@ -4706,9 +6015,9 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             return True
         if built_by_res.get(int(res_id)) is not None:
             return True
-        if extra_by_res.get(int(res_id)) is not None:
+        if extra_candidates_by_res.get(int(res_id)):
             return True
-        if overlay_by_res.get(int(res_id)) is not None:
+        if overlay_candidates_by_res.get(int(res_id)):
             return True
         return False
 
@@ -4747,9 +6056,26 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
     except Exception:
         positive_sector_pair_keys = set()
 
+    # Build one runtime-placement group per AERA model-info/ROWLINK/transform.
+    # Several streamed RES pieces can form one opaque/transparent model.  They
+    # all point at the same CBaseModelInfo and must not duplicate its effects.
+    two_dfx_split_res_by_placement = {}
+    if create_game_dtz_2dfx_helpers and model_2dfx_by_game_model_id:
+        for effect_detail in details:
+            effect_identity = placement_identity_by_key.get(blds_placement_report_key(effect_detail), {}) or {}
+            effect_model_id = int(effect_identity.get("game_model_id", -1))
+            if effect_model_id < 0 or effect_model_id not in model_2dfx_by_game_model_id:
+                continue
+            effect_key = blds_2dfx_placement_key(effect_model_id, effect_detail)
+            two_dfx_split_res_by_placement.setdefault(effect_key, set()).add(int(effect_detail[0]))
+    created_2dfx_placement_keys = {}
+    model_2dfx_summary.setdefault("candidate_rows_with_effects", 0)
+    model_2dfx_summary.setdefault("duplicate_split_rows_suppressed", 0)
+    model_2dfx_summary.setdefault("effects_suppressed_duplicate", 0)
+
     total_details = len(details)
     for detail_index, detail in enumerate(details):
-        if progress_callback is not None and (detail_index % 128 == 0 or detail_index + 1 == total_details):
+        if progress_callback is not None and (detail_index % 512 == 0 or detail_index + 1 == total_details):
             progress_callback(detail_index + 1, total_details)
         used_ipl_model_fallback = False
         used_force_missing_img_mdl = False
@@ -4759,16 +6085,22 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         source_model_id_for_row = -1
         final_missing_fit_note = ""
         res_id = int(detail[0])
+        # detail[4] is an internal row-link/index, not a GTA IDE model id.
         ipl_id = int(detail[4])
+        identity = placement_identity_by_key.get(blds_placement_report_key(detail), {}) or {}
+        game_model_id = int(identity.get("game_model_id", -1))
+        game_model_name = str(identity.get("model_name", ""))
         sector_index = int(detail[15]) if len(detail) > 15 else -1
         pass_name = str(detail[14]) if len(detail) > 14 else "UNKNOWN"
         row_index = int(detail[19]) if len(detail) > 19 else -1
+        placement_report_row = placement_report_rows.get(blds_placement_report_key(detail))
         resolver_audit_row(detail, "row-start")
         if SKIP_LIGHTS_PASS_IPL_MESH_PLACEMENTS and is_light_placement_pass(pass_name):
             try:
                 skipped_lights_pass_ipl_rows.append((sector_index, row_index, ipl_id, res_id, pass_name, int(detail[1]), int(detail[2])))
             except Exception:
                 skipped_lights_pass_ipl_rows.append((sector_index, row_index, ipl_id, res_id, pass_name, 0, 0))
+            blds_report_mark_status(placement_report_row, "SKIPPED_LIGHTS_POLICY", "LIGHTS placement mesh skipped by policy")
             continue
         previous_missing_keys = globals().get("_PREVIOUS_MISSING_ROW_KEYS", set()) or set()
         was_missing_in_previous_import = (
@@ -4787,35 +6119,159 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         primary_model_id = int(res_id)
 
         def lookup_primary_placement_model(model_id: int):
+            nonlocal placement_variant_choices, placement_variant_rejections, placement_variant_max_score
             model_id = int(model_id)
-            obj = continuation_by_res.get(model_id)
-            if obj is not None:
-                return obj, "img_continuation_model"
-            obj = overlay_by_sector_res.get((sector_index, model_id))
-            if obj is not None:
-                return obj, "exact_sector_model"
+            exact_candidates = []
+
+            def add_candidate(candidate, source, rank):
+                if candidate is None:
+                    return
+                try:
+                    if bool(candidate.get("blds_img_continues_in_img", False)):
+                        return
+                except Exception:
+                    pass
+                exact_candidates.append((candidate, str(source), int(rank)))
+
+            # Master AreaInfo -> AERA rows are the authoritative exact payload
+            # source for streamed map resources.  Select a fitting AERA payload
+            # first so an empty/incomplete same-RES WRLD placeholder cannot hide
+            # it from placement.  This remains exact-RES only; no ROWLINK or
+            # GAME_MODEL geometry alias is involved.
+            aera_candidates = []
+            for candidate in extra_candidates_by_res.get(model_id, []):
+                try:
+                    if str(candidate.get("blds_kind", "")) == "IMG_AERA_RESOURCE_MDL":
+                        aera_candidates.append((candidate, "official_aera_model", 0))
+                except Exception:
+                    continue
+            aera_obj, aera_source, aera_fit, aera_count = choose_exact_resource_candidate(
+                aera_candidates,
+                detail,
+                max_fit_score=CONTINUES_IN_IMG_MAX_PLACEMENT_FIT_SCORE,
+            )
+            if aera_obj is not None:
+                if int(model_id) in (1725, 1881, 1887, 1989, 2184, 3528):
+                    try:
+                        LVZ.dbg(
+                            f"[aera-placement] selected RES={int(model_id)} object={getattr(aera_obj, 'name', '')} "
+                            f"fit={float(aera_fit[0]) if aera_fit is not None else -1.0:.6f} "
+                            f"sector={int(sector_index)} row={int(row_index)} pass={str(pass_name)}"
+                        )
+                    except Exception:
+                        pass
+                return aera_obj, aera_source
+
+            # Every candidate below is keyed by the placement row's RES ID.
+            # Rank only breaks ties; the row sphere/matrix is the authority.
+            add_candidate(overlay_by_sector_res.get((sector_index, model_id)), "exact_sector_model", 0)
             if row_index >= 0:
-                obj = nested_overlay_by_res.get((row_index, model_id))
+                add_candidate(nested_overlay_by_res.get((row_index, model_id)), "exact_nested_row_model", 1)
+                add_candidate(row_overlay_by_res.get((row_index, model_id)), "exact_row_model", 2)
+            add_candidate(built_by_res.get(model_id), "lvz_model", 3)
+            for candidate in extra_candidates_by_res.get(model_id, []):
+                try:
+                    if str(candidate.get("blds_kind", "")) == "IMG_AERA_RESOURCE_MDL":
+                        continue
+                except Exception:
+                    pass
+                add_candidate(candidate, "area_model", 4)
+            for candidate in overlay_candidates_by_res.get(model_id, []):
+                add_candidate(candidate, "global_sector_model", 5)
+
+            # Raw continuation candidates are also exact RES variants.  They are
+            # generated only for unresolved rows or suspicious aggregate slices.
+            for candidate in continuation_candidates_by_res.get(model_id, []):
+                exact_candidates.append((candidate, "img_continuation_model", 6))
+
+            if placement_report_row is not None:
+                candidate_rows = []
+                candidate_seen = set()
+                for candidate_obj, candidate_source, candidate_rank in exact_candidates:
+                    if candidate_obj is None:
+                        continue
+                    try:
+                        candidate_signature = blds_object_geometry_signature(candidate_obj)
+                        candidate_key = candidate_signature if candidate_signature is not None else ("object", id(candidate_obj))
+                    except Exception:
+                        candidate_key = ("object", id(candidate_obj))
+                    if candidate_key in candidate_seen:
+                        continue
+                    candidate_seen.add(candidate_key)
+                    try:
+                        candidate_fit = placement_candidate_fit(candidate_obj, detail)
+                    except Exception:
+                        candidate_fit = None
+                    try:
+                        candidate_verts, candidate_faces, candidate_radius = object_geometry_counts_radius(candidate_obj)
+                    except Exception:
+                        candidate_verts, candidate_faces, candidate_radius = 0, 0, 0.0
+                    candidate_rows.append({
+                        "name": str(getattr(candidate_obj, "name", "")),
+                        "source": str(candidate_source),
+                        "rank": int(candidate_rank),
+                        "kind": str(blds_report_object_prop(candidate_obj, "blds_kind", "")),
+                        "res_id": int(blds_report_object_prop(candidate_obj, "blds_res_index", -1)),
+                        "parent_res_id": int(blds_report_object_prop(candidate_obj, "blds_parent_res_index", -1)),
+                        "group_index": int(blds_report_object_prop(candidate_obj, "blds_group_index", -1)),
+                        "continues_img": bool(blds_report_object_prop(candidate_obj, "blds_img_continues_in_img", False)),
+                        "vertices": int(candidate_verts),
+                        "faces": int(candidate_faces),
+                        "radius": float(candidate_radius),
+                        "fit_score": None if candidate_fit is None else float(candidate_fit[0]),
+                        "fit_center_error": None if candidate_fit is None else float(candidate_fit[1]),
+                        "fit_radius_ratio": None if candidate_fit is None else float(candidate_fit[2]),
+                    })
+                    if len(candidate_rows) >= int(PLACEMENT_RES_REPORT_CANDIDATE_LIMIT):
+                        break
+                placement_report_row["exact_candidates"] = candidate_rows
+                placement_report_row["exact_candidate_total"] = len(candidate_seen)
+
+            obj, source, fit, candidate_count = choose_exact_resource_candidate(
+                exact_candidates,
+                detail,
+                max_fit_score=CONTINUES_IN_IMG_MAX_PLACEMENT_FIT_SCORE,
+            )
+            if candidate_count > 1:
                 if obj is not None:
-                    return obj, "exact_nested_row_model"
-            if row_index >= 0:
-                obj = row_overlay_by_res.get((row_index, model_id))
-                if obj is not None:
-                    return obj, "exact_row_model"
-            obj = built_by_res.get(model_id)
+                    placement_variant_choices += 1
+                    if fit is not None:
+                        placement_variant_max_score = max(placement_variant_max_score, float(fit[0]))
+                else:
+                    placement_variant_rejections += 1
+            elif candidate_count == 1 and obj is None:
+                placement_variant_rejections += 1
             if obj is not None:
-                return obj, "lvz_model"
-            obj = extra_by_res.get(model_id)
-            if obj is not None:
-                return obj, "area_model"
-            obj = overlay_by_res.get(model_id)
-            if obj is not None:
-                return obj, "global_sector_model"
+                return obj, source
+
+            # A fit failure must not create a new hole when an exact structured
+            # RES model already existed in the normal LVZ/IMG tables.  Raw IMG
+            # guesses remain rejectable, but the best same-RES structured model
+            # is retained as the conservative fallback.  This restores the old
+            # static-model coverage without ever substituting an IPL/other RES.
+            structured_candidates = [
+                item for item in exact_candidates
+                if len(item) < 2 or str(item[1]) != "img_continuation_model"
+            ]
+            structured_obj, structured_source, structured_fit, _structured_count = choose_exact_resource_candidate(
+                structured_candidates,
+                detail,
+                max_fit_score=None,
+            )
+            if structured_obj is not None:
+                try:
+                    structured_obj["blds_exact_structured_fit_fallback"] = True
+                    if structured_fit is not None:
+                        structured_obj["blds_exact_structured_fit_score"] = float(structured_fit[0])
+                except Exception:
+                    pass
+                return structured_obj, str(structured_source) + "_fit_fallback"
             return None, ""
 
-        primary_would_miss = (lookup_primary_placement_model(primary_model_id)[0] is None)
         base_obj, primary_model_source = lookup_primary_placement_model(primary_model_id)
+        primary_would_miss = base_obj is None
         if base_obj is not None:
+            placement_source_counts[primary_model_source] = placement_source_counts.get(primary_model_source, 0) + 1
             source_model_id_for_row = int(primary_model_id)
             if int(primary_model_id) != int(res_id):
                 ipl_model_source_for_row = f"row-model-id-hint-disabled:{primary_model_source}:model={int(primary_model_id)}:visible_res={int(res_id)}"
@@ -4823,13 +6279,16 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                 fallback_nested += 1
             elif primary_model_source == "exact_row_model":
                 fallback_row += 1
-            elif primary_model_source == "area_model":
+            elif primary_model_source in ("official_aera_model", "area_model"):
                 fallback_extra += 1
             elif primary_model_source in ("global_sector_model", "img_continuation_model"):
                 fallback_overlay += 1
-        # V72: if the Resource ID side is absent but the row IPL/model id has a
+        # GAME_MODEL is identity/2DFX metadata only. It is never a streamed
+        # geometry resource key. Visible geometry remains exact RES-only.
+
+        # Legacy V72 path: if RES was absent, ROWLINK was once treated as though it had a
         # real parsed MDL payload, use the real MDL. This matches the WRLD row
-        # structure: +0x00 IPL/model id, +0x02 resource id. Do this before any
+        # structure: +0x00 ROWLINK, +0x02 RES. This path remains disabled; do not run before
         # WRLD sparse-fragment fallback so missing rows do not become fake slices.
         if (
             base_obj is None
@@ -4852,8 +6311,8 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                         int(gv), int(gf), float(gr), real_ipl_note,
                     ))
                 LVZ.dbg(
-                    f"[geometry-recovery] RES missing but row IPL/model has real parsed MDL; "
-                    f"RES={res_id} IPL={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
+                    f"[geometry-recovery] LEGACY ROWLINK-as-model path used; "
+                    f"RES={res_id} ROWLINK={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
                     f"using={getattr(real_ipl_obj, 'name', '')} source={real_ipl_source}; {real_ipl_note}; "
                     f"ideMap={ide_ipl_to_name.get(int(ipl_id), '')}->{ide_ipl_to_res.get(int(ipl_id), '')}; full row matrix scale"
                 )
@@ -4862,7 +6321,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                     "recovered-real-ipl-for-missing-res",
                     chosen_obj=real_ipl_obj,
                     chosen_source=ipl_model_source_for_row,
-                    extra_note="RES side had no usable resource; row IPL/model side resolved to real parsed MDL",
+                    extra_note="RES side had no usable resource; legacy ROWLINK-as-model side resolved (should remain disabled)",
                 )
 
         # V53: reference DFF is completely disabled.  Do not search it, parse it,
@@ -4897,7 +6356,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                                 ))
                             LVZ.dbg(
                                 f"[geometry-recovery] replacing bad sparse fragment with rich internal IPL model "
-                                f"RES={res_id} IPL={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
+                                f"RES={res_id} ROWLINK={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
                                 f"sparse={int(_sv)}v/{int(_sf)}f/r{float(_sr):.3f} "
                                 f"replacement={getattr(rich_obj, 'name', '')} source={rich_source}; {rich_note}; "
                                 f"REAL PARSED MDL ONLY; using full row matrix scale, not WRLD cell-scale strip"
@@ -4924,7 +6383,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                                 ))
                             LVZ.dbg(
                                 f"[geometry-recovery] NOT importing bad non-LIGHTS sparse building fragment "
-                                f"RES={res_id} IPL={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
+                                f"RES={res_id} ROWLINK={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
                                 f"geom={int(_sv)}v/{int(_sf)}f/r{float(_sr):.3f} "
                                 f"parent={submodel_info.get('parent_res_id', -1)} group={submodel_info.get('group_index', -1)} "
                                 f"range_start={submodel_info.get('range_start', -1)} rawScale={float(_raw_sx):.3f},{float(_raw_sy):.3f},{float(_raw_sz):.3f}; "
@@ -4937,6 +6396,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                                 chosen_source="WRLD_SUBMODEL_GROUP",
                                 extra_note=f"geom={int(_sv)}v/{int(_sf)}f parent={submodel_info.get('parent_res_id', -1)} group={submodel_info.get('group_index', -1)} range_start={submodel_info.get('range_start', -1)}; {rich_note}",
                             )
+                            blds_report_mark_status(placement_report_row, "MISSING", "rejected bad sparse WRLD fragment; no proven exact full model")
                             continue
                 except Exception as exc:
                     try:
@@ -4965,7 +6425,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                         _sv, _sf, _sr = object_geometry_counts_radius(base_obj)
                         LVZ.dbg(
                             f"[geometry-recovery] importing sparse WRLD submodel fragment "
-                            f"RES={res_id} IPL={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
+                            f"RES={res_id} ROWLINK={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
                             f"geom={int(_sv)}v/{int(_sf)}f/r{float(_sr):.3f} "
                             f"parent={submodel_info.get('parent_res_id', -1)} group={submodel_info.get('group_index', -1)} "
                             f"range_start={submodel_info.get('range_start', -1)} source={ipl_model_source_for_row}"
@@ -5118,6 +6578,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             missing_rows_full.append(missing_tuple)
             if len(missing_rows) < 128:
                 missing_rows.append(missing_tuple)
+            blds_report_mark_status(placement_report_row, "MISSING", "no proven exact RES geometry candidate")
             continue
 
         base_id = id(base_obj)
@@ -5141,6 +6602,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                     skip_reason = "duplicate_visible_transform"
                 if skip_reason:
                     skipped_duplicate_visible_rows.append((sector_index, row_index, pass_name, ipl_id, res_id, str(getattr(base_obj, "name", "")), skip_reason, float(matrix[0][3]), float(matrix[1][3]), float(matrix[2][3]), str(ipl_model_source_for_row or "")))
+                    blds_report_mark_status(placement_report_row, "SKIPPED_DUPLICATE", skip_reason)
                     continue
                 visible_placement_dedupe_seen.add(dedupe_key)
             except Exception:
@@ -5238,7 +6700,8 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             try:
                 link_object(obj)
             except Exception:
-                bpy.context.collection.objects.link(obj)
+                fallback_collection = globals().get("_ACTIVE_IMPORT_LINKED_COLLECTION") or globals().get("_ACTIVE_IMPORT_OBJECTS_COLLECTION") or bpy.context.collection
+                fallback_collection.objects.link(obj)
             linked += 1
 
         try:
@@ -5279,7 +6742,31 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             and matrix_has_wrld_cell_scale(matrix)
         )
         matrix_mode_for_row = "row_matrix"
-        if wrld_submodel_strip_cell_scale_for_this_row:
+        if (
+            PRESERVE_EXACT_WRLD_SUBMODEL_ROW_MATRIX
+            and base_is_wrld_submodel_group
+            and not keep_world_baked_submodel_matrix
+            and not used_force_missing_img_mdl
+            and not used_final_missing_ipl_neighbor
+        ):
+            adjusted_matrix = matrix.copy()
+            if wrld_submodel_origin_rebased_for_row:
+                try:
+                    adjusted_matrix = matrix @ Matrix.Translation(Vector((
+                        float(wrld_submodel_origin_off_x),
+                        float(wrld_submodel_origin_off_y),
+                        float(wrld_submodel_origin_off_z),
+                    )))
+                except Exception:
+                    adjusted_matrix = matrix.copy()
+            obj.matrix_world = adjusted_matrix
+            sx, sy, sz = matrix_basis_column_scales(matrix)
+            obj["blds_wrld_submodel_cell_scale_stripped"] = False
+            obj["blds_wrld_submodel_original_matrix_scale"] = f"{sx:.6f},{sy:.6f},{sz:.6f}"
+            obj["blds_wrld_submodel_full_matrix_preserved"] = True
+            obj["blds_wrld_submodel_rebase_compensated"] = bool(wrld_submodel_origin_rebased_for_row)
+            matrix_mode_for_row = "wrld_submodel_row_matrix_full_rebase_compensated"
+        elif wrld_submodel_strip_cell_scale_for_this_row:
             sx, sy, sz = matrix_basis_column_scales(matrix)
             obj.matrix_world = matrix_with_wrld_cell_scale_stripped(matrix)
             obj["blds_wrld_submodel_cell_scale_stripped"] = True
@@ -5292,8 +6779,8 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             # Do not strip scale from forced/final missing MDLs.  These rows need
             # their placement-row scale, and V12 could undo that scale here,
             # leaving the visible Beach*_missingmdl copies tiny.  Recovered WRLD
-            # submodel rows are handled above, before this forced-name branch,
-            # because their 32/64/128 values are cell scale, not object scale.
+            # submodel rows are handled above, before this forced-name branch;
+            # their full normalized-model matrix is preserved and rebase-compensated.
             strip_ipl_cell_scale_for_this_row = bool(
                 IPL_FALLBACK_STRIP_CELL_SCALE_ENABLED
                 and used_ipl_model_fallback
@@ -5354,6 +6841,48 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             obj["blds_matrix_mode"] = str(matrix_mode_for_row)
         except Exception:
             pass
+
+        stamp_bleeds_entity_type(obj, "OBJECT")
+        try:
+            obj["blds_res_id"] = int(res_id)
+            obj["blds_row_link_id"] = int(ipl_id)
+            obj["blds_row_link_raw"] = int(detail[3])
+            obj["blds_ipl_id"] = int(ipl_id)  # compatibility alias only
+            obj["blds_aera_secondary_id"] = int(game_model_id)
+            obj["blds_aera_secondary_name"] = str(game_model_name)
+            # Compatibility alias for older scenes/reports.  Entity-owned 2DFX
+            # stamps overwrite this only after an actual CEntity match.
+            obj["blds_game_model_id"] = int(game_model_id)
+            obj["blds_game_model_name"] = str(game_model_name)
+            obj["blds_identity_source"] = str(identity.get("source", ""))
+            obj["blds_identity_area_index"] = int(identity.get("area_index", -1))
+            obj["blds_identity_area_resource_index"] = int(identity.get("area_resource_index", -1))
+            obj["blds_identity_area_resource_row_off"] = int(identity.get("area_resource_row_off", -1))
+            obj["blds_identity_area_payload_off"] = int(identity.get("area_resource_raw_off", -1))
+        except Exception:
+            pass
+
+        try:
+            globals().setdefault("_CURRENT_PLACED_OBJECT_RECORDS", []).append({
+                "object": obj,
+                "res_id": int(res_id),
+                "row_link_id": int(ipl_id),
+                "game_model_id": int(game_model_id),
+                "sector_index": int(sector_index),
+                "row_index": int(row_index),
+                "pass_name": str(pass_name),
+                "matrix_world": obj.matrix_world.copy(),
+                "world_x": float(obj.matrix_world[0][3]),
+                "world_y": float(obj.matrix_world[1][3]),
+                "world_z": float(obj.matrix_world[2][3]),
+            })
+        except Exception:
+            pass
+
+        # Do not create or stamp 2DFX from streamed placement rows.  The
+        # authoritative effect instances are imported after geometry placement
+        # from GAME.DTZ BUILDING/TREADABLE/DUMMY CEntity pools.  AERA secondary
+        # values remain placement metadata only.
         try:
             matrix_decision_rows.append({
                 "object_name": str(getattr(obj, "name", "")),
@@ -5377,55 +6906,56 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             })
         except Exception:
             pass
-        try:
-            raw_sx, raw_sy, raw_sz = matrix_basis_column_scales(matrix)
-            app_sx, app_sy, app_sz = matrix_basis_column_scales(obj.matrix_world)
-            lcx, lcy, lcz, lr = object_bbox_center_radius(obj)
-            mw = obj.matrix_world
-            wcx = float(mw[0][0]) * float(lcx) + float(mw[0][1]) * float(lcy) + float(mw[0][2]) * float(lcz) + float(mw[0][3])
-            wcy = float(mw[1][0]) * float(lcx) + float(mw[1][1]) * float(lcy) + float(mw[1][2]) * float(lcz) + float(mw[1][3])
-            wcz = float(mw[2][0]) * float(lcx) + float(mw[2][1]) * float(lcy) + float(mw[2][2]) * float(lcz) + float(mw[2][3])
-            tx = float(matrix[0][3])
-            ty = float(matrix[1][3])
-            tz = float(matrix[2][3])
-            dx = wcx - tx
-            dy = wcy - ty
-            dz = wcz - tz
-            dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-            if (
-                int(res_id) == 1881
-                or bool(base_is_wrld_submodel_group)
-                or str(matrix_mode_for_row).startswith("wrld_submodel")
-                or max(abs(float(raw_sx)), abs(float(raw_sy)), abs(float(raw_sz))) >= float(IPL_FALLBACK_CELL_SCALE_MIN)
-            ):
-                transform_proof_rows.append({
-                    "object_name": str(getattr(obj, "name", "")),
-                    "res_id": int(res_id),
-                    "ipl_id": int(ipl_id),
-                    "sector": int(sector_index),
-                    "row": int(row_index),
-                    "pass": str(pass_name),
-                    "base_kind": str(base_kind_for_matrix),
-                    "fallback_source": str(ipl_model_source_for_row or ""),
-                    "matrix_mode": str(matrix_mode_for_row),
-                    "raw_sx": float(raw_sx), "raw_sy": float(raw_sy), "raw_sz": float(raw_sz),
-                    "applied_sx": float(app_sx), "applied_sy": float(app_sy), "applied_sz": float(app_sz),
-                    "row_tx": tx, "row_ty": ty, "row_tz": tz,
-                    "applied_tx": float(obj.matrix_world[0][3]), "applied_ty": float(obj.matrix_world[1][3]), "applied_tz": float(obj.matrix_world[2][3]),
-                    "local_center_x": float(lcx), "local_center_y": float(lcy), "local_center_z": float(lcz), "local_radius": float(lr),
-                    "world_center_x": float(wcx), "world_center_y": float(wcy), "world_center_z": float(wcz),
-                    "world_center_to_row_distance": float(dist),
-                    "wrld_submodel_cell_scale_stripped": bool(obj.get("blds_wrld_submodel_cell_scale_stripped", False)),
-                    "wrld_submodel_original_matrix_scale": str(obj.get("blds_wrld_submodel_original_matrix_scale", "")),
-                    "wrld_submodel_origin_rebased": bool(obj.get("blds_wrld_submodel_origin_rebased", False)),
-                    "wrld_submodel_origin_rebased_for_row": bool(wrld_submodel_origin_rebased_for_row),
-                    "wrld_submodel_origin_offset_x": float(wrld_submodel_origin_off_x),
-                    "wrld_submodel_origin_offset_y": float(wrld_submodel_origin_off_y),
-                    "wrld_submodel_origin_offset_z": float(wrld_submodel_origin_off_z),
-                    "wrld_submodel_origin_radius": float(wrld_submodel_origin_radius),
-                })
-        except Exception:
-            pass
+        if DIAGNOSTIC_CSV_LOGS_ENABLED:
+            try:
+                raw_sx, raw_sy, raw_sz = matrix_basis_column_scales(matrix)
+                app_sx, app_sy, app_sz = matrix_basis_column_scales(obj.matrix_world)
+                lcx, lcy, lcz, lr = object_bbox_center_radius(obj)
+                mw = obj.matrix_world
+                wcx = float(mw[0][0]) * float(lcx) + float(mw[0][1]) * float(lcy) + float(mw[0][2]) * float(lcz) + float(mw[0][3])
+                wcy = float(mw[1][0]) * float(lcx) + float(mw[1][1]) * float(lcy) + float(mw[1][2]) * float(lcz) + float(mw[1][3])
+                wcz = float(mw[2][0]) * float(lcx) + float(mw[2][1]) * float(lcy) + float(mw[2][2]) * float(lcz) + float(mw[2][3])
+                tx = float(matrix[0][3])
+                ty = float(matrix[1][3])
+                tz = float(matrix[2][3])
+                dx = wcx - tx
+                dy = wcy - ty
+                dz = wcz - tz
+                dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+                if (
+                    int(res_id) == 1881
+                    or bool(base_is_wrld_submodel_group)
+                    or str(matrix_mode_for_row).startswith("wrld_submodel")
+                    or max(abs(float(raw_sx)), abs(float(raw_sy)), abs(float(raw_sz))) >= float(IPL_FALLBACK_CELL_SCALE_MIN)
+                ):
+                    transform_proof_rows.append({
+                        "object_name": str(getattr(obj, "name", "")),
+                        "res_id": int(res_id),
+                        "ipl_id": int(ipl_id),
+                        "sector": int(sector_index),
+                        "row": int(row_index),
+                        "pass": str(pass_name),
+                        "base_kind": str(base_kind_for_matrix),
+                        "fallback_source": str(ipl_model_source_for_row or ""),
+                        "matrix_mode": str(matrix_mode_for_row),
+                        "raw_sx": float(raw_sx), "raw_sy": float(raw_sy), "raw_sz": float(raw_sz),
+                        "applied_sx": float(app_sx), "applied_sy": float(app_sy), "applied_sz": float(app_sz),
+                        "row_tx": tx, "row_ty": ty, "row_tz": tz,
+                        "applied_tx": float(obj.matrix_world[0][3]), "applied_ty": float(obj.matrix_world[1][3]), "applied_tz": float(obj.matrix_world[2][3]),
+                        "local_center_x": float(lcx), "local_center_y": float(lcy), "local_center_z": float(lcz), "local_radius": float(lr),
+                        "world_center_x": float(wcx), "world_center_y": float(wcy), "world_center_z": float(wcz),
+                        "world_center_to_row_distance": float(dist),
+                        "wrld_submodel_cell_scale_stripped": bool(obj.get("blds_wrld_submodel_cell_scale_stripped", False)),
+                        "wrld_submodel_original_matrix_scale": str(obj.get("blds_wrld_submodel_original_matrix_scale", "")),
+                        "wrld_submodel_origin_rebased": bool(obj.get("blds_wrld_submodel_origin_rebased", False)),
+                        "wrld_submodel_origin_rebased_for_row": bool(wrld_submodel_origin_rebased_for_row),
+                        "wrld_submodel_origin_offset_x": float(wrld_submodel_origin_off_x),
+                        "wrld_submodel_origin_offset_y": float(wrld_submodel_origin_off_y),
+                        "wrld_submodel_origin_offset_z": float(wrld_submodel_origin_off_z),
+                        "wrld_submodel_origin_radius": float(wrld_submodel_origin_radius),
+                    })
+            except Exception:
+                pass
         try:
             raw_sx, raw_sy, raw_sz = matrix_basis_column_scales(matrix)
             should_log_object_transform = bool(
@@ -5490,7 +7020,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                     })
                 if OBJECT_MATRIX_TRANSFORM_LOG_TO_BLENDER_LOG and object_transform_log_lines < int(OBJECT_MATRIX_TRANSFORM_LOG_BLENDER_MAX_LINES):
                     LVZ.dbg(
-                        f"[matrix-log] object={getattr(obj, 'name', '')} RES={int(res_id)} IPL={int(ipl_id)} "
+                        f"[matrix-log] object={getattr(obj, 'name', '')} RES={int(res_id)} ROWLINK={int(ipl_id)} "
                         f"sector={int(sector_index)} row={int(row_index)} pass={pass_name} mode={matrix_mode_for_row} "
                         f"base={base_kind_for_matrix} src={int(source_model_id_for_row)} fallback={ipl_model_source_for_row or ''} "
                         f"rawScale={float(raw_sx):.6f},{float(raw_sy):.6f},{float(raw_sz):.6f} "
@@ -5547,7 +7077,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                     except Exception:
                         group_for_log = -1
                     LVZ.dbg(
-                        f"[geometry-log] object={getattr(obj, 'name', '')} RES={int(res_id)} IPL={int(ipl_id)} "
+                        f"[geometry-log] object={getattr(obj, 'name', '')} RES={int(res_id)} ROWLINK={int(ipl_id)} "
                         f"sector={int(sector_index)} row={int(row_index)} pass={pass_name} "
                         f"base={base_kind_for_matrix} baseRes={base_res_for_log} parentRes={parent_res_for_log} group={group_for_log} "
                         f"source={ipl_model_source_for_row or ''} mode={matrix_mode_for_row} "
@@ -5623,6 +7153,10 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                 "obj": obj,
                 "source": str(ipl_model_source_for_row or ""),
             })
+        blds_report_mark_placed(
+            placement_report_row, obj, base_obj, int(source_model_id_for_row),
+            str(ipl_model_source_for_row or "exact-res"), str(matrix_mode_for_row), int(instance_index),
+        )
         object_use_count[base_id] = instance_index + 1
         # Do not preserve raw parser bases.  The visible placed object is the
         # copy linked above, so the base belongs in the cleanup list.
@@ -5636,7 +7170,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         if instance_index == 0:
             if apply_log_count < 128:
                 LVZ.dbg(
-                    f"[apply] RES={res_id} sector={sector_index} pass={pass_name} IPL={ipl_id} "
+                    f"[apply] RES={res_id} sector={sector_index} pass={pass_name} ROWLINK={ipl_id} "
                     f"→ object '{obj.name}' matrix_world set."
                 )
                 apply_log_count += 1
@@ -5663,34 +7197,69 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         for reveal_obj in placed_objects_to_reveal:
             set_object_view_hidden(reveal_obj, False)
     if hidden_duplicate_collection is not None:
-        if hidden_duplicate_collection_was_hidden is None:
-            set_collection_view_hidden(hidden_duplicate_collection, False)
-        else:
-            set_collection_view_hidden(hidden_duplicate_collection, hidden_duplicate_collection_was_hidden)
+        set_collection_view_hidden(hidden_duplicate_collection, False)
     if apply_log_suppressed:
         LVZ.dbg(f"[apply] matrix_world log lines suppressed: {apply_log_suppressed}")
-    LVZ.dbg(f"[apply] global IPL/model best-candidate replacements: sector={ipl_overlay_choice_replacements} area={ipl_extra_choice_replacements}")
+    LVZ.dbg(f"[apply] legacy ROWLINK best-candidate replacements (disabled): sector={ipl_overlay_choice_replacements} area={ipl_extra_choice_replacements}")
     LVZ.dbg(f"[resolver] audit lines printed: {resolver_audit_lines} / max={int(RESOLVER_AUDIT_MAX_ROWS)}")
+    if placement_source_counts:
+        source_labels = (
+            ("exact_sector_model", "matching sector"),
+            ("exact_nested_row_model", "linked child table"),
+            ("exact_row_model", "shared row table"),
+            ("lvz_model", "Master LVZ"),
+            ("official_aera_model", "master AERA exact resource"),
+            ("area_model", "linked AREA/Triggered model data"),
+            ("global_sector_model", "other static map blocks"),
+            ("img_continuation_model", "remaining raw IMG data"),
+        )
+        source_text = ", ".join(
+            f"{label}={int(placement_source_counts.get(key, 0))}"
+            for key, label in source_labels
+            if placement_source_counts.get(key, 0)
+        )
+        if source_text:
+            LVZ.dbg(f"Placement model sources: {source_text}")
+    if placement_variant_choices:
+        LVZ.dbg(
+            f"Exact model variants selected using placement bounds: {placement_variant_choices} "
+            f"(highest accepted match score {placement_variant_max_score:.3f})"
+        )
+    if placement_variant_rejections:
+        LVZ.dbg(
+            f"Exact model candidates rejected because their size or position did not match the placement row: "
+            f"{placement_variant_rejections}"
+        )
     LVZ.dbg(f"[apply] skipped missing mesh/resource rows: {skipped_missing}")
+    beach1887_missing_count = sum(
+        1 for row in missing_rows_full
+        if len(row) >= 4 and int(row[3]) == 1887
+    )
+    if beach1887_missing_count:
+        LVZ.dbg(
+            f"[exact-res] Beach1887 remains unresolved in {int(beach1887_missing_count)} placement rows: "
+            "no fitting exact RES=1887 AERA/WRLD candidate reached placement. "
+            "Cross-ID ROWLINK geometry remains disabled; inspect the preceding [aera-placement] lines."
+        )
     LVZ.dbg(f"[apply] reused nested-child resource fallback rows: {fallback_nested}")
-    LVZ.dbg(f"[apply] reused IPL/model-id fallback rows (disabled in V20): {fallback_ipl} (rejected={len(ipl_rejected_rows)})")
-    LVZ.dbg(f"[apply] IPL/model fallback cell-scale strips: {ipl_cell_scale_fixed}")
+    LVZ.dbg(f"[apply] legacy ROWLINK-as-model fallback rows (must remain zero): {fallback_ipl} (rejected={len(ipl_rejected_rows)})")
+    LVZ.dbg(f"[apply] legacy ROWLINK fallback cell-scale strips: {ipl_cell_scale_fixed}")
     for sector_index, row_index, pass_name, ipl_id, res_id, model_source, sx, sy, sz in ipl_cell_scale_rows:
         LVZ.dbg(
             f"[apply] IPL-CELL-SCALE-STRIP sector={sector_index} row={row_index} pass={pass_name} "
             f"IPL={ipl_id} RES={res_id} via {model_source} old_scale={sx:.3f},{sy:.3f},{sz:.3f}"
         )
     LVZ.dbg(f"[apply] reused aggregate-origin IPL group-piece fallback rows: {fallback_aggregate}")
-    LVZ.dbg(f"[apply] skipped LIGHTS-pass IPL mesh rows: {len(skipped_lights_pass_ipl_rows)}")
     if skipped_lights_pass_ipl_rows:
+        LVZ.dbg(f"[apply] skipped LIGHTS-pass IPL mesh rows: {len(skipped_lights_pass_ipl_rows)}")
         for sector_index, row_index, ipl_id, res_id, pass_name, cont, rel_off in skipped_lights_pass_ipl_rows[:96]:
-            LVZ.dbg(f"  LIGHTS-SKIP sector={sector_index} row={row_index} IPL={ipl_id} RES={res_id} cont=0x{int(cont):08X} rel=0x{int(rel_off):08X}")
+            LVZ.dbg(f"  LIGHTS-SKIP sector={sector_index} row={row_index} ROWLINK={ipl_id} RES={res_id} cont=0x{int(cont):08X} rel=0x{int(rel_off):08X}")
     _real_ipl_for_missing_res_rows_safe = locals().get("real_ipl_for_missing_res_rows", [])
     if _real_ipl_for_missing_res_rows_safe:
-        LVZ.dbg(f"[geometry-recovery] real IPL/model recoveries for missing RES rows: {len(_real_ipl_for_missing_res_rows_safe)}")
+        LVZ.dbg(f"[geometry-recovery] legacy ROWLINK-as-model recoveries for missing RES rows: {len(_real_ipl_for_missing_res_rows_safe)}")
         for _r in _real_ipl_for_missing_res_rows_safe[:160]:
             LVZ.dbg(
-                f"[geometry-recovery] real-ipl-missing-res sector={_r[0]} row={_r[1]} pass={_r[2]} IPL={_r[3]} RES={_r[4]} "
+                f"[geometry-recovery] real-ipl-missing-res sector={_r[0]} row={_r[1]} pass={_r[2]} ROWLINK={_r[3]} RES={_r[4]} "
                 f"source={_r[5]} object={_r[6]} geom={_r[7]}v/{_r[8]}f/r{_r[9]:.3f} note={_r[10]}"
             )
     _rich_ipl_over_sparse_rows_safe = locals().get("rich_ipl_over_sparse_rows", [])
@@ -5698,14 +7267,14 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         LVZ.dbg(f"[geometry-recovery] rich internal IPL-over-sparse recoveries: {len(_rich_ipl_over_sparse_rows_safe)}")
         for _r in _rich_ipl_over_sparse_rows_safe[:128]:
             LVZ.dbg(
-                f"[geometry-recovery] rich-over-sparse sector={_r[0]} row={_r[1]} pass={_r[2]} IPL={_r[3]} RES={_r[4]} "
+                f"[geometry-recovery] rich-over-sparse sector={_r[0]} row={_r[1]} pass={_r[2]} ROWLINK={_r[3]} RES={_r[4]} "
                 f"source={_r[5]} object={_r[6]} sparse={_r[8]}v/{_r[9]}f note={_r[7]}"
             )
     if bad_nonlight_sparse_building_rows:
         LVZ.dbg(f"[geometry-recovery] bad non-LIGHTS sparse building fragments suppressed: {len(bad_nonlight_sparse_building_rows)}")
         for _r in bad_nonlight_sparse_building_rows[:128]:
             LVZ.dbg(
-                f"[geometry-recovery] suppressed-fragment sector={_r[0]} row={_r[1]} pass={_r[2]} IPL={_r[3]} RES={_r[4]} "
+                f"[geometry-recovery] suppressed-fragment sector={_r[0]} row={_r[1]} pass={_r[2]} ROWLINK={_r[3]} RES={_r[4]} "
                 f"parent={_r[5]} group={_r[6]} range_start={_r[7]} geom={_r[8]}v/{_r[9]}f/r{_r[10]:.3f} "
                 f"rawScale={_r[11]:.3f},{_r[12]:.3f},{_r[13]:.3f}"
             )
@@ -5720,64 +7289,64 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
         LVZ.dbg("[apply] first WRLD submodel aggregate group recoveries:")
         for sector_index, row_index, pass_name, ipl_id, res_id, parent_res, group_index, range_start, obj_name in wrld_submodel_group_rows[:96]:
             LVZ.dbg(
-                f"  SUBMODEL RES={res_id} IPL={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
+                f"  SUBMODEL RES={res_id} ROWLINK={ipl_id} sector={sector_index} row={row_index} pass={pass_name} "
                 f"-> parent RES={parent_res} group={group_index} range_start={range_start} object={obj_name}"
             )
     LVZ.dbg(f"[apply] reused row-shared resource fallback rows: {fallback_row}")
     LVZ.dbg(f"[apply] reused AREA/direct resource fallback rows: {fallback_extra}")
     LVZ.dbg(f"[apply] reused same-resource overlay fallback rows: {fallback_overlay}")
     LVZ.dbg(f"[apply] reused neighboring resource alias fallback rows: {fallback_neighbor}")
-    LVZ.dbg(f"[apply] exact missing IMG MDL IPL/model rows imported (disabled in V20): {fallback_force_missing_img_mdl}")
-    LVZ.dbg(f"[apply] final missing nearest IPL/model clone rows imported (disabled in exact-only mode): {fallback_final_missing_ipl_neighbor}")
+    LVZ.dbg(f"[apply] legacy ROWLINK-as-model rows imported (must remain zero): {fallback_force_missing_img_mdl}")
+    LVZ.dbg(f"[apply] final missing nearest legacy ROWLINK clone rows (must remain zero): {fallback_final_missing_ipl_neighbor}")
     if forced_missing_img_mdl_rows:
         LVZ.dbg("[apply] first exact missing IMG MDL imports:")
         for sector_index, row_index, pass_name, ipl_id, res_id, forced_source, obj_name in forced_missing_img_mdl_rows:
             LVZ.dbg(
-                f"  EXACT MISSING MDL {res_id} IMPORTED via IPL/model={ipl_id} source={forced_source} "
+                f"  EXACT MISSING MDL {res_id} IMPORTED via legacy ROWLINK={ipl_id} source={forced_source} "
                 f"sector={sector_index} row={row_index} pass={pass_name} object={obj_name}"
             )
     if final_missing_ipl_neighbor_rows:
-        LVZ.dbg("[apply] first final-missing nearest IPL/model clone imports:")
+        LVZ.dbg("[apply] first final-missing nearest legacy ROWLINK clone imports:")
         for sector_index, row_index, pass_name, ipl_id, res_id, source_model_id, source, obj_name in final_missing_ipl_neighbor_rows[:64]:
             LVZ.dbg(
-                f"  FINAL MISSING MDL {res_id} IMPORTED via nearest IPL/model={source_model_id} "
-                f"requested IPL={ipl_id} source={source} sector={sector_index} row={row_index} pass={pass_name} object={obj_name}"
+                f"  FINAL MISSING MDL {res_id} IMPORTED via nearest legacy ROWLINK={source_model_id} "
+                f"requested ROWLINK={ipl_id} source={source} sector={sector_index} row={row_index} pass={pass_name} object={obj_name}"
             )
     if imported_missing_mdl_rows:
         try:
             previous_imported_count = sum(1 for row in imported_missing_mdl_rows if bool(row.get("was_missing_in_previous_import", False)))
             nearby_imported_count = sum(1 for row in imported_missing_mdl_rows if bool(row.get("nearby_ipl_neighbor", False)))
             LVZ.dbg(f"[compare] previous missing rows imported this run: {previous_imported_count}")
-            LVZ.dbg(f"[compare] final missing nearby IPL/model rows imported this run: {nearby_imported_count}")
+            LVZ.dbg(f"[compare] legacy nearby ROWLINK/model rows imported this run: {nearby_imported_count}")
         except Exception:
             pass
         LVZ.dbg(f"[apply] imported missing MDL report rows: {len(imported_missing_mdl_rows)}")
         for report_row in imported_missing_mdl_rows[:64]:
             LVZ.dbg(
                 f"  MISSING MDL {report_row['requested_res_id']} IMPORTED -> "
-                f"{report_row['object_name']} via {report_row['fallback_source']} IPL={report_row['ipl_id']}"
+                f"{report_row['object_name']} via {report_row['fallback_source']} ROWLINK={report_row['ipl_id']}"
             )
     if ipl_fallback_rows:
-        LVZ.dbg("[apply] first IPL/model-id fallback rows:")
+        LVZ.dbg("[apply] first legacy ROWLINK-as-model fallback rows:")
         for row in ipl_fallback_rows:
             sector_index, row_index, pass_name, ipl_id, res_id, model_source = row[:6]
             fit_note = row[6] if len(row) > 6 else ""
             LVZ.dbg(
                 f"  sector={sector_index} row={row_index} pass={pass_name} "
-                f"RES={res_id} -> IPL/model={ipl_id} via {model_source}; {fit_note}"
+                f"RES={res_id} -> legacy ROWLINK={ipl_id} via {model_source}; {fit_note}"
             )
     if ipl_rejected_rows:
-        LVZ.dbg("[apply] first rejected IPL/model-id fallback rows:")
+        LVZ.dbg("[apply] first rejected legacy ROWLINK-as-model fallback rows:")
         for sector_index, row_index, pass_name, ipl_id, res_id, model_source, fit_note in ipl_rejected_rows:
             LVZ.dbg(
                 f"  REJECT sector={sector_index} row={row_index} pass={pass_name} "
-                f"RES={res_id} -> IPL/model={ipl_id} via {model_source}; {fit_note}"
+                f"RES={res_id} -> legacy ROWLINK={ipl_id} via {model_source}; {fit_note}"
             )
     if aggregate_piece_rows:
         LVZ.dbg("[apply] first aggregate group-piece fallback rows:")
         for sector_index, row_index, ipl_id, res_id, pass_name, parent_res, group_index, dist, agg_radius in aggregate_piece_rows:
             LVZ.dbg(
-                f"  sector={sector_index} row={row_index} pass={pass_name} IPL={ipl_id} "
+                f"  sector={sector_index} row={row_index} pass={pass_name} ROWLINK={ipl_id} "
                 f"RES={res_id} -> parent RES={parent_res} group={group_index} dist={dist:.3f} group_radius={agg_radius:.3f}"
             )
     if neighbor_alias_rows:
@@ -5790,19 +7359,19 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                 note = ""
             if note == "accepted":
                 LVZ.dbg(
-                    f"  sector={sector_index} row={row_index} pass={pass_name} IPL={ipl_id} "
+                    f"  sector={sector_index} row={row_index} pass={pass_name} ROWLINK={ipl_id} "
                     f"RES={res_id} -> RES={alias_res_id} via {alias_source} delta={alias_delta}"
                 )
             else:
                 LVZ.dbg(
-                    f"  REJECT sector={sector_index} row={row_index} pass={pass_name} IPL={ipl_id} "
+                    f"  REJECT sector={sector_index} row={row_index} pass={pass_name} ROWLINK={ipl_id} "
                     f"RES={res_id} -> RES={alias_res_id} via {alias_source} delta={alias_delta}; {note}"
                 )
     if missing_rows:
         LVZ.dbg("[apply] first missing placement rows:")
         for sector_index, row_index, ipl_id, res_id, pass_name, cont, rel_off in missing_rows:
             LVZ.dbg(
-                f"  sector={sector_index} row={row_index} pass={pass_name} IPL={ipl_id} RES={res_id} "
+                f"  sector={sector_index} row={row_index} pass={pass_name} ROWLINK={ipl_id} RES={res_id} "
                 f"IMG+0x{cont:08X}+0x{rel_off:08X}"
             )
         try:
@@ -5981,7 +7550,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                     if int(r.get("res_id", -1)) != 1881 and shown >= 8:
                         continue
                     LVZ.dbg(
-                        f"[matrix-log] object={r.get('object_name','')} RES={r.get('res_id')} IPL={r.get('ipl_id')} "
+                        f"[matrix-log] object={r.get('object_name','')} RES={r.get('res_id')} ROWLINK={r.get('ipl_id')} "
                         f"mode={r.get('matrix_mode','')} rawScale={float(r.get('raw_sx',0.0)):.6f},{float(r.get('raw_sy',0.0)):.6f},{float(r.get('raw_sz',0.0)):.6f} "
                         f"appliedScale={float(r.get('applied_sx',0.0)):.6f},{float(r.get('applied_sy',0.0)):.6f},{float(r.get('applied_sz',0.0)):.6f} "
                         f"rowT={float(r.get('row_tx',0.0)):.6f},{float(r.get('row_ty',0.0)):.6f},{float(r.get('row_tz',0.0)):.6f} "
@@ -6112,6 +7681,7 @@ def find_details_missing_primary_resources(built_by_res: Dict[int, bpy.types.Obj
 
 
 
+
 def blds_safe_u32(data: bytes, off: int, default: int = 0) -> int:
     try:
         if off < 0 or off + 4 > len(data):
@@ -6121,152 +7691,652 @@ def blds_safe_u32(data: bytes, off: int, default: int = 0) -> int:
         return default
 
 
-def blds_safe_f32(data: bytes, off: int, default: float = 0.0) -> float:
+def blds_safe_i16(data: bytes, off: int, default: int = -1) -> int:
     try:
-        if off < 0 or off + 4 > len(data):
+        if off < 0 or off + 2 > len(data):
             return default
-        value = struct.unpack_from("<f", data, off)[0]
-        if value != value or abs(float(value)) > 100000000.0:
-            return default
-        return float(value)
+        return struct.unpack_from("<h", data, off)[0]
     except Exception:
         return default
 
 
-def blds_2dfx_entry_probe(data: bytes, off: int) -> Dict[str, object]:
-    raw = data[off:off + 48]
-    x = blds_safe_f32(data, off + 0)
-    y = blds_safe_f32(data, off + 4)
-    z = blds_safe_f32(data, off + 8)
-    effect_at_0 = blds_safe_u32(data, off + 0)
-    effect_at_12 = blds_safe_u32(data, off + 12)
-    plausible_pos = all(abs(v) < 65536.0 for v in (x, y, z))
-    plausible_effect = (0 <= int(effect_at_0) <= 64) or (0 <= int(effect_at_12) <= 64)
-    return {
-        "x": x,
-        "y": y,
-        "z": z,
-        "effect_at_0": int(effect_at_0),
-        "effect_at_12": int(effect_at_12),
-        "plausible": bool(plausible_pos or plausible_effect),
-        "hex16": raw[:16].hex(),
-    }
+BLDS_2DFX_EFFECT_TYPE_NAMES = {
+    0: "LIGHT",
+    1: "PARTICLE",
+    2: "ATTRACTOR",
+    3: "PED_BEHAVIOUR",
+}
 
 
-def blds_try_wrld_2dfx_table(data: bytes, logical_base: int, physical_base: int, logical_end: int, source_kind: str, source_name: str, source_index: int) -> Optional[Dict[str, object]]:
-    # WRLD docs give +0x328 count and +0x32C pointer relative to the WRLD file.
-    # For IMG slave data, BLeeds sector containers point at WRLD+0x20, so logical_base can be cont-0x20
-    # while physical_base remains the real byte base used for bounds checks.
-    count_off = int(logical_base) + 0x328
-    ptr_off = int(logical_base) + 0x32C
-    if count_off < 0 or ptr_off < 0 or ptr_off + 4 > len(data):
-        return None
-    count = blds_safe_u32(data, count_off)
-    ptr = blds_safe_u32(data, ptr_off)
-    result = {
-        "source_kind": source_kind,
-        "source_name": source_name,
-        "source_index": int(source_index),
-        "logical_base": int(logical_base),
-        "physical_base": int(physical_base),
-        "count_off": int(count_off),
-        "ptr_off": int(ptr_off),
-        "count": int(count),
-        "ptr": int(ptr),
-        "table_abs": -1,
-        "valid": False,
-        "reason": "",
-        "sample": [],
-    }
-    if count == 0 and ptr == 0:
-        result["reason"] = "zero"
-        return result
-    if count > 20000:
-        result["reason"] = "count_too_large"
-        return result
-    if ptr == 0:
-        result["reason"] = "null_ptr"
-        return result
-
-    table_abs = int(logical_base) + int(ptr)
-    result["table_abs"] = int(table_abs)
-    table_end = table_abs + int(count) * 48
-    bound_end = min(len(data), int(logical_end))
-    if table_abs < int(physical_base) or table_end > bound_end:
-        result["reason"] = "table_oob"
-        return result
-
-    sample = []
-    plausible = 0
-    for i in range(min(int(count), 8)):
-        probe = blds_2dfx_entry_probe(data, table_abs + i * 48)
-        sample.append(probe)
-        if probe.get("plausible"):
-            plausible += 1
-    result["sample"] = sample
-    # Do not reject just because the entry layout is not fully understood yet; this is a raw table diagnostic.
-    result["valid"] = True
-    result["reason"] = f"raw_table; plausible_sample={plausible}/{len(sample)}"
-    return result
+def blds_2dfx_effect_type_name(effect_type: int) -> str:
+    return BLDS_2DFX_EFFECT_TYPE_NAMES.get(int(effect_type), "UNKNOWN")
 
 
-def blds_collect_raw_wrld_2dfx_tables(lvz_reader: LVZ.read_lvz, img_reader: Optional[LVZ.read_img], img_bytes: Optional[bytes], sector_records: List[Dict[str, int]], extra_container_records: List[Dict[str, int]], lvz_path: str) -> List[Dict[str, object]]:
-    rows: List[Dict[str, object]] = []
-    lvz_data = lvz_reader.decomp
+def blds_resolve_dtz_offset(data: bytes, raw_offset: int, min_size: int = 1) -> int:
+    """Validate one exact file-relative GAME.DTZ pointer.
 
-    master_hit = blds_try_wrld_2dfx_table(lvz_data, 0, 0, len(lvz_data), "LVZ_MASTER", Path(lvz_path).name, 0)
-    if master_hit is not None and int(master_hit.get("count", 0)) != 0:
-        rows.append(master_hit)
+    Decompressed GTAG/GATG resource-image pointers are already file-relative
+    offsets.  Do not try neighbouring +/-0x20 interpretations: accepting a
+    shifted pointer can silently associate a different model-info/effect row.
+    """
+    raw_offset = int(raw_offset)
+    min_size = max(1, int(min_size))
+    if raw_offset < 0 or raw_offset + min_size > len(data):
+        return -1
+    return raw_offset
 
+
+def blds_decode_dtz_2dfx_entry(data: bytes, off: int, index: int, table_abs: int) -> Optional[Dict[str, object]]:
+    """Decode one 64-byte Leeds C2dEffect row from the global GAME.DTZ table."""
     try:
-        groups, _, _ = lvz_reader.parse_slave_groups_and_rescount()
+        if off < 0 or off + 0x40 > len(data):
+            return None
+        raw = bytes(data[off:off + 0x40])
+        x, y, z, pos_w = struct.unpack_from("<4f", raw, 0x00)
+        if not all(math.isfinite(float(value)) and abs(float(value)) < 1000000.0 for value in (x, y, z, pos_w)):
+            return None
+        effect_type = int(raw[0x14])
+        if effect_type < 0 or effect_type > 3:
+            return None
+        entry: Dict[str, object] = {
+            "index": int(index),
+            "global_index": int(index),
+            "entry_off": int(off),
+            "table_abs": int(table_abs),
+            "x": float(x),
+            "y": float(y),
+            "z": float(z),
+            "position_w": float(pos_w),
+            "r": int(raw[0x10]),
+            "g": int(raw[0x11]),
+            "b": int(raw[0x12]),
+            "a": int(raw[0x13]),
+            "effect_type": int(effect_type),
+            "effect_type_name": blds_2dfx_effect_type_name(effect_type),
+            "raw_hex": raw.hex(),
+            "payload_hex": raw[0x18:].hex(),
+        }
+        if effect_type == 0:
+            distance, outer_range, size, inner_range = struct.unpack_from("<4f", raw, 0x18)
+            entry.update({
+                "light_distance": float(distance),
+                "light_outer_range": float(outer_range),
+                "light_size": float(size),
+                "light_inner_range": float(inner_range),
+                "light_flash": int(raw[0x28]),
+                "light_wet": int(raw[0x29]),
+                "light_flare": int(raw[0x2A]),
+                "light_shadow_intensity": int(raw[0x2B]),
+                "light_flags": int(raw[0x2C]),
+                "light_corona_texture_ptr": int(struct.unpack_from("<I", raw, 0x30)[0]),
+                "light_shadow_texture_ptr": int(struct.unpack_from("<I", raw, 0x34)[0]),
+            })
+        elif effect_type == 1:
+            subtype = int(struct.unpack_from("<i", raw, 0x18)[0])
+            dx, dy, dz = struct.unpack_from("<3f", raw, 0x1C)
+            entry.update({
+                "particle_subtype": subtype,
+                "direction_x": float(dx),
+                "direction_y": float(dy),
+                "direction_z": float(dz),
+                "particle_scale": float(struct.unpack_from("<f", raw, 0x28)[0]),
+            })
+        elif effect_type == 2:
+            dx, dy, dz = struct.unpack_from("<3f", raw, 0x18)
+            entry.update({
+                "attractor_direction_x": float(dx),
+                "attractor_direction_y": float(dy),
+                "attractor_direction_z": float(dz),
+                "attractor_subtype": int(raw[0x24]),
+                "attractor_probability": int(raw[0x25]),
+            })
+        elif effect_type == 3:
+            dx, dy, dz = struct.unpack_from("<3f", raw, 0x18)
+            rx, ry, rz = struct.unpack_from("<3f", raw, 0x24)
+            entry.update({
+                "ped_direction_x": float(dx),
+                "ped_direction_y": float(dy),
+                "ped_direction_z": float(dz),
+                "ped_rotation_x": float(rx),
+                "ped_rotation_y": float(ry),
+                "ped_rotation_z": float(rz),
+                "ped_subtype": int(raw[0x30]),
+            })
+        return entry
     except Exception:
-        groups = []
-    for group in groups:
+        return None
+
+
+def blds_parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[int, List[Dict[str, object]]], Dict[str, object]]:
+    """Parse exact model-id to C2dEffect associations from decompressed GAME.DTZ."""
+    summary: Dict[str, object] = {
+        "status": "unparsed",
+        "ide_count": 0,
+        "effect_count": 0,
+        "models_with_effects": 0,
+        "entries_available": 0,
+        "rejected_model_refs": 0,
+        "malformed_effect_rows": 0,
+        "effect_type_counts": {0: 0, 1: 0, 2: 0, 3: 0},
+        "effects_imported": 0,
+        "instances_with_effects": 0,
+        "model_meta_by_id": {},
+    }
+    mapping: Dict[int, List[Dict[str, object]]] = {}
+    if not data or len(data) < 0x5C:
+        summary["status"] = "header_too_small"
+        return mapping, summary
+    signature = bytes(data[:4])
+    if signature not in (b"GATG", b"GTAG"):
+        summary["status"] = "bad_signature"
+        summary["signature_hex"] = signature.hex()
+        return mapping, summary
+
+    ide_count = int(blds_safe_u32(data, 0x38, 0))
+    ide_ptr_raw = int(blds_safe_u32(data, 0x3C, 0))
+    effect_count = int(blds_safe_u32(data, 0x54, 0))
+    effect_ptr_raw = int(blds_safe_u32(data, 0x58, 0))
+    summary.update({
+        "signature": signature.decode("ascii", errors="replace"),
+        "ide_count": ide_count,
+        "ide_pointer_raw": ide_ptr_raw,
+        "effect_count": effect_count,
+        "effect_pointer_raw": effect_ptr_raw,
+    })
+    if ide_count <= 0 or ide_count > 200000:
+        summary["status"] = "ide_count_out_of_range"
+        return mapping, summary
+    if effect_count < 0 or effect_count > 100000:
+        summary["status"] = "effect_count_out_of_range"
+        return mapping, summary
+
+    ide_table = blds_resolve_dtz_offset(data, ide_ptr_raw, ide_count * 4)
+    effect_table = blds_resolve_dtz_offset(data, effect_ptr_raw, max(1, effect_count * 0x40)) if effect_count else -1
+    summary["ide_table_abs"] = ide_table
+    summary["effect_table_abs"] = effect_table
+    if ide_table < 0:
+        summary["status"] = "ide_pointer_out_of_bounds"
+        return mapping, summary
+    if effect_count and effect_table < 0:
+        summary["status"] = "effect_pointer_out_of_bounds"
+        return mapping, summary
+
+    effects: List[Optional[Dict[str, object]]] = []
+    malformed = 0
+    for effect_index in range(effect_count):
+        entry = blds_decode_dtz_2dfx_entry(data, effect_table + effect_index * 0x40, effect_index, effect_table)
+        effects.append(entry)
+        if entry is None:
+            malformed += 1
+    summary["malformed_effect_rows"] = malformed
+    effect_type_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    for effect in effects:
+        if effect is None:
+            continue
+        effect_type = int(effect.get("effect_type", -1))
+        if effect_type in effect_type_counts:
+            effect_type_counts[effect_type] += 1
+    summary["effect_type_counts"] = effect_type_counts
+
+    wanted = None
+    if wanted_model_ids is not None:
+        wanted = set()
+        for value in wanted_model_ids:
+            try:
+                model_id = int(value)
+            except Exception:
+                continue
+            if 0 <= model_id < ide_count:
+                wanted.add(model_id)
+        model_ids = sorted(wanted)
+    else:
+        model_ids = range(ide_count)
+
+    rejected = 0
+    entry_total = 0
+    model_meta_by_id: Dict[int, Dict[str, object]] = {}
+    for model_id in model_ids:
+        model_ptr_raw = int(blds_safe_u32(data, ide_table + int(model_id) * 4, 0))
+        if model_ptr_raw == 0:
+            continue
+        model_info = blds_resolve_dtz_offset(data, model_ptr_raw, 0x1A)
+        if model_info < 0:
+            rejected += 1
+            continue
         try:
-            total = int(group.total)
-            addr = int(group.addr)
-            lvz_hit = blds_try_wrld_2dfx_table(lvz_data, addr, addr, min(len(lvz_data), addr + max(total, 0)), "LVZ_GROUP_HEADER", f"sg{int(group.index):03d}", int(group.index))
-            if lvz_hit is not None and int(lvz_hit.get("count", 0)) != 0:
-                rows.append(lvz_hit)
+            model_hash = int(blds_safe_u32(data, model_info + 0x08, 0))
+            model_type = int(data[model_info + 0x10])
+            num_effects = int(data[model_info + 0x11])
+            effect_index = int(blds_safe_i16(data, model_info + 0x18, -1))
+            model_meta_by_id[int(model_id)] = {
+                "model_id": int(model_id),
+                "model_hash": int(model_hash),
+                "model_hash_hex": f"0x{int(model_hash):08X}",
+                "model_pointer_raw": int(model_ptr_raw),
+                "model_info_abs": int(model_info),
+                "model_type": int(model_type),
+                "num_effects": int(num_effects),
+                "effect_index": int(effect_index),
+                "raw_0x20": bytes(data[model_info:model_info + 0x20]).hex(),
+            }
+        except Exception:
+            rejected += 1
+            continue
+        if num_effects <= 0 or effect_index < 0:
+            continue
+        if effect_index + num_effects > effect_count:
+            rejected += 1
+            continue
+        model_entries: List[Dict[str, object]] = []
+        for global_index in range(effect_index, effect_index + num_effects):
+            entry = effects[global_index] if 0 <= global_index < len(effects) else None
+            if entry is None:
+                continue
+            copied = dict(entry)
+            copied["model_id"] = int(model_id)
+            copied["model_hash"] = int(model_hash)
+            copied["model_hash_hex"] = f"0x{int(model_hash):08X}"
+            copied["model_type"] = int(model_type)
+            copied["model_info_abs"] = int(model_info)
+            copied["model_effect_index"] = int(global_index - effect_index)
+            model_entries.append(copied)
+        if model_entries:
+            mapping[int(model_id)] = model_entries
+            entry_total += len(model_entries)
+
+    summary["models_with_effects"] = len(mapping)
+    summary["entries_available"] = entry_total
+    summary["model_meta_by_id"] = model_meta_by_id
+    summary["rejected_model_refs"] = rejected
+    effect_entities, entity_pool_stats = blds_parse_game_dtz_entity_pools(data, mapping, ide_count)
+    summary["effect_entities"] = effect_entities
+    summary["entity_pool_stats"] = entity_pool_stats
+    summary["entity_instances_with_effects"] = len(effect_entities)
+    summary["entity_effect_rows"] = sum(int(entity.get("effect_count", 0)) for entity in effect_entities)
+    summary["status"] = "ok"
+    return mapping, summary
+
+
+
+def blds_parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[str, object]]], ide_count: int):
+    """Read allocated CEntity rows from ResourceImage pools.
+
+    ResourceImage owns building/treadable/dummy pools at file offsets 0x24,
+    0x28 and 0x2C after the 0x20 relocatable-image header.  CEntity.modelIndex
+    is the authoritative CBaseModelInfo index for an actual world instance.
+    """
+    pools = (("BUILDING", 0x24), ("TREADABLE", 0x28), ("DUMMY", 0x2C))
+    entities = []
+    pool_stats = {}
+    for pool_name, header_off in pools:
+        pool_ptr = int(blds_safe_u32(data, header_off, 0))
+        pool_abs = blds_resolve_dtz_offset(data, pool_ptr, 0x20)
+        stats = {"pool_pointer": pool_ptr, "size": 0, "allocated": 0, "with_effects": 0, "effect_rows": 0}
+        pool_stats[pool_name] = stats
+        if pool_abs < 0:
+            continue
+        try:
+            items_ptr, flags_ptr = struct.unpack_from("<II", data, pool_abs)
+            size = int(struct.unpack_from("<i", data, pool_abs + 0x08)[0])
+        except Exception:
+            continue
+        stats["size"] = size
+        if size < 0 or size > 200000:
+            continue
+        items_abs = blds_resolve_dtz_offset(data, int(items_ptr), max(1, size * 0x60))
+        flags_abs = blds_resolve_dtz_offset(data, int(flags_ptr), max(1, size))
+        if items_abs < 0 or flags_abs < 0:
+            continue
+        for entity_index in range(size):
+            try:
+                pool_flag = int(data[flags_abs + entity_index])
+                if pool_flag & 0x80:
+                    continue
+                stats["allocated"] += 1
+                entity_off = items_abs + entity_index * 0x60
+                model_id = int(struct.unpack_from("<h", data, entity_off + 0x56)[0])
+                model_id2 = int(struct.unpack_from("<h", data, entity_off + 0x58)[0])
+                if model_id < 0 or model_id >= int(ide_count):
+                    continue
+                entries = model_effects.get(model_id, [])
+                if not entries:
+                    continue
+                values = struct.unpack_from("<16f", data, entity_off)
+                # RslMatrix layout is right/up/at/pos with one flag dword after
+                # each XYZ vector. Ignore those W slots because they may contain
+                # flags or NaN bit patterns rather than floats.
+                right = (float(values[0]), float(values[1]), float(values[2]))
+                up = (float(values[4]), float(values[5]), float(values[6]))
+                at = (float(values[8]), float(values[9]), float(values[10]))
+                pos = (float(values[12]), float(values[13]), float(values[14]))
+                finite = all(math.isfinite(value) for value in right + up + at + pos)
+                if not finite:
+                    continue
+                stats["with_effects"] += 1
+                stats["effect_rows"] += len(entries)
+                entities.append({
+                    "pool_name": pool_name,
+                    "pool_index": int(entity_index),
+                    "pool_flag": int(pool_flag),
+                    "entity_abs": int(entity_off),
+                    "model_id": int(model_id),
+                    "model_id2": int(model_id2),
+                    "level": int(data[entity_off + 0x5A]),
+                    "area": int(data[entity_off + 0x5B]),
+                    "right": right,
+                    "up": up,
+                    "at": at,
+                    "position": pos,
+                    "effect_count": len(entries),
+                })
+            except Exception:
+                continue
+    return entities, pool_stats
+
+
+def blds_entity_matrix(entity: Dict[str, object]) -> Matrix:
+    right = entity.get("right", (1.0, 0.0, 0.0))
+    up = entity.get("up", (0.0, 1.0, 0.0))
+    at = entity.get("at", (0.0, 0.0, 1.0))
+    pos = entity.get("position", (0.0, 0.0, 0.0))
+    return Matrix((
+        (float(right[0]), float(up[0]), float(at[0]), float(pos[0])),
+        (float(right[1]), float(up[1]), float(at[1]), float(pos[1])),
+        (float(right[2]), float(up[2]), float(at[2]), float(pos[2])),
+        (0.0, 0.0, 0.0, 1.0),
+    ))
+
+
+def blds_nearest_sector_xy_for_world_position(x: float, y: float, game_hint: str = "vcs"):
+    game = str(game_hint or "vcs").lower()
+    if game == "lcs":
+        xinc, yinc, xstart, ystart = 100.0, 86.6, -2000.0, -2000.0
+    else:
+        xinc, yinc, xstart, ystart = 125.0, 108.25, -2400.0, -2000.0
+    row_guess = int(math.floor((float(y) - (ystart + yinc * 0.5)) / yinc))
+    best = None
+    for sector_y in range(row_guess - 2, row_guess + 4):
+        xbase = xstart + xinc * 0.5 - ((sector_y & 1) * xinc * 0.5)
+        col_guess = int(math.floor((float(x) - xbase) / xinc))
+        for sector_x in range(col_guess - 2, col_guess + 4):
+            cx = xbase + xinc * sector_x
+            cy = ystart + yinc * 0.5 + yinc * sector_y
+            dx = float(x) - cx
+            dy = float(y) - cy
+            distance2 = dx * dx + dy * dy
+            if best is None or distance2 < best[0]:
+                best = (distance2, int(sector_x), int(sector_y))
+    return (best[1], best[2]) if best is not None else (0, 0)
+
+
+def blds_build_placed_object_spatial_index(records, bucket_size: float = 8.0):
+    buckets = {}
+    for record in records or []:
+        try:
+            key = (int(math.floor(float(record["world_x"]) / bucket_size)), int(math.floor(float(record["world_y"]) / bucket_size)))
+            buckets.setdefault(key, []).append(record)
+        except Exception:
+            continue
+    return buckets
+
+
+def blds_find_parent_for_game_entity(entity, spatial_index, bucket_size: float = 8.0, max_distance: float = 4.0):
+    try:
+        x, y, z = entity.get("position", (0.0, 0.0, 0.0))
+        model_id = int(entity.get("model_id", -1))
+        bx = int(math.floor(float(x) / bucket_size))
+        by = int(math.floor(float(y) / bucket_size))
+    except Exception:
+        return None
+    best = None
+    for ox in (-1, 0, 1):
+        for oy in (-1, 0, 1):
+            for record in spatial_index.get((bx + ox, by + oy), []):
+                try:
+                    dx = float(record["world_x"]) - float(x)
+                    dy = float(record["world_y"]) - float(y)
+                    dz = float(record["world_z"]) - float(z)
+                    distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+                    same_model = int(record.get("game_model_id", -1)) == model_id
+                    if not same_model and distance > 0.35:
+                        continue
+                    if distance > max_distance:
+                        continue
+                    score = distance + (0.0 if same_model else 100.0)
+                    if str(record.get("pass_name", "")).upper() == "LIGHTS":
+                        score += 25.0
+                    if best is None or score < best[0]:
+                        best = (score, record)
+                except Exception:
+                    continue
+    return best[1] if best is not None else None
+
+
+def blds_import_game_entity_2dfx_helpers(collection, import_stem: str, model_effects, summary, sector_records, placed_records):
+    """Import authoritative entity-owned 2DFX for the current LVZ sector grid."""
+    if collection is None or not model_effects:
+        return 0
+    entities = list(summary.get("effect_entities", []) or [])
+    active_cells = {
+        (int(record.get("sector_x", 0)), int(record.get("sector_y", 0)))
+        for record in (sector_records or [])
+    }
+    game_hint = str((sector_records or [{}])[0].get("game_hint", "vcs")) if sector_records else "vcs"
+    spatial_index = blds_build_placed_object_spatial_index(placed_records)
+    selected = []
+    seen = set()
+    selected_by_pool = {}
+    selected_by_reason = {}
+    for entity in entities:
+        try:
+            x, y, z = entity.get("position", (0.0, 0.0, 0.0))
+            sector_xy = blds_nearest_sector_xy_for_world_position(x, y, game_hint)
+            parent_record = blds_find_parent_for_game_entity(entity, spatial_index)
+            selection_reason = "ENTITY_ORIGIN_CELL" if (not active_cells or sector_xy in active_cells) else ""
+            # A model origin may sit just outside the final concrete sector while
+            # one or more of its native 2DFX points cross into it. Test the actual
+            # transformed effect positions before rejecting the entity.
+            if active_cells and not selection_reason and parent_record is None:
+                try:
+                    entity_matrix = blds_entity_matrix(entity)
+                    model_entries = model_effects.get(int(entity.get("model_id", -1)), [])
+                    for model_entry in model_entries:
+                        local_effect = Vector((
+                            float(model_entry.get("x", 0.0)),
+                            float(model_entry.get("y", 0.0)),
+                            float(model_entry.get("z", 0.0)),
+                        ))
+                        effect_world = entity_matrix @ local_effect
+                        effect_cell = blds_nearest_sector_xy_for_world_position(effect_world.x, effect_world.y, game_hint)
+                        if effect_cell in active_cells:
+                            selection_reason = "EFFECT_POINT_CELL"
+                            break
+                except Exception:
+                    pass
+            if parent_record is not None:
+                selection_reason = "MATCHED_MAP_OBJECT"
+            if active_cells and not selection_reason:
+                continue
+            entity["selection_reason"] = str(selection_reason or "NO_ACTIVE_CELL_FILTER")
+            key = (
+                str(entity.get("pool_name", "")), int(entity.get("pool_index", -1)), int(entity.get("model_id", -1)),
+                round(float(x), 5), round(float(y), 5), round(float(z), 5),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append((entity, sector_xy, parent_record))
+            pool_name = str(entity.get("pool_name", "UNKNOWN"))
+            selected_by_pool[pool_name] = int(selected_by_pool.get(pool_name, 0)) + 1
+            reason_name = str(entity.get("selection_reason", "UNKNOWN"))
+            selected_by_reason[reason_name] = int(selected_by_reason.get(reason_name, 0)) + 1
         except Exception:
             continue
 
-    if img_reader is not None and img_bytes is not None:
-        all_records = []
-        seen = set()
-        for source, records in (("IMG_SECTOR", sector_records or []), ("IMG_EXTRA", extra_container_records or [])):
-            for record in records:
-                cont = int(record.get("cont", -1))
-                header_addr = int(record.get("header_addr", -1))
-                key = (source, cont, header_addr)
-                if key in seen:
-                    continue
-                seen.add(key)
-                all_records.append((source, record))
-        for source, record in all_records:
-            try:
-                cont = int(record.get("cont", -1))
-                file_size = int(record.get("file_size", 0))
-                if cont <= 0 or cont >= len(img_bytes) or file_size <= 0:
-                    continue
-                logical_base = cont - 0x20
-                physical_base = cont
-                logical_end = min(len(img_bytes), logical_base + file_size)
-                index = int(record.get("sector_index", -1))
-                name = f"sector={index} xy={int(record.get('sector_x', 0))},{int(record.get('sector_y', 0))} cont=0x{cont:08X}"
-                hit = blds_try_wrld_2dfx_table(img_bytes, logical_base, physical_base, logical_end, source, name, index)
-                if hit is not None and int(hit.get("count", 0)) != 0:
-                    rows.append(hit)
-            except Exception:
+    made = 0
+    attached_instances = 0
+    unattached_instances = 0
+    imported_helpers_by_pool = {}
+    for entity, sector_xy, parent_record in selected:
+        model_id = int(entity.get("model_id", -1))
+        entries = model_effects.get(model_id, [])
+        if not entries:
+            continue
+        parent_obj = parent_record.get("object") if parent_record else None
+        visible_res = int(parent_record.get("res_id", -1)) if parent_record else -1
+        row_link = int(parent_record.get("row_link_id", -1)) if parent_record else -1
+        sector_index = int(parent_record.get("sector_index", -1)) if parent_record else -1
+        row_index = int(parent_record.get("row_index", -1)) if parent_record else -1
+        pass_name = str(parent_record.get("pass_name", "GAME_ENTITY")) if parent_record else "GAME_ENTITY"
+        matrix = blds_entity_matrix(entity)
+        count = blds_create_placed_model_2dfx_helpers(
+            collection,
+            parent_obj,
+            import_stem,
+            visible_res_id=visible_res,
+            game_model_id=model_id,
+            placement_ipl_id=row_link,
+            entries=entries,
+            sector_index=sector_index,
+            row_index=row_index,
+            pass_name=pass_name,
+            instance_index=int(entity.get("pool_index", 0)),
+            placement_matrix=matrix,
+            split_res_ids=[visible_res] if visible_res >= 0 else [],
+            source_path=str(summary.get("source_path", "")),
+            native_entity_matrix=True,
+            mapping_basis="GAME_DTZ_CENTITY_MODEL_INDEX",
+            entity_pool_name=str(entity.get("pool_name", "")),
+            entity_pool_index=int(entity.get("pool_index", -1)),
+            entity_sector_xy=sector_xy,
+            parent_to_placed=True,
+        )
+        if count:
+            made += count
+            pool_name = str(entity.get("pool_name", "UNKNOWN"))
+            imported_helpers_by_pool[pool_name] = int(imported_helpers_by_pool.get(pool_name, 0)) + int(count)
+            if parent_obj is not None:
+                attached_instances += 1
+                try:
+                    blds_attach_model_2dfx_metadata(
+                        parent_obj, visible_res, model_id, row_link, entries, summary,
+                        mapping_basis="GAME_DTZ_CENTITY_MODEL_INDEX",
+                        transform_mode="GAME_DTZ_CENTITY_NATIVE_WORLD_MATRIX",
+                    )
+                except Exception:
+                    pass
+            else:
+                unattached_instances += 1
+
+    summary["entity_instances_selected"] = len(selected)
+    summary["entity_instances_attached"] = attached_instances
+    summary["entity_instances_unattached"] = unattached_instances
+    summary["entity_selected_by_pool"] = dict(selected_by_pool)
+    summary["entity_selected_by_reason"] = dict(selected_by_reason)
+    summary["entity_imported_helpers_by_pool"] = dict(imported_helpers_by_pool)
+    summary["active_sector_cells"] = len(active_cells)
+    summary["effects_imported"] = made
+    summary["instances_with_effects"] = attached_instances + unattached_instances
+    summary["identity_basis"] = "GAME_DTZ_CENTITY_MODEL_INDEX"
+    LVZ.dbg(
+        f"[2dfx-entity] pool_instances={len(entities)} selected_in_lvz_grid={len(selected)} "
+        f"attached={attached_instances} unattached={unattached_instances} helpers={made} "
+        f"active_sector_cells={len(active_cells)} reasons={dict(selected_by_reason)}"
+    )
+    return made
+
+def blds_find_game_dtz(lvz_path: str, explicit_path: str = "") -> str:
+    candidates: List[Path] = []
+    if explicit_path:
+        try:
+            resolved = bpy.path.abspath(explicit_path)
+        except Exception:
+            resolved = explicit_path
+        candidates.append(Path(resolved))
+    try:
+        parent = Path(lvz_path).resolve().parent
+    except Exception:
+        parent = Path(lvz_path).parent
+    try:
+        children = [child for child in parent.iterdir() if child.is_file()]
+        for child in children:
+            if child.name.lower() == "game.dtz":
+                candidates.append(child)
+        # Browser/download copy suffixes are accepted silently; no extra file
+        # selector is exposed.  Exact GAME.DTZ remains first priority.
+        for child in children:
+            if child.suffix.lower() != ".dtz":
                 continue
-    return rows
+            if normalized_copy_stem(child.stem).lower() == "game":
+                candidates.append(child)
+    except Exception:
+        pass
+    seen = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate.resolve()).lower()
+        except Exception:
+            key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            if candidate.is_file():
+                return str(candidate)
+        except Exception:
+            continue
+    return ""
+
+
+def blds_parse_game_dtz_2dfx(lvz_path: str, explicit_path: str = "", wanted_model_ids=None) -> Tuple[Dict[int, List[Dict[str, object]]], Dict[str, object]]:
+    source_path = blds_find_game_dtz(lvz_path, explicit_path)
+    if not source_path:
+        return {}, {
+            "status": "not_found",
+            "source_path": "",
+            "compressed": False,
+            "ide_count": 0,
+            "effect_count": 0,
+            "models_with_effects": 0,
+            "entries_available": 0,
+            "rejected_model_refs": 0,
+            "malformed_effect_rows": 0,
+            "effect_type_counts": {0: 0, 1: 0, 2: 0, 3: 0},
+            "effects_imported": 0,
+            "instances_with_effects": 0,
+        }
+    try:
+        raw = Path(source_path).read_bytes()
+        data, was_compressed = LVZ.safe_decompress(raw)
+        mapping, summary = blds_parse_game_dtz_2dfx_bytes(data, wanted_model_ids=wanted_model_ids)
+        summary["source_path"] = str(source_path)
+        summary["compressed"] = bool(was_compressed)
+        summary["input_bytes"] = len(raw)
+        summary["decompressed_bytes"] = len(data)
+        return mapping, summary
+    except Exception as exc:
+        return {}, {
+            "status": "read_failed",
+            "source_path": str(source_path),
+            "error": str(exc),
+            "compressed": False,
+            "ide_count": 0,
+            "effect_count": 0,
+            "models_with_effects": 0,
+            "entries_available": 0,
+            "rejected_model_refs": 0,
+            "malformed_effect_rows": 0,
+            "effect_type_counts": {0: 0, 1: 0, 2: 0, 3: 0},
+            "effects_imported": 0,
+            "instances_with_effects": 0,
+        }
 
 
 def blds_count_lights_pass_rows(img_reader: Optional[LVZ.read_img], img_bytes: Optional[bytes], sector_records: List[Dict[str, int]], extra_container_records: List[Dict[str, int]], max_resource_id: int) -> Dict[str, int]:
     stats = {"candidate": 0, "valid": 0, "sector_containers": 0, "extra_containers": 0}
     if img_reader is None or img_bytes is None:
         return stats
+
     def consume(records, is_extra=False):
         for record in records or []:
             spans = img_reader.extra_container_instance_spans(record) if is_extra else img_reader.sector_instance_spans(record)
@@ -6286,62 +8356,292 @@ def blds_count_lights_pass_rows(img_reader: Optional[LVZ.read_img], img_bytes: O
                     off += 0x50
             if has_lights:
                 stats["extra_containers" if is_extra else "sector_containers"] += 1
+
     consume(sector_records or [], False)
     consume(extra_container_records or [], True)
     return stats
 
 
-def blds_log_raw_2dfx_diagnostics(lvz_reader: LVZ.read_lvz, img_reader: Optional[LVZ.read_img], img_bytes: Optional[bytes], sector_records: List[Dict[str, int]], extra_container_records: List[Dict[str, int]], lvz_path: str, max_resource_id: int):
+def blds_2dfx_placement_key(game_model_id: int, detail) -> Tuple:
+    """Return one runtime-placement key shared by split streamed resources.
+
+    Opaque/transparent/underwater pieces of one model carry different RES ids but
+    the same AERA model-info id, ROWLINK, row basis and world translation.  2DFX
+    belongs to the runtime model placement, so those pieces must share one helper
+    set.
+    """
     try:
-        tables = blds_collect_raw_wrld_2dfx_tables(lvz_reader, img_reader, img_bytes, sector_records, extra_container_records, lvz_path)
-        lights_stats = blds_count_lights_pass_rows(img_reader, img_bytes, sector_records, extra_container_records, max_resource_id)
-        valid_tables = [row for row in tables if bool(row.get("valid"))]
-        entry_total = sum(int(row.get("count", 0)) for row in valid_tables)
-        LVZ.dbg(f"[2dfx] WRLD raw table scan: candidates={len(tables)} valid_tables={len(valid_tables)} entries={entry_total}")
-        LVZ.dbg(
-            f"[2dfx] LIGHTS pass rows are NOT treated as 2DFX tables: "
-            f"candidate_rows={lights_stats.get('candidate', 0)} valid_instance_like_rows={lights_stats.get('valid', 0)} "
-            f"sector_containers={lights_stats.get('sector_containers', 0)} extra_containers={lights_stats.get('extra_containers', 0)}"
+        values = detail[12]
+        origin = detail[18] if len(detail) > 18 else (0.0, 0.0, 0.0)
+        tx = float(values[12]) + float(origin[0])
+        ty = float(values[13]) + float(origin[1])
+        tz = float(values[14]) + float(origin[2])
+        basis = tuple(round(float(values[index]), 6) for index in range(12))
+        return (
+            int(game_model_id),
+            int(detail[4]),
+            round(tx, 5), round(ty, 5), round(tz, 5),
+            basis,
         )
-        for row in tables[:64]:
-            sample = row.get("sample") or []
-            sample_text = ""
-            if sample:
-                p = sample[0]
-                sample_text = (
-                    f" sample0_xyz=({float(p.get('x', 0.0)):.3f},{float(p.get('y', 0.0)):.3f},{float(p.get('z', 0.0)):.3f})"
-                    f" effect0={int(p.get('effect_at_0', 0))} effect12={int(p.get('effect_at_12', 0))} hex16={p.get('hex16', '')}"
-                )
-            LVZ.dbg(
-                f"[2dfx] {row.get('source_kind')} {row.get('source_name')} "
-                f"count={int(row.get('count', 0))} ptr=0x{int(row.get('ptr', 0)):08X} "
-                f"count@0x{int(row.get('count_off', 0)):08X} ptr@0x{int(row.get('ptr_off', 0)):08X} "
-                f"table=0x{int(row.get('table_abs', -1)):08X} valid={bool(row.get('valid'))} reason={row.get('reason', '')}{sample_text}"
-            )
-        if not DIAGNOSTIC_CSV_LOGS_ENABLED:
-            return
-        out_csv = str(Path(lvz_path).with_suffix("")) + "_blds_2dfx_tables.csv"
-        try:
-            import csv
-            with open(out_csv, "w", newline="", encoding="utf-8") as f:
-                w = csv.writer(f)
-                w.writerow(["source_kind", "source_name", "source_index", "count", "ptr", "count_off", "ptr_off", "table_abs", "valid", "reason", "sample0_x", "sample0_y", "sample0_z", "sample0_effect_at_0", "sample0_effect_at_12", "sample0_hex16"])
-                for row in tables:
-                    sample = row.get("sample") or []
-                    p = sample[0] if sample else {}
-                    w.writerow([
-                        row.get("source_kind", ""), row.get("source_name", ""), row.get("source_index", ""), int(row.get("count", 0)), f"0x{int(row.get('ptr', 0)):08X}",
-                        f"0x{int(row.get('count_off', 0)):08X}", f"0x{int(row.get('ptr_off', 0)):08X}", f"0x{int(row.get('table_abs', -1)):08X}", bool(row.get("valid")), row.get("reason", ""),
-                        p.get("x", ""), p.get("y", ""), p.get("z", ""), p.get("effect_at_0", ""), p.get("effect_at_12", ""), p.get("hex16", ""),
-                    ])
-            LVZ.dbg(f"[2dfx] wrote raw 2DFX table CSV: {out_csv}")
-        except Exception as exc:
-            LVZ.dbg(f"[2dfx] CSV write failed: {exc}")
+    except Exception:
+        return (int(game_model_id), int(id(detail)))
+
+
+def blds_2dfx_native_model_matrix(placement_matrix: Matrix) -> Tuple[Matrix, Tuple[float, float, float]]:
+    """Remove streamed-geometry quantization scale from a placement matrix.
+
+    AERA/WRLD mesh vertices are normalized around roughly [-1, 1].  The three
+    placement-basis column lengths expand that normalized geometry back to world
+    size.  C2dEffect.position is already stored in native model units, so applying
+    those lengths again multiplies positions by values such as 16/32/64/128 and
+    scatters helpers hundreds or thousands of metres away.
+
+    Keep the exact placement translation and handed basis directions, but make
+    every basis column unit length before transforming GAME.DTZ positions.
+    """
+    result = Matrix.Identity(4)
+    scales = []
+    for column_index in range(3):
+        column = Vector((
+            float(placement_matrix[0][column_index]),
+            float(placement_matrix[1][column_index]),
+            float(placement_matrix[2][column_index]),
+        ))
+        length = float(column.length)
+        scales.append(length)
+        if math.isfinite(length) and length > 1.0e-10:
+            column /= length
+        else:
+            column = Vector((
+                1.0 if column_index == 0 else 0.0,
+                1.0 if column_index == 1 else 0.0,
+                1.0 if column_index == 2 else 0.0,
+            ))
+        result[0][column_index] = float(column.x)
+        result[1][column_index] = float(column.y)
+        result[2][column_index] = float(column.z)
+    result[0][3] = float(placement_matrix[0][3])
+    result[1][3] = float(placement_matrix[1][3])
+    result[2][3] = float(placement_matrix[2][3])
+    result[3][0] = 0.0
+    result[3][1] = 0.0
+    result[3][2] = 0.0
+    result[3][3] = 1.0
+    return result, (float(scales[0]), float(scales[1]), float(scales[2]))
+
+
+def blds_2dfx_entry_native_direction(entry: Dict[str, object]) -> Optional[Vector]:
+    effect_type = int(entry.get("effect_type", -1))
+    prefix = None
+    if effect_type == 1:
+        prefix = "direction"
+    elif effect_type == 2:
+        prefix = "attractor_direction"
+    elif effect_type == 3:
+        prefix = "ped_direction"
+    if prefix is None:
+        return None
+    try:
+        direction = Vector((
+            float(entry.get(prefix + "_x", 0.0)),
+            float(entry.get(prefix + "_y", 0.0)),
+            float(entry.get(prefix + "_z", 0.0)),
+        ))
+        if not all(math.isfinite(float(value)) for value in direction):
+            return None
+        return direction
+    except Exception:
+        return None
+
+
+def blds_clear_model_2dfx_collection(collection):
+    if collection is None:
+        return
+    try:
+        for obj in list(collection.objects):
+            try:
+                bpy.data.objects.remove(obj, do_unlink=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+def blds_attach_model_2dfx_metadata(obj, visible_res_id: int, game_model_id: int, placement_ipl_id: int, entries: List[Dict[str, object]], summary: Optional[Dict[str, object]] = None, mapping_basis: str = "MASTER_AERA_SECONDARY_ID", transform_mode: str = "GAME_DTZ_NATIVE_MODEL_SPACE_SCALE_STRIPPED_BASIS"):
+    """Attach namespaced Leeds metadata without touching another add-on's RNA."""
+    if obj is None or not entries:
+        return
+    try:
+        obj["blds_2dfx_count"] = int(len(entries))
+        obj["blds_2dfx_source"] = "GAME.DTZ"
+        obj["blds_2dfx_visible_res_id"] = int(visible_res_id)
+        obj["blds_2dfx_game_model_id"] = int(game_model_id)
+        obj["blds_2dfx_model_id"] = int(game_model_id)
+        obj["blds_2dfx_placement_ipl_id"] = int(placement_ipl_id)  # compatibility alias
+        obj["blds_2dfx_row_link_id"] = int(placement_ipl_id)
+        obj["blds_2dfx_mapping_basis"] = str(mapping_basis)
+        obj["blds_2dfx_transform_mode"] = str(transform_mode)
+        obj["blds_2dfx_json"] = json.dumps(entries, separators=(",", ":"), sort_keys=True)
+        if summary:
+            obj["blds_2dfx_source_path"] = str(summary.get("source_path", ""))
+            obj["blds_2dfx_game_dtz_effect_count"] = int(summary.get("effect_count", 0))
+    except Exception:
+        pass
+
+
+def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: str, visible_res_id: int, game_model_id: int, placement_ipl_id: int, entries: List[Dict[str, object]], sector_index: int, row_index: int, pass_name: str, instance_index: int, placement_matrix: Matrix, split_res_ids=None, source_path: str = "", native_entity_matrix: bool = False, mapping_basis: str = "MASTER_AERA_SECONDARY_ID", entity_pool_name: str = "", entity_pool_index: int = -1, entity_sector_xy=None, parent_to_placed: bool = False) -> int:
+    """Create one plain BLeeds helper set for one runtime model placement.
+
+    ``C2dEffect.position`` is native model-space data.  The streamed geometry
+    object matrix contains a second, implicit normalization scale used to expand
+    quantized AERA/WRLD vertices.  The helper transform therefore uses the same
+    translation and basis directions with those column lengths stripped.
+
+    No DemonFF RNA is written.
+    """
+    if collection is None or not entries:
+        return 0
+    try:
+        if native_entity_matrix:
+            native_matrix = placement_matrix.copy()
+            stream_scales = (1.0, 1.0, 1.0)
+        else:
+            native_matrix, stream_scales = blds_2dfx_native_model_matrix(placement_matrix)
     except Exception as exc:
-        LVZ.dbg(f"[2dfx] raw table diagnostics failed: {exc}")
+        LVZ.dbg(
+            f"[2dfx-model] native placement matrix failed for RES={int(visible_res_id)} "
+            f"GAME_MODEL={int(game_model_id)} ROWLINK={int(placement_ipl_id)}: {exc}"
+        )
+        return 0
 
+    split_res_ids = sorted({int(value) for value in (split_res_ids or [visible_res_id]) if int(value) >= 0})
+    split_res_text = ",".join(str(value) for value in split_res_ids)
+    rotation3 = native_matrix.to_3x3()
+    made = 0
+    for entry in entries:
+        try:
+            effect_type = int(entry.get("effect_type", -1))
+            global_index = int(entry.get("global_index", entry.get("index", 0)))
+            local = Vector((
+                float(entry.get("x", 0.0)),
+                float(entry.get("y", 0.0)),
+                float(entry.get("z", 0.0)),
+            ))
+            world = native_matrix @ local
+            if placed_obj is not None:
+                owner_token = str(getattr(placed_obj, "name", "")) or f"{import_stem}{int(visible_res_id)}"
+            elif int(visible_res_id) >= 0:
+                owner_token = f"{import_stem}{int(visible_res_id)}"
+            else:
+                owner_token = f"{import_stem}_{str(entity_pool_name or 'ENTITY').lower()}{int(entity_pool_index):04d}"
+            helper = bpy.data.objects.new(
+                f"{owner_token}_2DFX_g{int(game_model_id)}_"
+                f"r{int(placement_ipl_id)}_{int(instance_index):03d}_{global_index:04d}",
+                None,
+            )
+            helper.empty_display_type = 'SPHERE' if effect_type == 0 else 'ARROWS'
+            helper.empty_display_size = 0.25
+            # Keep display helpers unscaled. Light spheres need only a world
+            # position; directional effect arrows receive their own direction
+            # rotation below. All source basis data is retained as metadata.
+            helper_matrix = Matrix.Identity(4)
+            helper_matrix[0][3] = float(world.x)
+            helper_matrix[1][3] = float(world.y)
+            helper_matrix[2][3] = float(world.z)
+            helper.matrix_world = helper_matrix
+            helper["blds_kind"] = "LEEDS_2DFX"
+            helper["blds_2dfx_source"] = "GAME.DTZ"
+            helper["blds_2dfx_source_path"] = str(source_path or "")
+            helper["blds_2dfx_parent_object"] = str(getattr(placed_obj, "name", "")) if placed_obj is not None else ""
+            helper["blds_2dfx_attached_to_object"] = bool(placed_obj is not None)
+            helper["blds_2dfx_visible_res_id"] = int(visible_res_id)
+            helper["blds_2dfx_split_res_ids"] = str(split_res_text)
+            helper["blds_2dfx_game_model_id"] = int(game_model_id)
+            helper["blds_2dfx_model_id"] = int(game_model_id)
+            helper["blds_2dfx_placement_ipl_id"] = int(placement_ipl_id)  # compatibility alias
+            helper["blds_2dfx_row_link_id"] = int(placement_ipl_id)
+            helper["blds_2dfx_mapping_basis"] = str(mapping_basis)
+            helper["blds_2dfx_transform_mode"] = "GAME_DTZ_CENTITY_NATIVE_WORLD_MATRIX" if native_entity_matrix else "GAME_DTZ_NATIVE_MODEL_SPACE_SCALE_STRIPPED_BASIS"
+            helper["blds_2dfx_entity_pool_name"] = str(entity_pool_name or "")
+            helper["blds_2dfx_entity_pool_index"] = int(entity_pool_index)
+            try:
+                helper["blds_2dfx_collection_name"] = str(collection.name)
+                root_collection = globals().get("_ACTIVE_IMPORT_ROOT_COLLECTION")
+                helper["blds_import_root_collection"] = str(root_collection.name) if root_collection is not None else ""
+            except Exception:
+                pass
+            if entity_sector_xy is not None:
+                helper["blds_2dfx_entity_sector_x"] = int(entity_sector_xy[0])
+                helper["blds_2dfx_entity_sector_y"] = int(entity_sector_xy[1])
+            helper["blds_2dfx_stream_basis_scale_x"] = float(stream_scales[0])
+            helper["blds_2dfx_stream_basis_scale_y"] = float(stream_scales[1])
+            helper["blds_2dfx_stream_basis_scale_z"] = float(stream_scales[2])
+            helper["blds_2dfx_native_x"] = float(local.x)
+            helper["blds_2dfx_native_y"] = float(local.y)
+            helper["blds_2dfx_native_z"] = float(local.z)
+            helper["blds_2dfx_world_x"] = float(world.x)
+            helper["blds_2dfx_world_y"] = float(world.y)
+            helper["blds_2dfx_world_z"] = float(world.z)
+            helper["blds_2dfx_effect_type"] = effect_type
+            helper["blds_2dfx_effect_type_name"] = blds_2dfx_effect_type_name(effect_type)
+            helper["blds_2dfx_global_index"] = global_index
+            helper["blds_2dfx_model_effect_index"] = int(entry.get("model_effect_index", -1))
+            helper["blds_2dfx_color_r"] = int(entry.get("r", 0))
+            helper["blds_2dfx_color_g"] = int(entry.get("g", 0))
+            helper["blds_2dfx_color_b"] = int(entry.get("b", 0))
+            helper["blds_2dfx_color_a"] = int(entry.get("a", 0))
+            helper["blds_2dfx_raw_hex"] = str(entry.get("raw_hex", ""))
+            helper["blds_img_sector_index"] = int(sector_index)
+            helper["blds_img_row_index"] = int(row_index)
+            helper["blds_img_pass_name"] = str(pass_name)
+            helper["blds_img_instance_index"] = int(instance_index)
 
-def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: bool = True, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, import_img_container_mdls: bool = False):
+            native_direction = blds_2dfx_entry_native_direction(entry)
+            if native_direction is not None:
+                world_direction = rotation3 @ native_direction
+                helper["blds_2dfx_native_direction_x"] = float(native_direction.x)
+                helper["blds_2dfx_native_direction_y"] = float(native_direction.y)
+                helper["blds_2dfx_native_direction_z"] = float(native_direction.z)
+                helper["blds_2dfx_world_direction_x"] = float(world_direction.x)
+                helper["blds_2dfx_world_direction_y"] = float(world_direction.y)
+                helper["blds_2dfx_world_direction_z"] = float(world_direction.z)
+                try:
+                    if float(world_direction.length) > 1.0e-10:
+                        arrow_matrix = world_direction.normalized().to_track_quat('Z', 'Y').to_matrix().to_4x4()
+                        arrow_matrix[0][3] = float(world.x)
+                        arrow_matrix[1][3] = float(world.y)
+                        arrow_matrix[2][3] = float(world.z)
+                        helper.matrix_world = arrow_matrix
+                        helper["blds_2dfx_arrow_orientation"] = "WORLD_DIRECTION"
+                except Exception:
+                    pass
+
+            for key, value in entry.items():
+                if key in {"raw_hex", "payload_hex", "x", "y", "z", "r", "g", "b", "a", "effect_type", "global_index", "index", "model_id"}:
+                    continue
+                if isinstance(value, (int, float, str, bool)):
+                    try:
+                        helper["blds_2dfx_" + str(key)] = value
+                    except Exception:
+                        pass
+            stamp_bleeds_entity_type(helper, "2DFX")
+            collection.objects.link(helper)
+            if parent_to_placed and placed_obj is not None:
+                try:
+                    world_matrix = helper.matrix_world.copy()
+                    helper.parent = placed_obj
+                    helper.matrix_world = world_matrix
+                except Exception:
+                    pass
+            made += 1
+        except Exception as exc:
+            LVZ.dbg(
+                f"[2dfx-model] helper creation failed for RES={int(visible_res_id)} "
+                f"GAME_MODEL={int(game_model_id)} ROWLINK={int(placement_ipl_id)}: {exc}"
+            )
+    return made
+
+def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: bool = True, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True):
     # LVZ+IMG imports are long and can crash/cancel near the end while debugging.
     # Always leave a live log beside the LVZ so the last useful lines are not lost.
     write_debug_log = True
@@ -6352,8 +8652,9 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     progress = LvzImgImportProgress(operator, context).begin("Reading LVZ container")
     progress.update(1, "Reading LVZ container", force=True)
 
-    stem = Path(lvz_path).stem
+    stem = normalized_copy_stem(Path(lvz_path).stem) or Path(lvz_path).stem
     globals()["_CURRENT_IMPORT_STEM"] = stem
+    globals()["_CURRENT_PLACED_OBJECT_RECORDS"] = []
     log_path = str(Path(lvz_path).with_suffix("")) + "_blds_import.log" if write_debug_log else None
     LVZ.DEBUG = LVZ.DebugOut(debug_print, write_debug_log, log_path)
     LVZ.dbg(f"[log] live import log: {LVZ.DEBUG.file_path if LVZ.DEBUG is not None else log_path}")
@@ -6396,12 +8697,13 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     CONTINUES_IN_IMG_PROOF_CACHE.clear()
 
     t0 = time.time()
+    create_game_dtz_2dfx_helpers = bool(CREATE_GAME_DTZ_2DFX_HELPERS and import_game_dtz_2dfx)
     lvz_bytes_in = Path(lvz_path).read_bytes()
     decomp, was_cmp = LVZ.safe_decompress(lvz_bytes_in)
     progress.update(4, "Decoding LVZ container")
 
-    LVZ.dbg("===== LVZ Walk + IMG Match/Apply =====")
-    LVZ.dbg("Patch: LVZ_IMG_CONTINUES_IN_IMG_EXACT_RESOURCE_TABLE_RECOVERY_V97")
+    LVZ.dbg("===== LVZ + IMG Import =====")
+    LVZ.dbg("Patch: LVZ_IMG_GAME_ENTITY_2DFX_COLLECTIONS_V121")
     old_global_undo = None
     try:
         global _ACTIVE_IMPORT_UNDO_STATE
@@ -6428,27 +8730,18 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         old_global_undo = None
         _ACTIVE_IMPORT_UNDO_STATE = None
 
-    LVZ.dbg("[mode] reference DFF disabled: no Beachx DFF search, no reference geometry override, no reference proof CSV; LVZ+IMG only")
-    LVZ.dbg("[mode] V94 LVZ+IMG resource-id import active: row RES/object id is authoritative; EMPTY Resource[] rows are resolved as IMG continuations with raw IMG offsets; converter IDE maps and IPL/model remaps disabled")
-    LVZ.dbg("[mode] V21 fix: Master WRLD 12-byte table slot != visible beach#### id; row third-dword aliases are registered as exact MDLs")
-    LVZ.dbg("[mode] 2DFX diagnostics: only +0x328/+0x32C WRLD tables are scanned for effects; LIGHTS pass IPL mesh rows are allowed as visible mesh placements")
-    LVZ.dbg("[mode] AREA/triggered rows use real pass names and inferred sector origins")
-    LVZ.dbg(f"[mode] loose IMG container debug MDLs: {'on' if import_img_container_mdls else 'off'}")
     LVZ.dbg(f"LVZ: {lvz_path}")
     LVZ.dbg(f"[io] LVZ bytes in: {len(lvz_bytes_in)}  decomp: {len(decomp)} ({'compressed' if was_cmp else 'raw'})")
+    # Converter IDE/IPL sidecars are not part of the LVZ/IMG placement path.
+    # Keep compatibility maps empty; authoritative GAME_MODEL identity is read
+    # from master AreaInfo -> AERA AreaResource.secondaryId below.
     ide_ipl_to_res = {}
     ide_ipl_to_name = {}
+    ide_res_to_model_id = {}
+    ide_res_to_name = {}
+    ide_ambiguous_res = {}
     ide_path_used = None
-    if ENABLE_CONVERTER_IDE_OBJECT_ID_MAP:
-        ide_ipl_to_res, ide_ipl_to_name, ide_path_used = read_ide_object_id_map_next_to_lvz(lvz_path)
-        if ide_path_used:
-            LVZ.dbg(f"[ide] converter IDE map loaded: {ide_path_used} entries={len(ide_ipl_to_res)}")
-            for _k in sorted(list(ide_ipl_to_res.keys()))[:8]:
-                LVZ.dbg(f"[ide] sample id {_k} -> {ide_ipl_to_name.get(_k, '')} / res {ide_ipl_to_res.get(_k)}")
-        else:
-            LVZ.dbg("[ide] no converter IDE beside LVZ; raw WRLD ids only")
-    else:
-        LVZ.dbg("[ide] converter IDE map disabled; GTA SA converter .ide names are ignored for LVZ+IMG placement")
+    LVZ.dbg("[identity] converter IDE/IPL identity disabled; master AERA secondaryId is authoritative")
     LVZ.dbg("")
 
     lvz = LVZ.read_lvz(
@@ -6490,6 +8783,13 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             "This LVZ references companion IMG world data. Missing or unmatched IMG data will leave holes in the imported map."
         )
 
+    try:
+        import_root_collection, import_objects_collection, import_linked_collection, import_2dfx_collection = blds_prepare_import_collection_tree(lvz_path, img_name)
+        LVZ.dbg(f"[collections] root={import_root_collection.name if import_root_collection else 'none'} objects={import_objects_collection.name if import_objects_collection else 'none'} linked={import_linked_collection.name if import_linked_collection else 'none'} 2dfx={import_2dfx_collection.name if import_2dfx_collection else 'none'}")
+    except Exception as exc:
+        import_root_collection = import_objects_collection = import_linked_collection = import_2dfx_collection = None
+        LVZ.dbg(f"[collections] source-named hierarchy setup failed: {exc}")
+
     img = LVZ.read_img(img_bytes=img_bytes, lvz_bytes=decomp) if img_bytes else None
     platform = detect_lvz_img_platform(lvz, img)
     use_swizzle = platform_uses_ps2_swizzle(platform)
@@ -6524,59 +8824,9 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         dialect_text = ", ".join(f"{key}:{value}" for key, value in sorted(resource_dialects.items())) if resource_dialects else "none"
         LVZ.dbg(f"[platform] resource dialects: {dialect_text}; final platform={platform}; texture swizzle={'PS2' if use_swizzle else 'PSP/no-PS2-swizzle'}")
         LVZ.dbg("")
-    LVZ.dbg("[policy] V97: RES/object id is authoritative; EMPTY Resource[] means CONTINUES_IN_IMG when descriptor proof exists.")
-    LVZ.dbg("[policy] exact resource-table IMG recovery is enabled; IPL/IDE/neighbor/reference-DFF/rich-over-sparse guessing remains disabled.")
-    master_empty_res_ids = {int(row['index']) for row in rows if str(row.get('kind', '')).upper() == 'EMPTY'}
-    if img_bytes and master_empty_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
-        proof_count_before = len(CONTINUES_IN_IMG_PROOF_CACHE)
-        scan_continues_in_img_descriptor_proofs(
-            stem,
-            img_bytes,
-            lvz,
-            master_empty_res_ids,
-            progress_callback=lambda index, total: progress.update_range(14, 18, index, total, "Scanning IMG continuation descriptors"),
-        )
-        proof_count_after = len(CONTINUES_IN_IMG_PROOF_CACHE)
-        LVZ.dbg(
-            f"[continues-img] proof scan: empty_resource_ids={len(master_empty_res_ids)} "
-            f"proven={proof_count_after} new={proof_count_after - proof_count_before}"
-        )
-    master_dump_continues_proofs = CONTINUES_IN_IMG_PROOF_CACHE
-    LVZ.dbg("— Master Resource Table (first 300) —")
-    for row in rows[:min(len(rows), 300)]:
-        a16, b16 = row["peek_u16"]
-        a32, b32 = row["peek_u32"]
-        extra = []
-        display_kind = str(row["kind"])
-        if row["kind"] == "EMPTY" and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
-            proof = master_dump_continues_proofs.get(int(row["index"])) if 'master_dump_continues_proofs' in locals() else None
-            if proof:
-                display_kind = "CONTINUES_IN_IMG"
-                _tex = ",".join(str(int(x)) for x in sorted(proof.get('tex_ids') or []))
-                extra.append(f"img_raw=0x{int(proof.get('raw_off', -1)):08X}")
-                extra.append(f"img_end=0x{int(proof.get('after', -1)):08X}")
-                extra.append(f"geom={int(proof.get('verts', 0))}v/{int(proof.get('faces', 0))}f")
-                if _tex:
-                    extra.append(f"materials={_tex}")
-            else:
-                display_kind = "EMPTY_IMG_CONTINUATION_CANDIDATE"
-                extra.append("img_raw=not_proven_yet")
-        if row["kind"] == "UNK_FAC0" and "unk_fac0" in row:
-            extra.append(f"unk_fac0={row['unk_fac0']}")
-        if row["kind"] == "EMPTY" and "empty_reason" in row and not ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
-            extra.append(f"reason={row['empty_reason']}")
-        if row["kind"] == "TEX_REF":
-            extra.append(f"ref_addr=0x{row['ref_addr']:08X}")
-            extra.append(f"RES(index)={row['index']}")
-            if "embedded_res_id" in row and row["embedded_res_id"] is not None:
-                extra.append(f"embedded=0x{row['embedded_res_id']:08X}")
-        LVZ.dbg(
-            f"[res {row['index']:5d}] table@0x{row['table_off']:08X} → res@0x{row['res_addr']:08X} "
-            f"kind={display_kind} u16,u16=({a16},{b16}) "
-            f"u32,u32=(0x{(a32 if a32 is not None else 0):08X},0x{(b32 if b32 is not None else 0):08X}) "
-            f"{' '.join(extra)}"
-        )
-    LVZ.dbg("")
+    # IMG-only model recovery is intentionally delayed until every exact WRLD
+    # resource table has been checked.  This prevents texture-number matches
+    # from replacing a real same-sector, master, linked, or AREA model.
 
     progress.update(18, "Decoding LVZ textures")
     lvz.decode_textures(
@@ -6595,31 +8845,51 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         LVZ.dbg(f"[img] sector row directories: {len(img.find_sector_row_directories_from_lvz())}")
         LVZ.dbg(f"[img] concrete sector headers: {len(sector_records)}")
         LVZ.dbg(f"[img] extra AREA/triggered candidate containers: {len(extra_container_records)}")
-        blds_log_raw_2dfx_diagnostics(lvz, img, img_bytes, sector_records, extra_container_records, lvz_path, int(res_count))
         sector_details = img.enumerate_sector_details(
             max_resource_id=res_count,
             include_lod=IMPORT_LOD_PASSES_BY_DEFAULT,
             dedupe_visible=True,
             progress_callback=lambda index, total: progress.update_range(22, 26, index, total, "Reading IMG sector placements"),
         )
-        extra_details = img.enumerate_extra_container_details(
-            extra_container_records,
-            max_resource_id=res_count,
-            include_lod=IMPORT_LOD_PASSES_BY_DEFAULT,
-            progress_callback=lambda index, total: progress.update_range(26, 28, index, total, "Reading IMG AREA placements"),
+        # Only concrete sector IPL tables place static map objects.  The broader
+        # parent/nested container scan is useful for finding exact model data,
+        # but its rows include triggered/auxiliary data and do not form another
+        # static IPL.  Importing those rows created the shifted beach and sand
+        # copies far outside the real map.
+        extra_details = []
+        LVZ.dbg(
+            "Triggered and AREA blocks are used to find model data only; their rows are not added as extra static map placements."
         )
-        details = img.merge_instance_details(sector_details, extra_details)
+        details = img.merge_instance_details(sector_details)
+        merge_stats = getattr(img, "last_merge_instance_stats", {}) or {}
         stats = getattr(img, "last_sector_walk_stats", {}) or {}
-        extra_stats = getattr(img, "last_extra_container_walk_stats", {}) or {}
+        extra_stats = {}
+        exact_duplicate_rows = (
+            int(stats.get("skipped_duplicate_rows", 0))
+            + int(extra_stats.get("skipped_duplicate_rows", 0))
+            + int(merge_stats.get("duplicate_visible_rows", 0))
+            + int(merge_stats.get("duplicate_source_rows", 0))
+        )
+        LVZ.dbg(
+            f"[speed] exact duplicate visible placement rows removed: "
+            f"{exact_duplicate_rows}; duplicate source rows removed: 0; "
+            f"retained={merge_stats.get('kept_rows', len(details))}"
+        )
+        lights_kept = sum(1 for detail in details if len(detail) > 14 and str(detail[14]).upper() == "LIGHTS")
+        LVZ.dbg(f"[img] LIGHTS mesh placements kept: {lights_kept}")
+        try:
+            from collections import Counter
+            pass_counts = Counter(str(detail[14]).upper() for detail in details if len(detail) > 14)
+            pass_order = ("UNDERWATER", "ROADS", "NORMAL", "NOZWRITE", "LIGHTS", "TRANSPARENT")
+            pass_text = ", ".join(f"{name}={int(pass_counts.get(name, 0))}" for name in pass_order if pass_counts.get(name, 0))
+            if pass_text:
+                LVZ.dbg(f"Placements by render pass: {pass_text}")
+        except Exception:
+            pass
         LVZ.dbg(
             f"[img] sector rows candidate={stats.get('candidate_rows', 0)} valid={stats.get('valid_rows', 0)} "
             f"kept={stats.get('kept_rows', 0)} skipped_lod={stats.get('skipped_lod_rows', 0)} "
             f"skipped_dupes={stats.get('skipped_duplicate_rows', 0)}"
-        )
-        LVZ.dbg(
-            f"[img] extra rows candidate={extra_stats.get('candidate_rows', 0)} valid={extra_stats.get('valid_rows', 0)} "
-            f"kept={extra_stats.get('kept_rows', 0)} skipped_lod={extra_stats.get('skipped_lod_rows', 0)} "
-            f"origin_fixed_containers={extra_stats.get('nonzero_origin_containers', 0)}"
         )
         if IMPORT_DEBUG_VERBOSE_RESOURCE_DUMPS:
             transforms_by_res = img.build_sector_transforms_map_and_log(details, enable_unique_log=True)
@@ -6643,6 +8913,159 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     else:
         LVZ.dbg("[img] IMG rows not enumerated because IMG is missing")
 
+    # Resolve GAME.DTZ model-info ownership from the authoritative AERA row:
+    #   AreaResource.id1 = streamed RES
+    #   AreaResource.id2 = CBaseModelInfo / GAME.DTZ model-info index
+    # detail[4] remains ROWLINK and is never used as model identity.
+    placement_identity_by_key = {}
+    area_model_info_by_res = {}
+    area_model_info_provenance = {}
+    area_model_info_conflicts = {}
+    area_records_for_identity = []
+    if img is not None:
+        try:
+            area_records_for_identity = img.find_area_info_records_from_lvz()
+            visible_res_ids = {
+                int(detail[0]) for detail in (details or [])
+                if detail and int(detail[0]) >= 0
+            }
+            area_model_info_by_res, area_model_info_provenance, area_model_info_conflicts = img.build_area_model_info_map(
+                area_records=area_records_for_identity,
+                wanted_res_ids=visible_res_ids,
+                max_resource_id=int(res_count),
+            )
+        except Exception as exc:
+            LVZ.dbg(f"[identity] master AERA RES->GAME_MODEL parse failed: {exc}")
+            area_model_info_by_res = {}
+            area_model_info_provenance = {}
+            area_model_info_conflicts = {}
+
+    matched_identity_rows = 0
+    for detail in details or []:
+        key = blds_placement_report_key(detail)
+        res_id = int(detail[0])
+        game_model_id = int(area_model_info_by_res.get(res_id, -1))
+        provenance = area_model_info_provenance.get(res_id, {}) or {}
+        if game_model_id >= 0:
+            matched_identity_rows += 1
+        placement_identity_by_key[key] = {
+            "game_model_id": game_model_id,
+            "model_name": "",
+            "source": "MASTER_AERA_SECONDARY_ID" if game_model_id >= 0 else "UNRESOLVED",
+            "position_error": None,
+            "ipl_line": -1,
+            "area_index": int(provenance.get("area_index", -1)),
+            "area_resource_index": int(provenance.get("resource_index", -1)),
+            "area_resource_row_off": int(provenance.get("resource_row_off", -1)),
+            "area_resource_raw_off": int(provenance.get("raw_off", -1)),
+        }
+
+    area_identity_stats = getattr(img, "last_area_model_info_stats", {}) if img is not None else {}
+    identity_summary = {
+        "source": "MASTER_AERA_SECONDARY_ID",
+        "areas": len(area_records_for_identity),
+        "mapped_res_ids": len(area_model_info_by_res),
+        "matched_rows": int(matched_identity_rows),
+        "unresolved": max(0, len(details or []) - int(matched_identity_rows)),
+        "conflicting_res_ids": len(area_model_info_conflicts),
+        "aera_rows": int((area_identity_stats or {}).get("rows", 0)),
+        "valid_pointer_rows": int((area_identity_stats or {}).get("valid_pointer_rows", 0)),
+        # Compatibility fields retained for old report readers.  No sidecar or
+        # position-based identity is used.
+        "ipl_path": "",
+        "matched_by_position": 0,
+        "ide_name_fallback": 0,
+    }
+    LVZ.dbg(
+        f"[identity] master AERA RES->GAME_MODEL areas={len(area_records_for_identity)} "
+        f"mapped_res={len(area_model_info_by_res)} matched_rows={int(matched_identity_rows)} "
+        f"unresolved={int(identity_summary.get('unresolved', 0))} conflicts={len(area_model_info_conflicts)}"
+    )
+
+    progress.update(27, "Reading model 2DFX metadata")
+    model_2dfx_by_game_model_id, two_dfx_summary = blds_parse_game_dtz_2dfx(
+        lvz_path,
+        explicit_path=game_dtz_path,
+        wanted_model_ids=None,
+    )
+    two_dfx_summary["helpers_enabled"] = bool(create_game_dtz_2dfx_helpers)
+    two_dfx_summary["identity_basis"] = "GAME_DTZ_CENTITY_MODEL_INDEX"
+    two_dfx_summary["identity_matches"] = int(matched_identity_rows)
+    two_dfx_summary["area_model_info_mapped_res_ids"] = len(area_model_info_by_res)
+    two_dfx_summary["area_model_info_conflicting_res_ids"] = len(area_model_info_conflicts)
+    model_2dfx_collection = globals().get("_ACTIVE_IMPORT_2DFX_COLLECTION")
+    if model_2dfx_collection is not None:
+        blds_clear_model_2dfx_collection(model_2dfx_collection)
+    if create_game_dtz_2dfx_helpers and model_2dfx_collection is None:
+        model_2dfx_collection = get_or_create_import_collection(f"{stem} 2DFX", globals().get("_ACTIVE_IMPORT_ROOT_COLLECTION"))
+    if str(two_dfx_summary.get("status", "")) == "not_found":
+        LVZ.dbg(
+            "[2dfx-model] no GAME.DTZ found beside the LVZ; allocated world entity pools and "
+            "global C2dEffect rows are unavailable. LIGHTS mesh rows remain separate. "
+            "A placement/RES report will still be written."
+        )
+    elif str(two_dfx_summary.get("status", "")) != "ok":
+        LVZ.dbg(
+            f"[2dfx-model] GAME.DTZ parse failed status={two_dfx_summary.get('status', '')} "
+            f"source={two_dfx_summary.get('source_path', '')} error={two_dfx_summary.get('error', '')}"
+        )
+    else:
+        LVZ.dbg(
+            f"[2dfx-model] GAME.DTZ source={two_dfx_summary.get('source_path', '')} "
+            f"model_infos={int(two_dfx_summary.get('ide_count', 0))} "
+            f"global_effects={int(two_dfx_summary.get('effect_count', 0))} "
+            f"GAME_MODEL_ids_with_effects={int(two_dfx_summary.get('models_with_effects', 0))} "
+            f"entries_available={int(two_dfx_summary.get('entries_available', 0))} "
+            f"malformed_rows={int(two_dfx_summary.get('malformed_effect_rows', 0))}"
+        )
+        effect_type_counts = two_dfx_summary.get("effect_type_counts", {}) or {}
+        LVZ.dbg(
+            f"[2dfx-model] global effect types: "
+            f"light={int(effect_type_counts.get(0, 0))} "
+            f"particle={int(effect_type_counts.get(1, 0))} "
+            f"attractor={int(effect_type_counts.get(2, 0))} "
+            f"ped_behaviour={int(effect_type_counts.get(3, 0))}"
+        )
+        LVZ.dbg(
+            "[2dfx-model] helper creation {} for this import; ownership=allocated GAME.DTZ CEntity.modelIndex; "
+            "transform=CEntity world matrix x native C2dEffect position; entity instances are level-grid filtered"
+            .format("ENABLED" if create_game_dtz_2dfx_helpers else "DISABLED")
+        )
+        beach3528_rows = []
+        for detail in details or []:
+            try:
+                if int(detail[0]) == 3528:
+                    identity = placement_identity_by_key.get(blds_placement_report_key(detail), {}) or {}
+                    beach3528_rows.append((
+                        int(identity.get("game_model_id", -1)), int(detail[4]),
+                        int(detail[15]) if len(detail) > 15 else -1,
+                        int(detail[19]) if len(detail) > 19 else -1,
+                        str(detail[14]) if len(detail) > 14 else "UNKNOWN",
+                    ))
+            except Exception:
+                continue
+        if beach3528_rows:
+            seen_beach3528 = set()
+            for game_model_id, row_link_id, sector_index, row_index, pass_name in beach3528_rows:
+                key = (game_model_id, row_link_id, sector_index, row_index, pass_name)
+                if key in seen_beach3528:
+                    continue
+                seen_beach3528.add(key)
+                count = len(model_2dfx_by_game_model_id.get(int(game_model_id), [])) if game_model_id >= 0 else 0
+                LVZ.dbg(
+                    f"[2dfx-model] Beach3528 GAME_MODEL={int(game_model_id)} ROWLINK={int(row_link_id)} "
+                    f"RES=3528 effects={int(count)} sector={int(sector_index)} row={int(row_index)} pass={str(pass_name)}"
+                )
+        else:
+            LVZ.dbg("[2dfx-model] Beach3528 has no visible placement row in this LVZ/IMG import")
+    lights_stats = blds_count_lights_pass_rows(
+        img, img_bytes, sector_records, extra_container_records, int(res_count)
+    )
+    LVZ.dbg(
+        f"[2dfx-model] LIGHTS remains a mesh pass: candidate_rows={lights_stats.get('candidate', 0)} "
+        f"valid_rows={lights_stats.get('valid', 0)}"
+    )
+
     LVZ.dbg("[progress] building LVZ resource MDLs")
     if LVZ.DEBUG is not None:
         LVZ.DEBUG.flush()
@@ -6651,15 +9074,12 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         rows,
         progress_callback=lambda index, total: progress.update_range(28, 40, index, total, "Building LVZ model resources"),
     )
+    LVZ.dbg(f"LVZ models built: {len(built_by_res)}")
     stamp_source_paths(built_by_res, lvz_path, img_name)
 
     built_by_cont: Dict[int, bpy.types.Object] = {}
-    do_img_container_mdls = bool(import_img_container_mdls and IMPORT_IMG_MDL_PAYLOADS_BY_DEFAULT)
-    if img is not None and do_img_container_mdls:
-        LVZ.dbg("[img-mdl] loose LVZ-referenced IMG container MDL debug parse enabled")
-        built_by_cont = build_img_mdl_objects(stem, img_bytes, img, lvz.material_by_res_index, lvz_path, img_name)
-    elif img is not None:
-        LVZ.dbg("[img-mdl] loose IMG container debug parse disabled; structured IMG resource-table MDLs are still parsed and placed below")
+    if img is not None:
+        LVZ.dbg("[img-mdl] structured IMG resource-table models are parsed below")
 
     overlay_by_sector_res: Dict[Tuple[int, int], bpy.types.Object] = {}
     row_overlay_by_res: Dict[Tuple[int, int], bpy.types.Object] = {}
@@ -6668,7 +9088,9 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     ipl_row_overlay_by_res: Dict[Tuple[int, int], bpy.types.Object] = {}
     ipl_nested_overlay_by_res: Dict[Tuple[int, int], bpy.types.Object] = {}
     area_direct_objects: List[bpy.types.Object] = []
+    official_area_resource_count = 0
     ipl_area_direct_objects: List[bpy.types.Object] = []
+    ambiguous_global_res_ids = set()
     if img is not None and sector_records:
         needed_sector_res_keys = {(int(detail[15]), int(detail[0])) for detail in details if len(detail) > 15}
         LVZ.dbg("[progress] building same-sector IMG resource MDLs")
@@ -6684,57 +9106,14 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             lvz_path,
             img_name,
             needed_sector_res_keys=needed_sector_res_keys,
-            # Include alternate 1/2 resource layouts during the same‑sector
-            # overlay pass.  Without this, many sector‑local resources in the
-            # alternate tables are skipped entirely, leaving large holes.
-            include_alt_12_layouts=True,
+            # Slave WRLD resource rows are 8 bytes: resource ID + resource offset.
+            # Twelve-byte interpretations belong to unrelated data and can attach
+            # the wrong geometry to a real placement ID.
+            include_alt_12_layouts=False,
             progress_callback=lambda index, total: progress.update_range(41, 52, index, total, "Building exact IMG resource models"),
         )
         log_overlay_resource_stats(img, "sector")
-
-        # Build exact overlays for AREA/triggered containers too.  Extra-container
-        # placement rows use IMG-continuation sector indexes such as -100006, but the old
-        # same-sector overlay pass only scanned normal sector_records.  That meant
-        # a valid model sitting in the same AREA container was invisible to the
-        # primary resolver and was only considered later through weak global
-        # fallbacks.  Keying these by their real IMG-continuation sector index lets
-        # apply_img_instance_transforms resolve them directly.
-        needed_extra_sector_res_keys = {
-            (int(detail[15]), int(detail[0]))
-            for detail in details
-            if len(detail) > 15 and int(detail[15]) < 0
-        }
-        if extra_container_records and needed_extra_sector_res_keys:
-            progress.update(53, "Building AREA resource models")
-            LVZ.dbg("[progress] building exact AREA/triggered IMG resource MDLs")
-            if LVZ.DEBUG is not None:
-                LVZ.DEBUG.flush()
-            extra_exact_overlay_by_sector_res = build_sector_overlay_mdl_objects(
-                stem,
-                img_bytes,
-                lvz,
-                img,
-                extra_container_records,
-                None,
-                lvz_path,
-                img_name,
-                needed_sector_res_keys=needed_extra_sector_res_keys,
-                include_alt_12_layouts=True,
-                progress_callback=lambda index, total: progress.update_range(53, 58, index, total, "Building AREA resource models"),
-            )
-            merged_extra_exact = 0
-            for key, obj in extra_exact_overlay_by_sector_res.items():
-                if key in overlay_by_sector_res:
-                    continue
-                try:
-                    obj["blds_kind"] = "IMG_EXTRA_EXACT_SECTOR_MDL"
-                    obj["blds_img_extra_exact_res_fallback"] = True
-                except Exception:
-                    pass
-                overlay_by_sector_res[key] = obj
-                merged_extra_exact += 1
-            LVZ.dbg(f"[fast] exact AREA/triggered resource MDLs merged: {merged_extra_exact}")
-            log_overlay_resource_stats(img, "extra-exact-sector")
+        LVZ.dbg(f"IMG models built for static map blocks: {len(overlay_by_sector_res)}")
 
         missing_after_primary = find_details_missing_primary_resources(built_by_res, details, overlay_by_sector_res)
         needed_deep_row_res_keys = {
@@ -6743,70 +9122,63 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             if len(detail) > 19 and int(detail[19]) >= 0
         }
         needed_deep_res_ids = {int(detail[0]) for detail in missing_after_primary}
-        empty_resource_res_ids = set()
-        try:
-            for detail in details:
-                rid = int(detail[0])
-                if rid < 0:
-                    continue
-                row = lvz.resource_rows_by_index.get(rid) if hasattr(lvz, "resource_rows_by_index") else None
-                if row is not None and str(row.get("kind", "")).upper() == "EMPTY":
-                    empty_resource_res_ids.add(rid)
-        except Exception:
-            empty_resource_res_ids = set()
-        continues_img_wanted_res_ids = set(needed_deep_res_ids) | set(empty_resource_res_ids)
-
-        # For the rows that still miss by the normal resource-id field, also try the masked
-        # IPL/model id field as a sector resource id. In VCS beach, this is what rows like
-        # RES=1828 / IPL=1222..1241 need.
-        needed_ipl_sector_keys = {
-            (int(detail[15]), int(detail[4]))
-            for detail in missing_after_primary
-            if len(detail) > 15 and int(detail[15]) >= 0 and int(detail[4]) >= 0
-        }
-        needed_ipl_row_res_keys = {
-            (int(detail[19]), int(detail[4]))
-            for detail in missing_after_primary
-            if len(detail) > 19 and int(detail[19]) >= 0 and int(detail[4]) >= 0
-        }
-        needed_ipl_res_ids = {int(detail[4]) for detail in missing_after_primary if int(detail[4]) >= 0}
+        # detail[4] is ROWLINK only. Old row-link/IPL fallback sets stay empty.
+        needed_ipl_sector_keys = set()
+        needed_ipl_row_res_keys = set()
+        needed_ipl_res_ids = set()
 
         LVZ.dbg(
-            f"[fast] deep fallback keys after LVZ+sector+same-resource pass: "
-            f"details={len(missing_after_primary)} row/res={len(needed_deep_row_res_keys)} res={len(needed_deep_res_ids)} "
-            f"ipl-sector={len(needed_ipl_sector_keys)} ipl-row/res={len(needed_ipl_row_res_keys)} ipl-res={len(needed_ipl_res_ids)}"
+            f"[model-lookup] after LVZ and same-sector IMG: "
+            f"details={len(missing_after_primary)} row/res={len(needed_deep_row_res_keys)} res={len(needed_deep_res_ids)}"
         )
 
-        if continues_img_wanted_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
-            progress.update(58, "Resolving IMG continuation resources")
-            LVZ.dbg(f"[progress] building empty-resource CONTINUES-IN-IMG descriptor MDLs wanted={len(continues_img_wanted_res_ids)}")
-            if LVZ.DEBUG is not None:
-                LVZ.DEBUG.flush()
-            continued_img_overlay_by_sector_res = build_empty_resource_continues_in_img_mdl_objects(
-                stem,
-                img_bytes,
-                lvz,
-                img,
-                continues_img_wanted_res_ids,
-                lvz_path,
-                img_name,
-                progress_callback=lambda index, total: progress.update_range(58, 62, index, total, "Resolving IMG continuation resources"),
-            )
-            merged_continued_img = 0
-            for key, obj in continued_img_overlay_by_sector_res.items():
-                if key in overlay_by_sector_res:
-                    continue
-                overlay_by_sector_res[key] = obj
-                merged_continued_img += 1
-            LVZ.dbg(f"[fast] empty-resource CONTINUES-IN-IMG MDLs merged: {merged_continued_img}")
+        # Official VCS Area resources are not Sector overlays.  The master LVZ
+        # AreaInfo[] rows point to AERA chunks whose entries are
+        #   s16 RES, s16 secondaryId, u32 chunk-relative payload pointer.
+        # Parse this authoritative path before any broad/global recovery.
+        progress.update(60, "Building exact AERA resource models")
+        LVZ.dbg("[progress] building exact models from master AreaInfo/AERA resources")
+        if LVZ.DEBUG is not None:
+            LVZ.DEBUG.flush()
+        # Build authoritative AERA payloads for every visible placement RES, not
+        # only rows that appear absent in the early LVZ/same-sector existence
+        # check.  A same-RES placeholder or incomplete WRLD slice can exist and
+        # still be unusable for the row; filtering AERA by mere object existence
+        # was why exact resources such as Beach1887 remained missing even though
+        # their real payload was present in the IMG AERA table.
+        visible_placement_res_ids = {
+            int(detail[0]) for detail in details
+            if detail and int(detail[0]) >= 0
+        }
+        area_direct_objects = build_official_area_resource_mdl_objects(
+            stem,
+            img_bytes,
+            lvz,
+            img,
+            lvz_path,
+            img_name,
+            needed_res_ids=visible_placement_res_ids,
+            progress_callback=lambda index, total: progress.update_range(60, 62, index, total, "Building exact AERA resource models"),
+        )
+        official_area_resource_count = len(area_direct_objects)
+        _aera_watch = build_resource_object_candidate_map(area_direct_objects)
+        for _watch_res in (1725, 1881, 1887, 1989, 2184, 3528):
+            _watch_candidates = _aera_watch.get(int(_watch_res), [])
+            if _watch_candidates:
+                LVZ.dbg(
+                    f"[aera-placement] exact RES={int(_watch_res)} candidates={len(_watch_candidates)} "
+                    f"objects={','.join(str(getattr(obj, 'name', '')) for obj in _watch_candidates[:4])}"
+                )
+            else:
+                LVZ.dbg(f"[aera-placement] exact RES={int(_watch_res)} has no parsed AERA geometry candidate")
 
         if needed_deep_res_ids and ENABLE_GLOBAL_EXACT_RES_FALLBACK_MDLS:
             # Some VCS sectors do not carry the model payload in the same sector container
             # even though the placement row's normal resource id is correct. Build one
             # best global exact-res candidate per missing resource id before falling back
-            # to the more dangerous IPL/model-id interpretation.
+            # to the more dangerous legacy ROWLINK-as-model interpretation.
             progress.update(62, "Building global exact-resource models")
-            LVZ.dbg("[progress] exact-res IMG fallback MDLs")
+            LVZ.dbg("[progress] building exact IMG resource models from other map blocks")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
             global_exact_overlay_by_sector_res = build_sector_overlay_mdl_objects(
@@ -6819,18 +9191,13 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 lvz_path,
                 img_name,
                 needed_sector_res_keys=None,
-                # Some resource tables use the alternate 1/2 layout even when the
-                # model ID appears to point into the primary table.  Enabling
-                # alt‑layout collection here allows those MDLs to be picked up
-                # during the global exact fallback pass.  Without this the
-                # importer will leave many placement rows missing.  It is safe
-                # to enable because collapse_by_res_id ensures that only one
-                # instance per resource ID is kept.
-                include_alt_12_layouts=True,
+                # Use the documented 8-byte Slave WRLD resource table only.
+                include_alt_12_layouts=False,
                 wanted_res_ids=needed_deep_res_ids,
                 collapse_by_res_id=True,
                 progress_callback=lambda index, total: progress.update_range(62, 67, index, total, "Building global exact-resource models"),
             )
+            ambiguous_global_res_ids = set(getattr(img, "last_ambiguous_overlay_res_ids", set()) or set())
             merged_global_exact = 0
             for key, obj in global_exact_overlay_by_sector_res.items():
                 if key in overlay_by_sector_res:
@@ -6842,17 +9209,17 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                     pass
                 overlay_by_sector_res[key] = obj
                 merged_global_exact += 1
-            LVZ.dbg(f"[fast] global exact resource fallback MDLs merged: {merged_global_exact}")
+            LVZ.dbg(f"[exact-models] other map blocks added: {merged_global_exact}")
             log_overlay_resource_stats(img, "global-exact-res")
         elif needed_deep_res_ids:
             LVZ.dbg(f"[cleanup] global exact-res IMG recovery had no build request; unresolved exact RES ids={len(needed_deep_res_ids)}")
 
         if needed_ipl_res_ids and ENABLE_INTERNAL_IPL_MODEL_FALLBACK_MDLS:
-            # Build exact IPL/model-id resources globally, not only in the same sector.
-            # beach rows like RES=1828 / IPL=1222..1241 reference model IDs that are
+            # Legacy disabled path: build ROWLINK-keyed resources globally, not only in the same sector.
+            # beach rows like RES=1828 / ROWLINK=1222..1241 reference model IDs that are
             # stored in other sector resource tables, so same-sector filtering leaves
             # the building half-missing and forces bad AREA/nested fallbacks.
-            LVZ.dbg("[progress] building global IPL/model fallback MDLs")
+            LVZ.dbg("[progress] building legacy ROWLINK fallback MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
             ipl_overlay_by_sector_res = build_sector_overlay_mdl_objects(
@@ -6865,7 +9232,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 lvz_path,
                 img_name,
                 needed_sector_res_keys=None,
-                include_alt_12_layouts=True,
+                include_alt_12_layouts=False,
                 wanted_res_ids=needed_ipl_res_ids,
                 collapse_by_res_id=True,
             )
@@ -6879,7 +9246,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
 
         if ENABLE_NESTED_CHILD_FALLBACK_MDLS:
             progress.update(67, "Building nested exact-resource models")
-            LVZ.dbg("[progress] building nested-child fallback MDLs")
+            LVZ.dbg("[progress] building exact models from child resource records")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
             nested_overlay_by_res = build_nested_child_mdl_objects(
@@ -6890,7 +9257,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 lvz_path,
                 img_name,
                 needed_row_res_keys=needed_deep_row_res_keys,
-                include_alt_12_layouts=True,
+                include_alt_12_layouts=False,
                 wanted_res_ids=needed_deep_res_ids,
                 progress_callback=lambda index, total: progress.update_range(67, 71, index, total, "Building nested exact-resource models"),
             )
@@ -6906,7 +9273,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 lvz_path,
                 img_name,
                 needed_row_res_keys=needed_ipl_row_res_keys,
-                include_alt_12_layouts=True,
+                include_alt_12_layouts=False,
                 wanted_res_ids=needed_ipl_res_ids,
             )
             for obj in ipl_nested_overlay_by_res.values():
@@ -6918,7 +9285,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             log_overlay_resource_stats(img, "ipl-nested")
         if ENABLE_ROW_SHARED_FALLBACK_MDLS:
             progress.update(71, "Building row-shared exact-resource models")
-            LVZ.dbg("[progress] building row-shared fallback MDLs")
+            LVZ.dbg("[progress] building exact models from shared resource records")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
             row_overlay_by_res = build_row_shared_mdl_objects(
@@ -6931,7 +9298,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 lvz_path,
                 img_name,
                 needed_row_res_keys=needed_deep_row_res_keys,
-                include_alt_12_layouts=True,
+                include_alt_12_layouts=False,
                 wanted_res_ids=needed_deep_res_ids,
                 progress_callback=lambda index, total: progress.update_range(71, 75, index, total, "Building row-shared exact-resource models"),
             )
@@ -6949,7 +9316,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 lvz_path,
                 img_name,
                 needed_row_res_keys=needed_ipl_row_res_keys,
-                include_alt_12_layouts=True,
+                include_alt_12_layouts=False,
                 wanted_res_ids=needed_ipl_res_ids,
             )
             for obj in ipl_row_overlay_by_res.values():
@@ -6960,10 +9327,10 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                     pass
             log_overlay_resource_stats(img, "ipl-row")
         progress.update(75, "Building AREA direct-resource models")
-        LVZ.dbg("[progress] building structured AREA IMG resource MDLs")
+        LVZ.dbg("[progress] building exact models from linked AREA records")
         if LVZ.DEBUG is not None:
             LVZ.DEBUG.flush()
-        area_direct_objects = build_extra_area_direct_mdl_objects(
+        legacy_area_direct_objects = build_extra_area_direct_mdl_objects(
             stem,
             img_bytes,
             lvz,
@@ -6972,12 +9339,14 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             lvz_path,
             img_name,
             needed_res_ids=needed_deep_res_ids,
-            # Enable alternate layout resource search for extra/AREA containers.
-            include_alt_12_layouts=True,
+            # Triggered/auxiliary WRLD containers still use Sector-style rows.
+            # Keep these separate from the official AERA AreaResource parser.
+            include_alt_12_layouts=False,
             wanted_res_ids=needed_deep_res_ids,
-            progress_callback=lambda index, total: progress.update_range(75, 79, index, total, "Building AREA direct-resource models"),
+            progress_callback=lambda index, total: progress.update_range(75, 79, index, total, "Building linked auxiliary resource models"),
         )
-        log_overlay_resource_stats(img, "area")
+        area_direct_objects.extend(legacy_area_direct_objects)
+        log_overlay_resource_stats(img, "linked-auxiliary")
         if needed_ipl_res_ids and ENABLE_INTERNAL_IPL_MODEL_FALLBACK_MDLS:
             LVZ.dbg("[progress] building IPL AREA/direct fallback MDLs")
             if LVZ.DEBUG is not None:
@@ -6991,7 +9360,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 lvz_path,
                 img_name,
                 needed_res_ids=needed_ipl_res_ids,
-                include_alt_12_layouts=True,
+                include_alt_12_layouts=False,
                 wanted_res_ids=needed_ipl_res_ids,
             )
             for obj in ipl_area_direct_objects:
@@ -7002,9 +9371,195 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                     pass
             log_overlay_resource_stats(img, "ipl-area")
 
+        additional_exact_img_models = (
+            len(nested_overlay_by_res)
+            + len(row_overlay_by_res)
+            + len(area_direct_objects)
+        )
+        LVZ.dbg(f"Additional exact IMG models built: {additional_exact_img_models}")
+
+        # WRLD placement rows use the second u16 as the resource ID.  Resolve
+        # that ID from exact tables first: same Slave WRLD, row-linked records,
+        # Master WRLD, linked/AREA records, then another exact Slave table.
+        exact_overlay_objects = []
+        for (_candidate_sector, _candidate_res_id), candidate_obj in overlay_by_sector_res.items():
+            if candidate_obj is None:
+                continue
+            try:
+                if bool(candidate_obj.get("blds_img_continues_in_img", False)):
+                    continue
+            except Exception:
+                pass
+            exact_overlay_objects.append(candidate_obj)
+        exact_global_candidates_by_res = build_resource_object_candidate_map(exact_overlay_objects)
+        exact_area_candidates_by_res = build_resource_object_candidate_map(area_direct_objects)
+
+        # Promote a fitting authoritative AERA payload into the concrete
+        # placement sector/RES lookup before the unresolved scan and before the
+        # Blender instance loop.  This makes placement deterministic: when the
+        # master AERA table contains exact RES geometry that fits the row, the
+        # row cannot later fall through to MISSING merely because another
+        # generic lookup pool was empty or contained an incomplete placeholder.
+        aera_promoted_rows = 0
+        aera_promoted_res_ids = set()
+        for _detail in details:
+            try:
+                _res_id = int(_detail[0])
+                _sector_index = int(_detail[15]) if len(_detail) > 15 else -1
+            except Exception:
+                continue
+            _aera_pool = [
+                (_candidate, "official_aera_model", 0)
+                for _candidate in exact_area_candidates_by_res.get(_res_id, [])
+                if _candidate is not None
+            ]
+            _aera_obj, _aera_source, _aera_fit, _aera_count = choose_exact_resource_candidate(
+                _aera_pool,
+                _detail,
+                max_fit_score=CONTINUES_IN_IMG_MAX_PLACEMENT_FIT_SCORE,
+            )
+            if _aera_obj is None:
+                continue
+            overlay_by_sector_res[(_sector_index, _res_id)] = _aera_obj
+            try:
+                _aera_obj["blds_aera_authoritative_placement"] = True
+                _aera_obj["blds_aera_authoritative_fit"] = float(_aera_fit[0]) if _aera_fit is not None else -1.0
+            except Exception:
+                pass
+            aera_promoted_rows += 1
+            aera_promoted_res_ids.add(_res_id)
+        LVZ.dbg(
+            f"[aera-placement] promoted exact AERA payloads into placement lookup: "
+            f"rows={aera_promoted_rows} resource_ids={len(aera_promoted_res_ids)}"
+        )
+
+        exact_variant_ids = {
+            int(resource_id)
+            for resource_id in set(exact_global_candidates_by_res) | set(exact_area_candidates_by_res)
+            if len(exact_global_candidates_by_res.get(resource_id, []))
+            + len(exact_area_candidates_by_res.get(resource_id, [])) > 1
+        }
+        if exact_variant_ids:
+            LVZ.dbg(
+                f"Resource IDs with multiple exact models will be matched to each placement row: "
+                f"{len(exact_variant_ids)}"
+            )
+
+        unresolved_details = []
+        suspicious_exact_slice_details = []
+        exact_fit_rejected_before_raw = 0
+        for detail in details:
+            resource_id = int(detail[0])
+            sector_index = int(detail[15]) if len(detail) > 15 else -1
+            row_index = int(detail[19]) if len(detail) > 19 else -1
+            candidates = []
+
+            def add_exact(candidate, source, rank):
+                if candidate is None:
+                    return
+                try:
+                    if bool(candidate.get("blds_img_continues_in_img", False)):
+                        return
+                except Exception:
+                    pass
+                candidates.append((candidate, str(source), int(rank)))
+
+            add_exact(overlay_by_sector_res.get((sector_index, resource_id)), "exact_sector_model", 0)
+            if row_index >= 0:
+                add_exact(nested_overlay_by_res.get((row_index, resource_id)), "exact_nested_row_model", 1)
+                add_exact(row_overlay_by_res.get((row_index, resource_id)), "exact_row_model", 2)
+            add_exact(built_by_res.get(resource_id), "lvz_model", 3)
+            for candidate in exact_area_candidates_by_res.get(resource_id, []):
+                add_exact(candidate, "area_model", 4)
+            for candidate in exact_global_candidates_by_res.get(resource_id, []):
+                add_exact(candidate, "global_sector_model", 5)
+
+            chosen, _source, _fit, candidate_count = choose_exact_resource_candidate(
+                candidates,
+                detail,
+                max_fit_score=CONTINUES_IN_IMG_MAX_PLACEMENT_FIT_SCORE,
+            )
+            if chosen is None:
+                unresolved_details.append(detail)
+                if candidate_count:
+                    exact_fit_rejected_before_raw += 1
+            elif exact_candidate_needs_raw_variant(chosen, detail):
+                suspicious_exact_slice_details.append(detail)
+
+        def raw_detail_key(detail):
+            try:
+                return (
+                    int(detail[0]), int(detail[4]), int(detail[15]), int(detail[19]),
+                    str(detail[14]), int(detail[1]), int(detail[2]),
+                )
+            except Exception:
+                return id(detail)
+
+        raw_scan_details = []
+        raw_seen = set()
+        raw_input_details = list(unresolved_details) + list(suspicious_exact_slice_details)
+        for detail in raw_input_details:
+            key = raw_detail_key(detail)
+            if key in raw_seen:
+                continue
+            raw_seen.add(key)
+            raw_scan_details.append(detail)
+
+        unresolved_res_ids = {int(detail[0]) for detail in unresolved_details if int(detail[0]) >= 0}
+        suspicious_res_ids = {int(detail[0]) for detail in suspicious_exact_slice_details if int(detail[0]) >= 0}
+        LVZ.dbg(
+            f"[exact-resolution] unresolved placements={len(unresolved_details)} "
+            f"resource_ids={len(unresolved_res_ids)} suspicious_exact_slices={len(suspicious_exact_slice_details)} "
+            f"suspicious_resource_ids={len(suspicious_res_ids)}"
+        )
+        if exact_fit_rejected_before_raw:
+            LVZ.dbg(
+                f"Exact table models that did not match their placement bounds and will be checked in raw IMG data: "
+                f"{exact_fit_rejected_before_raw}"
+            )
+        if suspicious_exact_slice_details:
+            LVZ.dbg(
+                f"Exact WRLD submodel slices that are too small/large for their own row bounds and will be "
+                f"compared with raw exact-RES IMG variants: {len(suspicious_exact_slice_details)}"
+            )
+
+        # Raw IMG scanning is limited to unresolved rows and same-RES WRLD
+        # aggregate slices whose transformed bounds do not cover their row.
+        raw_scan_res_ids = {int(detail[0]) for detail in raw_scan_details if int(detail[0]) >= 0}
+        if raw_scan_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
+            progress.update(79, "Checking remaining IMG model data")
+            LVZ.dbg(f"[progress] checking raw IMG model data for {len(raw_scan_res_ids)} exact resource IDs")
+            if LVZ.DEBUG is not None:
+                LVZ.DEBUG.flush()
+            continued_img_overlay_by_sector_res = build_empty_resource_continues_in_img_mdl_objects(
+                stem,
+                img_bytes,
+                lvz,
+                img,
+                raw_scan_res_ids,
+                lvz_path,
+                img_name,
+                placement_details=raw_scan_details,
+                progress_callback=lambda index, total: progress.update_range(79, 80, index, total, "Checking remaining IMG model data"),
+            )
+            merged_continued_img = 0
+            for key, obj in continued_img_overlay_by_sector_res.items():
+                if key in overlay_by_sector_res:
+                    continue
+                overlay_by_sector_res[key] = obj
+                merged_continued_img += 1
+            LVZ.dbg(f"[raw-img-models] recovered={merged_continued_img} requested={len(raw_scan_res_ids)}")
+
     linked_instances = 0
     removed_unplaced = 0
     sidecar_ipl_path = None  # V18: do not use external beach.ipl sidecars; fix internal master/slave WRLD placement only.
+    placement_report_rows = {}
+    for placement_index, placement_detail in enumerate(details or []):
+        placement_key = blds_placement_report_key(placement_detail)
+        if placement_key is not None:
+            placement_report_rows[placement_key] = blds_make_placement_report_row(placement_detail, index=placement_index)
+    globals()["_CURRENT_PLACEMENT_REPORT_ROWS"] = placement_report_rows
+
     if False and apply_img_transforms and sidecar_ipl_path is not None:
         try:
             LVZ.dbg(f"[progress] applying Stories Map Converter IPL sidecar placements: {sidecar_ipl_path}")
@@ -7047,8 +9602,25 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 stem,
                 ide_ipl_to_res,
                 ide_ipl_to_name,
+                ide_res_to_model_id,
+                ide_res_to_name,
+                placement_identity_by_key,
                 progress_callback=lambda index, total: progress.update_range(80, 98, index, total, "Placing IMG instances"),
+                model_2dfx_by_game_model_id=model_2dfx_by_game_model_id,
+                model_2dfx_summary=two_dfx_summary,
+                model_2dfx_collection=model_2dfx_collection,
+                create_game_dtz_2dfx_helpers=False,
             )
+            if create_game_dtz_2dfx_helpers and str(two_dfx_summary.get("status", "")) == "ok":
+                progress.update(98, "Placing GAME.DTZ 2DFX")
+                blds_import_game_entity_2dfx_helpers(
+                    model_2dfx_collection,
+                    stem,
+                    model_2dfx_by_game_model_id,
+                    two_dfx_summary,
+                    sector_records,
+                    globals().get("_CURRENT_PLACED_OBJECT_RECORDS", []),
+                )
             removed_unplaced += purge_stale_raw_parser_bases(stem, reason="post-apply")
             LVZ.dbg(f"[apply] IMG placement rows applied: {applied}")
             LVZ.dbg(f"[apply] linked duplicate placement objects created: {linked_instances}")
@@ -7057,20 +9629,47 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     elif apply_img_transforms:
         LVZ.dbg("[apply] no IMG transforms available to apply")
 
+    try:
+        blds_write_placement_res_report(
+            lvz_path, details, placement_report_rows,
+            model_2dfx_by_id=model_2dfx_by_game_model_id,
+            model_2dfx_summary=two_dfx_summary,
+            placement_identity_by_key=placement_identity_by_key,
+            identity_summary=identity_summary,
+        )
+    except Exception as exc:
+        LVZ.dbg(f"[placement-report] failed: {exc}")
+
     progress.update(99, "Finalizing imported objects", force=True)
     elapsed = time.time() - t0
     LVZ.dbg(f"[summary] LVZ-table MDL resource objects parsed: {len(built_by_res)}")
     LVZ.dbg(f"[summary] IMG sector overlay MDL objects parsed: {len(overlay_by_sector_res)}")
-    LVZ.dbg(f"[summary] IMG global IPL/model sector MDLs parsed: {len(ipl_overlay_by_sector_res)}")
-    LVZ.dbg(f"[summary] IMG nested-child fallback MDL bases parsed: {len(nested_overlay_by_res)}")
-    LVZ.dbg(f"[summary] IMG IPL/model nested fallback MDLs parsed: {len(ipl_nested_overlay_by_res)}")
-    LVZ.dbg(f"[summary] IMG row-shared fallback MDL bases parsed: {len(row_overlay_by_res)}")
-    LVZ.dbg(f"[summary] IMG IPL/model row fallback MDLs parsed: {len(ipl_row_overlay_by_res)}")
-    LVZ.dbg(f"[summary] IMG AREA/direct fallback MDL bases parsed: {len(area_direct_objects)}")
-    LVZ.dbg(f"[summary] IMG IPL/model AREA fallback MDLs parsed: {len(ipl_area_direct_objects)}")
+    LVZ.dbg(f"[summary] IMG legacy ROWLINK fallback sector MDLs parsed: {len(ipl_overlay_by_sector_res)}")
+    LVZ.dbg(f"[summary] IMG child-record exact models parsed: {len(nested_overlay_by_res)}")
+    LVZ.dbg(f"[summary] IMG legacy ROWLINK nested fallback MDLs parsed: {len(ipl_nested_overlay_by_res)}")
+    LVZ.dbg(f"[summary] IMG shared-record exact models parsed: {len(row_overlay_by_res)}")
+    LVZ.dbg(f"[summary] IMG legacy ROWLINK row fallback MDLs parsed: {len(ipl_row_overlay_by_res)}")
+    LVZ.dbg(f"[summary] IMG master AERA exact models parsed: {official_area_resource_count}")
+    LVZ.dbg(f"[summary] IMG all linked/AREA exact models parsed: {len(area_direct_objects)}")
+    LVZ.dbg(f"[summary] IMG legacy ROWLINK AREA fallback MDLs parsed: {len(ipl_area_direct_objects)}")
     LVZ.dbg(f"[summary] deleted unplaced resource objects: {removed_unplaced}")
     LVZ.dbg(f"[summary] linked IMG placement duplicates: {linked_instances}")
     LVZ.dbg(f"[summary] IMG-container MDL objects: {len(built_by_cont)}")
+    LVZ.dbg(
+        f"[summary] Leeds entity 2DFX source={two_dfx_summary.get('source_path', '') or 'none'} "
+        f"model_infos={int(two_dfx_summary.get('ide_count', 0))} "
+        f"global_effect_rows={int(two_dfx_summary.get('effect_count', 0))} "
+        f"global_effect_entities={int(two_dfx_summary.get('entity_instances_with_effects', 0))} "
+        f"global_entity_helpers={int(two_dfx_summary.get('entity_effect_rows', 0))} "
+        f"selected_entities={int(two_dfx_summary.get('entity_instances_selected', 0))} "
+        f"attached_entities={int(two_dfx_summary.get('entity_instances_attached', 0))} "
+        f"independent_entities={int(two_dfx_summary.get('entity_instances_unattached', 0))} "
+        f"placed_helpers={int(two_dfx_summary.get('effects_imported', 0))} "
+        f"active_sector_cells={int(two_dfx_summary.get('active_sector_cells', 0))} "
+        f"mapping=GAME_DTZ_CENTITY_MODEL_INDEX "
+        f"transform=CENTITY_NATIVE_WORLD_MATRIX "
+        f"helpers_enabled={bool(create_game_dtz_2dfx_helpers)}"
+    )
     try:
         if DIAGNOSTIC_CSV_LOGS_ENABLED and REFERENCE_DFF_DEBUG_ROWS:
             from collections import Counter
@@ -7132,6 +9731,6 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             LVZ.DEBUG.close()
         except Exception:
             LVZ.DEBUG.flush()
-    operator.report({'INFO'}, f"Imported LVZ+IMG: {len(details)} visible placements, {linked_instances} linked duplicates, {len(overlay_by_sector_res)} sector MDLs, {len(ipl_overlay_by_sector_res)} IPL fallback MDLs, {len(nested_overlay_by_res)} nested-child MDLs, {len(row_overlay_by_res)} row-shared MDLs, {len(area_direct_objects)} AREA/direct fallback MDLs, {removed_unplaced} unplaced resources removed ({platform}).")
+    operator.report({'INFO'}, f"Imported LVZ+IMG: {len(details)} map placements, {linked_instances} linked copies, {len(built_by_res)} LVZ models, {len(overlay_by_sector_res)} IMG models, {int(two_dfx_summary.get('effects_imported', 0))} model 2DFX helpers, {removed_unplaced} unused model bases cleaned up ({platform}).")
     progress.finish(succeeded=True, message="Import complete")
     return {'FINISHED'}

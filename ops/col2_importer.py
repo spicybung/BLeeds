@@ -20,6 +20,7 @@ from pathlib import Path
 import bpy
 
 from ..leedsLib import col2 as col2_core
+from .. import stamp_bleeds_entity_type
 
 def get_target_collection(context, path: str):
     scene_collection = context.scene.collection
@@ -55,6 +56,7 @@ def set_col2_common_props(obj, *, source_path: str, col_index: int, refs, base_o
     obj["bleeds_col2_resource_refs"] = ",".join(f"0x{r:08X}" for r in ref_list)
     obj["bleeds_col2_aabb_min"] = [float(aabb_min[0]), float(aabb_min[1]), float(aabb_min[2])]
     obj["bleeds_col2_aabb_max"] = [float(aabb_max[0]), float(aabb_max[1]), float(aabb_max[2])]
+    stamp_bleeds_entity_type(obj, "COLLISION")
 
 def make_wire_collision_display(obj):
     try:

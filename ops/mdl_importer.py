@@ -25,7 +25,7 @@ from mathutils import Matrix, Vector
 
 from ..leedsLib import mdl as stories_mdl
 from ..leedsLib import lvz_img as embedded_mdl
-from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth
+from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth, stamp_bleeds_entity_type
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 #   This script is for Stories .MDLs, the file format for actors & props            #
@@ -2713,6 +2713,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
     obj["bleeds_mdl_raw_embedded"] = True
     obj["bleeds_mdl_source_file"] = os.path.basename(filepath)
     obj["blds_kind"] = "MDL"
+    stamp_bleeds_entity_type(obj, "OBJECT")
     try:
         obj["blds_res_index"] = int("".join(ch for ch in name if ch.isdigit()) or -1)
     except Exception:
@@ -3117,6 +3118,7 @@ def import_stories_mdl(
         root_obj.bleeds_leeds_pos_base = pos_base
     except Exception:
         root_obj["bleeds_is_mdl_root"] = True
+        stamp_bleeds_entity_type(root_obj, "OBJECT")
         root_obj["bleeds_mdl_platform"] = str(platform)
         root_obj["bleeds_mdl_type"] = str(mdl_type)
         root_obj["bleeds_mdl_filepath"] = str(filepath)

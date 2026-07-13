@@ -9569,8 +9569,8 @@ class Manhunt2MdlReader:
             "vertex_element_type": 0x90,
         },
         {
-            "name": "pc_beta_fields_minus4",
-            "asset_variant": "PC_BETA",
+            "name": "psp_beta_fields_minus4",
+            "asset_variant": "PSP_BETA",
             "material_offset": 0x00,
             "num_materials": 0x04,
             "num_material_ids": 0x28,
@@ -9580,8 +9580,8 @@ class Manhunt2MdlReader:
             "vertex_element_type": 0x8C,
         },
         {
-            "name": "pc_beta_fields_plus4",
-            "asset_variant": "PC_BETA",
+            "name": "psp_beta_fields_plus4",
+            "asset_variant": "PSP_BETA",
             "material_offset": 0x00,
             "num_materials": 0x04,
             "num_material_ids": 0x30,
@@ -9591,8 +9591,8 @@ class Manhunt2MdlReader:
             "vertex_element_type": 0x94,
         },
         {
-            "name": "pc_beta_compact_vertex_descriptor",
-            "asset_variant": "PC_BETA",
+            "name": "psp_beta_compact_vertex_descriptor",
+            "asset_variant": "PSP_BETA",
             "material_offset": 0x00,
             "num_materials": 0x04,
             "num_material_ids": 0x2C,
@@ -9612,24 +9612,24 @@ class Manhunt2MdlReader:
             "matrix_offset": 128,
         },
         {
-            "name": "pc_beta_compact_176",
-            "asset_variant": "PC_BETA",
+            "name": "psp_beta_compact_176",
+            "asset_variant": "PSP_BETA",
             "record_size": 176,
             "name_offset": 24,
             "name_size": 40,
             "matrix_offset": 112,
         },
         {
-            "name": "pc_beta_extended_208",
-            "asset_variant": "PC_BETA",
+            "name": "psp_beta_extended_208",
+            "asset_variant": "PSP_BETA",
             "record_size": 208,
             "name_offset": 24,
             "name_size": 40,
             "matrix_offset": 144,
         },
         {
-            "name": "pc_beta_name32_192",
-            "asset_variant": "PC_BETA",
+            "name": "psp_beta_name32_192",
+            "asset_variant": "PSP_BETA",
             "record_size": 192,
             "name_offset": 32,
             "name_size": 40,
@@ -9650,6 +9650,8 @@ class Manhunt2MdlReader:
         self.context = context
         self.collection_name = collection_name
         self.layout_mode = str(layout_mode or "DETECT").upper().strip()
+        if self.layout_mode == "PC_BETA":
+            self.layout_mode = "PSP_BETA"
         self.import_armature = bool(import_armature)
         self.import_materials = bool(import_materials)
 
@@ -9782,19 +9784,19 @@ class Manhunt2MdlReader:
         self.file.seek(0)
         data = self.file.read(self.HEADER_SIZE)
         if len(data) < self.HEADER_SIZE:
-            raise ValueError("File is too small for a Manhunt 2 PC MDL header")
+            raise ValueError("File is too small for a Manhunt 2 PMLC header")
 
         header = struct.unpack("<4sIIIIIIIii", data)
         signature = header[0].decode("ascii", errors="replace")
         if signature != "PMLC":
-            raise ValueError("Unsupported Manhunt 2 PC MDL signature {!r}; expected PMLC".format(signature))
+            raise ValueError("Unsupported Manhunt 2 PMLC signature {!r}; expected PMLC".format(signature))
 
         self.header = header
         first_entry_offset = int(header[8])
         if not self.is_valid_offset(first_entry_offset, 0x20, 16):
             raise ValueError("Manhunt 2 first entry index is outside the file")
 
-        self.log("==== Manhunt 2 PC MDL Import Log ====")
+        self.log("==== Manhunt 2 PMLC Import Log ====")
         self.log("Source: {}".format(self.path))
         self.log("Container compression: {}".format("zlib" if self.file_was_compressed else "none"))
         self.log("Requested layout: {}".format(self.layout_mode))
@@ -9829,7 +9831,7 @@ class Manhunt2MdlReader:
     def create_import_collection(self):
         import bpy
 
-        collection_suffix = "beta" if self.asset_variant == "PC_BETA" else "retail"
+        collection_suffix = "psp_beta" if self.asset_variant == "PSP_BETA" else "pc_retail"
         collection_name = self.collection_name or "MH2_{}_{}".format(collection_suffix, self.stem)
         collection = bpy.data.collections.get(collection_name) or bpy.data.collections.new(collection_name)
         scene_children = getattr(self.context.scene.collection, "children", None)
@@ -9893,7 +9895,7 @@ class Manhunt2MdlReader:
         candidates = [
             {"name": "pc_retail_object_list_5_6", "variant": "PC_RETAIL", "first_index": 5, "last_index": 6},
             {"name": "pc_retail_object_list_4_5", "variant": "PC_RETAIL", "first_index": 4, "last_index": 5},
-            {"name": "pc_beta_object_list_3_4", "variant": "PC_BETA", "first_index": 3, "last_index": 4},
+            {"name": "psp_beta_object_list_3_4", "variant": "PSP_BETA", "first_index": 3, "last_index": 4},
         ]
 
         best_candidate = None
@@ -10012,8 +10014,8 @@ class Manhunt2MdlReader:
             self.root_bone_offset = 0
             return
         self.bone_record_layout = best_layout
-        if self.layout_mode == "DETECT" and best_layout["asset_variant"] == "PC_BETA":
-            self.asset_variant = "PC_BETA"
+        if self.layout_mode == "DETECT" and best_layout["asset_variant"] == "PSP_BETA":
+            self.asset_variant = "PSP_BETA"
         self.log(
             "Bone Record Layout: {} size={} matrix=0x{:X} score={}".format(
                 best_layout["name"],
@@ -10135,7 +10137,7 @@ class Manhunt2MdlReader:
                 target["bleeds_mh2_anim_data_idx_offset"] = int(bone_info.get("anim_data_idx_offset", 0))
 
         armature_object["bleeds_model_game"] = "MH2"
-        armature_object["bleeds_mh2_platform"] = "PC"
+        armature_object["bleeds_mh2_platform"] = "PSP" if self.asset_variant == "PSP_BETA" else "PC"
         armature_object["bleeds_mh2_asset_variant"] = self.asset_variant
         armature_object["bleeds_mh2_bone_record_layout"] = self.bone_record_layout["name"]
         armature_object["bleeds_mdl_filepath"] = self.path
@@ -10304,8 +10306,8 @@ class Manhunt2MdlReader:
         if best_values is None:
             return None, None, None
         self.object_header_layout_name = str(best_layout["name"])
-        if self.layout_mode == "DETECT" and best_layout["asset_variant"] == "PC_BETA":
-            self.asset_variant = "PC_BETA"
+        if self.layout_mode == "DETECT" and best_layout["asset_variant"] == "PSP_BETA":
+            self.asset_variant = "PSP_BETA"
         return best_values, best_layout, best_geometry_layout
 
     def packed_color_word(self, word):
@@ -10459,11 +10461,11 @@ class Manhunt2MdlReader:
             score += 8
         if self.layout_mode == "PC_RETAIL" and is_retail_geometry:
             score += 20
-        if self.layout_mode == "PC_BETA" and not is_retail_geometry:
+        if self.layout_mode == "PSP_BETA" and not is_retail_geometry:
             score += 12
         if preferred_variant == "PC_RETAIL":
             score += 8 if is_retail_geometry else -2
-        elif preferred_variant == "PC_BETA":
+        elif preferred_variant == "PSP_BETA":
             score += 8 if not is_retail_geometry else -2
         return score
 
@@ -10491,7 +10493,7 @@ class Manhunt2MdlReader:
         if update_variant and self.layout_mode == "DETECT" and (
             best_layout["header_size"] != 180 or best_layout["material_id_size"] != 44
         ):
-            self.asset_variant = "PC_BETA"
+            self.asset_variant = "PSP_BETA"
         return best_layout
 
     def read_material_id_records(self, object_offset, count, header_size, record_size):
@@ -10699,11 +10701,11 @@ class Manhunt2MdlReader:
             return None
 
         if self.layout_mode == "DETECT" and (
-            object_header_layout.get("asset_variant") == "PC_BETA"
+            object_header_layout.get("asset_variant") == "PSP_BETA"
             or geometry_layout["header_size"] != 180
             or geometry_layout["material_id_size"] != 44
         ):
-            self.asset_variant = "PC_BETA"
+            self.asset_variant = "PSP_BETA"
         header_size = int(geometry_layout["header_size"])
         material_id_size = int(geometry_layout["material_id_size"])
         num_material_ids = int(header_values["num_material_ids"])
@@ -10939,7 +10941,7 @@ class Manhunt2MdlReader:
         mesh_object = bpy.data.objects.new(name, mesh)
         self.collection.objects.link(mesh_object)
         mesh_object["bleeds_model_game"] = "MH2"
-        mesh_object["bleeds_mh2_platform"] = "PC"
+        mesh_object["bleeds_mh2_platform"] = "PSP" if self.asset_variant == "PSP_BETA" else "PC"
         mesh_object["bleeds_mh2_asset_variant"] = self.asset_variant
         mesh_object["bleeds_mh2_entry_layout"] = self.entry_layout_name
         mesh_object["bleeds_mh2_bone_record_layout"] = self.bone_record_layout.get("name", "")
@@ -10948,7 +10950,7 @@ class Manhunt2MdlReader:
         return mesh_object
 
 
-def is_manhunt2_pc_mdl(filepath):
+def is_manhunt2_pmlc_mdl(filepath):
     import zlib
 
     try:
@@ -10969,6 +10971,10 @@ def is_manhunt2_pc_mdl(filepath):
             return True
     return False
 
+
+# Backwards-compatible name used by older add-on builds.
+def is_manhunt2_pc_mdl(filepath):
+    return is_manhunt2_pmlc_mdl(filepath)
 
 
 def import_mh2(
