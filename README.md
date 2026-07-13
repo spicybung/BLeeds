@@ -10,7 +10,7 @@ The following is a list of file formats that are currently supported by the addo
 
 #### File Types
 
-- [X] Model files (.mdl, .wbl)*
+- [X] Model files (.mdl)*
   - [X] Import
   - [x] Export *
 - [X] Texture Files (.chk, .xtx, .tex)*
