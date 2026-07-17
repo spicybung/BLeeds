@@ -15,12 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.0.10"
+__version__ = "1.1.0"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 0, 10),
+    "version": (1, 1, 0),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Rockstar Leeds import/export tools for Blender 2.90 and newer",
