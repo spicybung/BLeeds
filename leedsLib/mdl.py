@@ -195,6 +195,9 @@ class StoriesPSPGeometryInfo:
     weight_format: int = 0
     index_format: int = 0
     num_weights_per_vertex: int = 0
+    vertex_stride: int = 0
+    vertex_buffer_offset: int = 0
+    geometry_data_end: int = 0
     materials: List[StoriesMaterialDesc] = field(default_factory=list)
     meshes: List[StoriesPSPMesh] = field(default_factory=list)
 
@@ -239,6 +242,7 @@ class StoriesMDLContext:
     actor_mdl: bool = False
     renderflags_offset: int = 0
     debug_log: List[str] = field(default_factory=list)
+    print_debug_log: bool = False
     atomic: StoriesAtomicInfo = field(default_factory=StoriesAtomicInfo)
     atomics: List[StoriesAtomicInfo] = field(default_factory=list)
     vehicle_extra_count: int = 0
@@ -249,7 +253,8 @@ class StoriesMDLContext:
 
     def log(self, msg: str) -> None:
         self.debug_log.append(str(msg))
-        print(msg)
+        if self.print_debug_log:
+            print(msg)
 
 def read_i8(f) -> int:
     return struct.unpack("<b", f.read(1))[0]
@@ -1873,16 +1878,169 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
 
     return g
 
+def alignPspVertexMember(offset: int, alignment: int = 2) -> int:
+    alignment = max(1, int(alignment))
+    return (int(offset) + alignment - 1) & ~(alignment - 1)
+
+
+def buildPspVertexLayout(flags: int) -> Dict[str, Any]:
+    uv_format = int(flags) & 0x3
+    color_format = (int(flags) >> 2) & 0x7
+    normal_format = (int(flags) >> 5) & 0x3
+    position_format = (int(flags) >> 7) & 0x3
+    weight_format = (int(flags) >> 9) & 0x3
+    index_format = (int(flags) >> 11) & 0x3
+    weight_count = ((int(flags) >> 14) & 0x7) + 1
+
+    offsets: Dict[str, int] = {}
+    cursor = 0
+
+    if weight_format:
+        cursor = alignPspVertexMember(cursor)
+        offsets["weights"] = cursor
+        if weight_format == 1:
+            cursor += weight_count
+        elif weight_format == 2:
+            cursor += weight_count * 2
+        elif weight_format == 3:
+            cursor += weight_count * 4
+        else:
+            raise ValueError(f"Unsupported PSP weight format: {weight_format}")
+
+    if uv_format:
+        cursor = alignPspVertexMember(cursor)
+        offsets["uv"] = cursor
+        if uv_format == 1:
+            cursor += 2
+        elif uv_format == 2:
+            cursor += 4
+        elif uv_format == 3:
+            cursor += 8
+        else:
+            raise ValueError(f"Unsupported PSP UV format: {uv_format}")
+
+    if color_format:
+        cursor = alignPspVertexMember(cursor)
+        offsets["color"] = cursor
+        if color_format in {4, 5, 6}:
+            cursor += 2
+        elif color_format == 7:
+            cursor += 4
+        else:
+            raise ValueError(f"Unsupported PSP color format: {color_format}")
+
+    if normal_format:
+        cursor = alignPspVertexMember(cursor)
+        offsets["normal"] = cursor
+        if normal_format == 1:
+            cursor += 3
+        elif normal_format == 2:
+            cursor += 6
+        elif normal_format == 3:
+            cursor += 12
+        else:
+            raise ValueError(f"Unsupported PSP normal format: {normal_format}")
+
+    if position_format:
+        cursor = alignPspVertexMember(cursor)
+        offsets["position"] = cursor
+        if position_format == 1:
+            cursor += 3
+        elif position_format == 2:
+            cursor += 6
+        elif position_format == 3:
+            cursor += 12
+        else:
+            raise ValueError(f"Unsupported PSP position format: {position_format}")
+
+    stride = alignPspVertexMember(cursor)
+    if stride <= 0:
+        raise ValueError(f"PSP vertex format 0x{int(flags):X} produced an empty vertex layout")
+
+    return {
+        "flags": int(flags),
+        "uv_format": uv_format,
+        "color_format": color_format,
+        "normal_format": normal_format,
+        "position_format": position_format,
+        "weight_format": weight_format,
+        "index_format": index_format,
+        "weight_count": weight_count,
+        "offsets": offsets,
+        "stride": stride,
+    }
+
+
+def decodePspWeightValue(vertex_data: bytes, offset: int, weight_format: int) -> float:
+    if weight_format == 1:
+        return float(vertex_data[offset]) / 128.0
+    if weight_format == 2:
+        return float(struct.unpack_from("<H", vertex_data, offset)[0]) / 32768.0
+    if weight_format == 3:
+        return float(struct.unpack_from("<f", vertex_data, offset)[0])
+    return 0.0
+
+
+def decodePspSkinInfluences(
+    vertex_data: bytes,
+    layout: Dict[str, Any],
+    bone_palette: List[int],
+) -> Tuple[List[int], List[float], List[float]]:
+    weight_format = int(layout.get("weight_format", 0))
+    weight_count = int(layout.get("weight_count", 0))
+    weight_offset = int(layout.get("offsets", {}).get("weights", 0))
+
+    if weight_format == 0 or weight_count <= 0:
+        return [], [], []
+
+    component_size = {1: 1, 2: 2, 3: 4}.get(weight_format, 0)
+    if component_size <= 0:
+        return [], [], []
+
+    raw_weights: List[float] = []
+    influence_order: List[int] = []
+    influence_weights: Dict[int, float] = {}
+
+    for influence_index in range(weight_count):
+        component_offset = weight_offset + influence_index * component_size
+        weight = decodePspWeightValue(vertex_data, component_offset, weight_format)
+        raw_weights.append(weight)
+
+        if weight <= 0.0:
+            continue
+
+        if influence_index < len(bone_palette):
+            bone_index = int(bone_palette[influence_index])
+        else:
+            bone_index = 0
+
+        if bone_index not in influence_weights:
+            influence_order.append(bone_index)
+            influence_weights[bone_index] = 0.0
+        influence_weights[bone_index] += float(weight)
+
+    total_weight = sum(influence_weights.values())
+    if total_weight > 0.0:
+        inverse_total = 1.0 / total_weight
+        for bone_index in list(influence_weights.keys()):
+            influence_weights[bone_index] *= inverse_total
+
+    bone_indices = [int(bone_index) for bone_index in influence_order]
+    bone_weights = [float(influence_weights[bone_index]) for bone_index in influence_order]
+    return bone_indices, bone_weights, raw_weights
+
+
 def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeometryInfo:
     g = StoriesPSPGeometryInfo()
     ctx.log("Attempting PSP Stories MDL read...")
 
     f.seek(geom_ptr)
-    header_offset = f.tell()
+    geometry_struct_offset = f.tell()
 
     g.materials = read_material_list(ctx, f)
 
     f.seek(12, 1)
+    psp_header_offset = f.tell()
 
     psp_header = f.read(0x48)
     if len(psp_header) != 0x48:
@@ -1909,19 +2067,24 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
         unk3,
     ) = struct.unpack("<4I4f3fi3fiIf", psp_header)
 
+    vertex_layout = buildPspVertexLayout(flags)
+    vertex_offsets = dict(vertex_layout["offsets"])
+    vertex_stride = int(vertex_layout["stride"])
+
     g.flags = flags
     g.num_strips = num_strips
     g.num_verts = num_verts
     g.scale = (scale_x, scale_y, scale_z)
     g.pos = (pos_x, pos_y, pos_z)
+    g.vertex_stride = vertex_stride
 
-    uvfmt = flags & 0x3
-    colfmt = (flags >> 2) & 0x7
-    normfmt = (flags >> 5) & 0x3
-    posfmt = (flags >> 7) & 0x3
-    wghtfmt = (flags >> 9) & 0x3
-    idxfmt = (flags >> 11) & 0x3
-    nwght = ((flags >> 14) & 0x7) + 1
+    uvfmt = int(vertex_layout["uv_format"])
+    colfmt = int(vertex_layout["color_format"])
+    normfmt = int(vertex_layout["normal_format"])
+    posfmt = int(vertex_layout["position_format"])
+    wghtfmt = int(vertex_layout["weight_format"])
+    idxfmt = int(vertex_layout["index_format"])
+    nwght = int(vertex_layout["weight_count"])
 
     g.uv_format = uvfmt
     g.col_format = colfmt
@@ -1981,15 +2144,18 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
         raise Exception(f"Unsupported weight format (wghtfmt={wghtfmt})")
 
     if idxfmt == 0:
-        ctx.log("  idxfmt  = 0: Index format [OK]")
+        ctx.log("  idxfmt  = 0: No separate index stream [OK]")
     else:
         ctx.log(f"  idxfmt  = {idxfmt}: Unsupported/invalid index format! [ERROR]")
         raise Exception(f"idxfmt must be 0 (got {idxfmt})")
 
-    ctx.log(f"  nwght   = {nwght}: Number of weights per vertex (parsed as ((flags>>14) & 7) + 1)")
+    ctx.log(f"  nwght   = {nwght}: Number of weights stored in each vertex")
+    ctx.log(f"  layout  = offsets={vertex_offsets}, stride={vertex_stride} bytes")
     ctx.log("--------------------------------------")
 
     ctx.log("----- PSP Geometry Struct -----")
+    ctx.log(f"  geometry struct offset  : 0x{geometry_struct_offset:X}")
+    ctx.log(f"  PSP header offset       : 0x{psp_header_offset:X}")
     ctx.log(f"  size      (header+data): {size} (0x{size:08X})")
     ctx.log(f"  flags     (VTYPE)      : {flags} (0x{flags:08X})")
     ctx.log(f"  numStrips              : {num_strips}")
@@ -2007,6 +2173,7 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
     ctx.log(f"  pos_z                  : {pos_z}")
     ctx.log(f"  unk2                   : {unk2} (0x{unk2:08X})")
     ctx.log(f"  offset (to vertices)   : {offset} (0x{offset:08X})")
+    ctx.log(f"  vertex stride          : {vertex_stride} bytes")
     ctx.log(f"  unk3                   : {unk3}")
     ctx.log("--------------------------------")
 
@@ -2015,10 +2182,9 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
         mesh_offset = f.tell()
         mesh_bytes = f.read(0x30)
         if len(mesh_bytes) != 0x30:
-            ctx.log(
-                f"✗ ERROR: Could not read 0x30 bytes for sPspGeometryMesh[{i}] at 0x{mesh_offset:X}"
+            raise Exception(
+                f"Could not read 0x30 bytes for sPspGeometryMesh[{i}] at 0x{mesh_offset:X}"
             )
-            break
 
         (
             m_offset,
@@ -2039,6 +2205,7 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
         ctx.log(f"  File Offset        : 0x{mesh_offset:X}")
         ctx.log(f"  offset (to tris)   : 0x{m_offset:08X}")
         ctx.log(f"  numTriangles       : {m_num_triangles}")
+        ctx.log(f"  numVertices        : {int(m_num_triangles) + 2}")
         ctx.log(f"  matID              : {m_mat_id}")
         ctx.log(f"  unk1               : {m_unk1}")
         ctx.log(f"  uvScale            : ({m_uv_scale0}, {m_uv_scale1})")
@@ -2048,31 +2215,84 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
         ctx.log(f"  unk3               : {m_unk3}")
         ctx.log(f"  bonemap            : {list(m_bonemap)}")
 
-        mesh_dict = {
-            "offset": m_offset,
-            "numTriangles": m_num_triangles,
-            "matID": m_mat_id,
-            "unk1": m_unk1,
-            "uvScale": (m_uv_scale0, m_uv_scale1),
-            "unk2": (m_unk2_0, m_unk2_1, m_unk2_2, m_unk2_3),
-            "unk3": m_unk3,
-            "bonemap": list(m_bonemap),
-            "raw_bytes": mesh_bytes,
-            "file_offset": mesh_offset,
-        }
-        mesh_list.append(mesh_dict)
+        mesh_list.append(
+            {
+                "offset": int(m_offset),
+                "numTriangles": int(m_num_triangles),
+                "matID": int(m_mat_id),
+                "unk1": float(m_unk1),
+                "uvScale": (float(m_uv_scale0), float(m_uv_scale1)),
+                "unk2": (
+                    float(m_unk2_0),
+                    float(m_unk2_1),
+                    float(m_unk2_2),
+                    float(m_unk2_3),
+                ),
+                "unk3": float(m_unk3),
+                "bonemap": [int(value) for value in m_bonemap],
+                "raw_bytes": mesh_bytes,
+                "file_offset": int(mesh_offset),
+            }
+        )
 
     ctx.log(
         f"✔ Finished reading {len(mesh_list)} sPspGeometryMesh structs (expected: {num_strips})\n"
     )
 
-    vertex_buffer_file_offset = header_offset + offset - 168
-    ctx.log(f"Vertex buffer begins at file offset: 0x{vertex_buffer_file_offset:X}")
+    vertex_buffer_file_offset = int(psp_header_offset) + int(offset)
+    geometry_data_end = int(psp_header_offset) + int(size)
+    declared_vertex_buffer_size = geometry_data_end - vertex_buffer_file_offset
+    expected_vertex_buffer_size = int(num_verts) * int(vertex_stride)
 
-    f.seek(vertex_buffer_file_offset)
-    vertex_buffer = f.read(num_verts * 24)
-    if len(vertex_buffer) < num_verts:
-        raise Exception("Not enough data for vertex buffer!")
+    g.vertex_buffer_offset = vertex_buffer_file_offset
+    g.geometry_data_end = geometry_data_end
+
+    ctx.log(f"Vertex buffer begins at file offset: 0x{vertex_buffer_file_offset:X}")
+    ctx.log(f"PSP geometry data ends at file offset: 0x{geometry_data_end:X}")
+    ctx.log(
+        f"PSP vertex buffer size: declared={declared_vertex_buffer_size} bytes, "
+        f"expected={expected_vertex_buffer_size} bytes ({num_verts} vertices × {vertex_stride})"
+    )
+
+    if vertex_buffer_file_offset < 0 or geometry_data_end < vertex_buffer_file_offset:
+        raise Exception("Invalid PSP vertex-buffer range")
+
+    if expected_vertex_buffer_size > declared_vertex_buffer_size:
+        raise Exception(
+            "PSP vertex buffer is smaller than the decoded VTYPE requires: "
+            f"declared={declared_vertex_buffer_size}, expected={expected_vertex_buffer_size}"
+        )
+
+    if expected_vertex_buffer_size != declared_vertex_buffer_size:
+        ctx.log(
+            f"⚠ PSP geometry has {declared_vertex_buffer_size - expected_vertex_buffer_size} "
+            "bytes of trailing vertex-buffer padding."
+        )
+
+    mesh_vertex_total = sum(int(mesh["numTriangles"]) + 2 for mesh in mesh_list)
+    if mesh_vertex_total != int(num_verts):
+        raise Exception(
+            f"PSP mesh vertex total mismatch: mesh descriptors={mesh_vertex_total}, header={num_verts}"
+        )
+
+    for mesh_index, mesh in enumerate(mesh_list):
+        mesh_vertex_count = int(mesh["numTriangles"]) + 2
+        mesh_byte_start = int(mesh["offset"])
+        mesh_byte_end = mesh_byte_start + mesh_vertex_count * vertex_stride
+
+        if mesh_byte_start < 0 or mesh_byte_end > declared_vertex_buffer_size:
+            raise Exception(
+                f"PSP mesh {mesh_index} vertex range 0x{mesh_byte_start:X}..0x{mesh_byte_end:X} "
+                f"is outside the declared vertex buffer size 0x{declared_vertex_buffer_size:X}"
+            )
+
+        if mesh_index + 1 < len(mesh_list):
+            next_mesh_start = int(mesh_list[mesh_index + 1]["offset"])
+            if next_mesh_start != mesh_byte_end:
+                ctx.log(
+                    f"⚠ PSP mesh {mesh_index} ends at relative 0x{mesh_byte_end:X}, "
+                    f"but mesh {mesh_index + 1} begins at 0x{next_mesh_start:X}."
+                )
 
     for mesh_index, mesh in enumerate(mesh_list):
         ctx.log(f"--- Building mesh for sPspGeometryMesh {mesh_index + 1}/{len(mesh_list)} ---")
@@ -2081,119 +2301,89 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
         m.uv_scale = mesh["uvScale"]
         m.bonemap = list(mesh["bonemap"])
 
-        tri_strip_offset = vertex_buffer_file_offset + mesh["offset"]
+        tri_strip_offset = vertex_buffer_file_offset + int(mesh["offset"])
         f.seek(tri_strip_offset)
 
-        bytes_per_vert = 20
-        verts_to_skip = 10
-        skip_bytes = bytes_per_vert * verts_to_skip
-        f.seek(skip_bytes, 1)
+        num_strip_verts = int(mesh["numTriangles"]) + 2
         ctx.log(
-            f"⏩ Skipped first {verts_to_skip} verts ({skip_bytes} bytes) for mesh {mesh_index}"
-        )
-
-        num_strip_verts = mesh["numTriangles"] + 2
-        ctx.log(
-            f"🟩 [PSP] Reading Mesh/Strip {mesh_index}: Vertex data starts at file offset 0x{tri_strip_offset:X} ({tri_strip_offset})"
-        )
-        ctx.log(
-            f"  Tri-strip data for mesh {mesh_index}: offset=0x{tri_strip_offset:X}, numTriangles={mesh['numTriangles']}, thus numVertices={num_strip_verts}"
+            f"🟩 [PSP] Reading Mesh/Strip {mesh_index}: vertex data begins at "
+            f"0x{tri_strip_offset:X}, stride={vertex_stride}, vertices={num_strip_verts}"
         )
 
         for vi in range(num_strip_verts):
-            vertex_data = f.read(20)
-            if len(vertex_data) < 8:
-                ctx.log(f"    ! Not enough data for vertex {vi} of strip {mesh_index}")
-                break
+            vertex_file_offset = f.tell()
+            vertex_data = f.read(vertex_stride)
+            if len(vertex_data) != vertex_stride:
+                raise Exception(
+                    f"Not enough data for PSP vertex {vi} of strip {mesh_index} at "
+                    f"0x{vertex_file_offset:X}: wanted {vertex_stride}, got {len(vertex_data)}"
+                )
 
-            local_o = 0
-
+            raw_weight_values: List[float] = []
             if wghtfmt:
-                weights_raw = [vertex_data[local_o + j] for j in range(nwght)]
-                local_o += nwght
-
-                K = min(4, nwght)
-                w4 = [weights_raw[j] / 128.0 for j in range(K)]
-                if K < 4:
-                    w4.extend([0.0] * (4 - K))
-
-                palette = mesh.get("bonemap") or []
-                idx4: List[int] = []
-                for j in range(K):
-                    idx4.append(palette[j] if j < len(palette) else 0)
-                if K < 4:
-                    idx4.extend([0] * (4 - K))
-
-                s = sum(w4)
-                if s > 0.0:
-                    w4 = [w / s for w in w4]
-
-                if nwght > 4 and any(x != 0 for x in weights_raw[4:]):
-                    ctx.log(
-                        f"PSP: vertex had {nwght} weights; extra bytes beyond 4 were non-zero and ignored: {weights_raw[4:]}"
-                    )
-
-                m.bone_weights.append(w4)
-                m.bone_indices.append(idx4)
+                bone_indices, bone_weights, raw_weight_values = decodePspSkinInfluences(
+                    vertex_data,
+                    vertex_layout,
+                    list(mesh.get("bonemap") or []),
+                )
+                m.bone_indices.append(bone_indices)
+                m.bone_weights.append(bone_weights)
 
             u_val = 0.0
             v_val = 0.0
             if uvfmt == 1:
-                u_val = vertex_data[local_o] / 128.0 * mesh["uvScale"][0]
-                v_val = vertex_data[local_o + 1] / 128.0 * mesh["uvScale"][1]
+                uv_offset = int(vertex_offsets["uv"])
+                u_val = float(vertex_data[uv_offset]) / 128.0 * float(mesh["uvScale"][0])
+                v_val = float(vertex_data[uv_offset + 1]) / 128.0 * float(mesh["uvScale"][1])
                 m.uvs.append((u_val, v_val))
-                local_o += 2
 
             col_val = None
             if colfmt == 5:
-                local_o = ((local_o + 1) // 2) * 2
-                col = struct.unpack_from("<H", vertex_data, local_o)[0]
+                color_offset = int(vertex_offsets["color"])
+                col = struct.unpack_from("<H", vertex_data, color_offset)[0]
                 r = (col & 0x1F) * 255 // 0x1F
                 g_c = ((col >> 5) & 0x1F) * 255 // 0x1F
                 b_c = ((col >> 10) & 0x1F) * 255 // 0x1F
                 a_c = 0xFF if (col & 0x8000) else 0
                 col_val = (r, g_c, b_c, a_c)
                 m.colors.append(col_val)
-                local_o += 2
 
             norm_val = None
             if normfmt == 1:
-                nx = struct.unpack_from("<b", vertex_data, local_o)[0] / 128.0
-                ny = struct.unpack_from("<b", vertex_data, local_o + 1)[0] / 128.0
-                nz = struct.unpack_from("<b", vertex_data, local_o + 2)[0] / 128.0
-                norm_val = (nx, ny, nz)
+                normal_offset = int(vertex_offsets["normal"])
+                nx, ny, nz = struct.unpack_from("<3b", vertex_data, normal_offset)
+                norm_val = (float(nx) / 128.0, float(ny) / 128.0, float(nz) / 128.0)
                 m.normals.append(norm_val)
-                local_o += 3
 
-            px = 0.0
-            py = 0.0
-            pz = 0.0
             if posfmt == 1:
-                px = struct.unpack_from("<b", vertex_data, local_o)[0] / 128.0 * scale_x + pos_x
-                py = struct.unpack_from("<b", vertex_data, local_o + 1)[0] / 128.0 * scale_y + pos_y
-                pz = struct.unpack_from("<b", vertex_data, local_o + 2)[0] / 128.0 * scale_z + pos_z
-                local_o += 3
+                position_offset = int(vertex_offsets["position"])
+                px_raw, py_raw, pz_raw = struct.unpack_from("<3b", vertex_data, position_offset)
+                px = float(px_raw) / 128.0 * scale_x + pos_x
+                py = float(py_raw) / 128.0 * scale_y + pos_y
+                pz = float(pz_raw) / 128.0 * scale_z + pos_z
             elif posfmt == 2:
-                local_o = ((local_o + 1) // 2) * 2
-                px = (
-                    struct.unpack_from("<h", vertex_data, local_o)[0] / 32768.0 * scale_x
-                    + pos_x
-                )
-                py = (
-                    struct.unpack_from("<h", vertex_data, local_o + 2)[0] / 32768.0 * scale_y
-                    + pos_y
-                )
-                pz = (
-                    struct.unpack_from("<h", vertex_data, local_o + 4)[0] / 32768.0 * scale_z
-                    + pos_z
-                )
-                local_o += 6
+                position_offset = int(vertex_offsets["position"])
+                px_raw, py_raw, pz_raw = struct.unpack_from("<3h", vertex_data, position_offset)
+                px = float(px_raw) / 32768.0 * scale_x + pos_x
+                py = float(py_raw) / 32768.0 * scale_y + pos_y
+                pz = float(pz_raw) / 32768.0 * scale_z + pos_z
+            else:
+                raise Exception(f"Unsupported PSP position format: {posfmt}")
 
             m.verts.append((px, py, pz))
 
-            ctx.log(
-                f"    Vertex {vi}: pos=({px}, {py}, {pz})  uv=({u_val}, {v_val})  color={col_val}  normal={norm_val}"
-            )
+            if wghtfmt:
+                ctx.log(
+                    f"    Vertex {vi} @ 0x{vertex_file_offset:X}: pos=({px}, {py}, {pz}) "
+                    f"uv=({u_val}, {v_val}) color={col_val} normal={norm_val} "
+                    f"rawWeights={raw_weight_values} bones={m.bone_indices[-1]} "
+                    f"weights={m.bone_weights[-1]}"
+                )
+            else:
+                ctx.log(
+                    f"    Vertex {vi} @ 0x{vertex_file_offset:X}: pos=({px}, {py}, {pz}) "
+                    f"uv=({u_val}, {v_val}) color={col_val} normal={norm_val}"
+                )
 
         for i in range(2, num_strip_verts):
             if (i % 2) == 0:
@@ -2208,7 +2398,8 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
                 m.faces.append((v0, v1, v2))
 
         ctx.log(
-            f"✔ Built PSP mesh {mesh_index}: verts={len(m.verts)}, faces={len(m.faces)}"
+            f"✔ Built PSP mesh {mesh_index}: verts={len(m.verts)}, faces={len(m.faces)}, "
+            f"stride={vertex_stride}, skinInfluences={'yes' if m.bone_weights else 'no'}"
         )
         g.meshes.append(m)
 
@@ -2217,10 +2408,11 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
 
 class read_stories:
 
-    def __init__(self, filepath: str, platform: str, mdl_type: str):
+    def __init__(self, filepath: str, platform: str, mdl_type: str, print_debug_log: bool = False):
         self.filepath = filepath
         self.platform = platform
         self.mdl_type = mdl_type
+        self.print_debug_log = bool(print_debug_log)
         self.ctx = None
 
     def read(self) -> StoriesMDLContext:
@@ -2228,6 +2420,7 @@ class read_stories:
             filepath=self.filepath,
             platform=self.platform,
             mdl_type=self.mdl_type,
+            print_debug_log=self.print_debug_log,
         )
 
         filepath = self.filepath
@@ -2582,19 +2775,30 @@ class read_stories:
                         fallback_arm.frame_names[ptr_id] = bname
                     atomic_info.armature = fallback_arm
 
-        txt_path = os.path.splitext(filepath)[0] + "_import_log.txt"
-        try:
-            with open(txt_path, "w", encoding="utf-8") as outf:
-                outf.write("\n".join(ctx.debug_log))
-            ctx.log(f"✔ Debug log written to: {txt_path}")
-        except Exception as e:
-            ctx.log(f"✗ Failed to write debug log: {e}")
+        if self.print_debug_log:
+            txt_path = os.path.splitext(filepath)[0] + "_import_log.txt"
+            try:
+                with open(txt_path, "w", encoding="utf-8") as outf:
+                    outf.write("\n".join(ctx.debug_log))
+                ctx.log(f"✔ Debug log written to: {txt_path}")
+            except Exception as e:
+                ctx.log(f"✗ Failed to write debug log: {e}")
 
         self.ctx = ctx
         return ctx
 
-def read_stories_mdl(filepath: str, platform: str, mdl_type: str) -> StoriesMDLContext:
-    reader = read_stories(filepath, platform, mdl_type)
+def read_stories_mdl(
+    filepath: str,
+    platform: str,
+    mdl_type: str,
+    print_debug_log: bool = False,
+) -> StoriesMDLContext:
+    reader = read_stories(
+        filepath,
+        platform,
+        mdl_type,
+        print_debug_log=print_debug_log,
+    )
     return reader.read()
 
 import math
@@ -9556,6 +9760,59 @@ class Manhunt2MdlReader:
         0x115E: 52,
         0x125E: 60,
     }
+    VERTEX_LAYOUT_BY_TYPE = {
+        0x52: {
+            "name": "position_normal_color",
+            "minimum_stride": 24,
+            "position_offset": 0x00,
+            "normal_offset": 0x0C,
+            "color_offset": 0x14,
+            "uv_offsets": (),
+            "weight_offset": None,
+            "bone_index_offset": None,
+        },
+        0x152: {
+            "name": "position_normal_color_uv1",
+            "minimum_stride": 32,
+            "position_offset": 0x00,
+            "normal_offset": 0x0C,
+            "color_offset": 0x14,
+            "uv_offsets": (0x18,),
+            "weight_offset": None,
+            "bone_index_offset": None,
+        },
+        0x252: {
+            "name": "position_normal_color_uv1_uv2",
+            "minimum_stride": 40,
+            "position_offset": 0x00,
+            "normal_offset": 0x0C,
+            "color_offset": 0x14,
+            "uv_offsets": (0x18, 0x20),
+            "weight_offset": None,
+            "bone_index_offset": None,
+        },
+        0x115E: {
+            "name": "position_skin_normal_color_uv1",
+            "minimum_stride": 52,
+            "position_offset": 0x00,
+            "weight_offset": 0x0C,
+            "bone_index_offset": 0x1C,
+            "normal_offset": 0x20,
+            "color_offset": 0x28,
+            "uv_offsets": (0x2C,),
+        },
+        0x125E: {
+            "name": "position_skin_normal_color_uv1_uv2",
+            "minimum_stride": 60,
+            "position_offset": 0x00,
+            "weight_offset": 0x0C,
+            "bone_index_offset": 0x1C,
+            "normal_offset": 0x20,
+            "color_offset": 0x28,
+            "uv_offsets": (0x2C, 0x34),
+        },
+    }
+    MATERIAL_RECORD_SIZE = 12
     OBJECT_HEADER_LAYOUTS = (
         {
             "name": "pc_retail",
@@ -9645,6 +9902,10 @@ class Manhunt2MdlReader:
         layout_mode="DETECT",
         import_armature=True,
         import_materials=True,
+        import_textures=False,
+        preloaded_texture_images=None,
+        texture_source_path=None,
+        print_debug_log=False,
     ):
         self.path = path
         self.context = context
@@ -9654,6 +9915,29 @@ class Manhunt2MdlReader:
             self.layout_mode = "PSP_BETA"
         self.import_armature = bool(import_armature)
         self.import_materials = bool(import_materials)
+        self.import_textures = bool(import_textures)
+        self.texture_source_path = str(texture_source_path or "")
+        self.print_debug_log = bool(print_debug_log)
+        self.preloaded_texture_images = list(preloaded_texture_images or [])
+        self.preloaded_texture_lookup = {}
+        for image in self.preloaded_texture_images:
+            if image is None:
+                continue
+            names = []
+            try:
+                names.append(str(image.name))
+            except Exception:
+                pass
+            try:
+                original_name = image.get("bleeds_texture_name", "")
+                if original_name:
+                    names.append(str(original_name))
+            except Exception:
+                pass
+            for image_name in names:
+                normalized_name = self.normalize_texture_name(image_name)
+                if normalized_name and normalized_name not in self.preloaded_texture_lookup:
+                    self.preloaded_texture_lookup[normalized_name] = image
 
         self.file = None
         self.file_size = 0
@@ -9661,6 +9945,7 @@ class Manhunt2MdlReader:
         self.file_was_compressed = False
         self.stem = os.path.splitext(os.path.basename(path))[0]
         self.collection = None
+        self.root_obj = None
         self.armature_obj = None
         self.bone_map = {}
         self.object_infos = []
@@ -9677,6 +9962,8 @@ class Manhunt2MdlReader:
         self.first_objinfo_offs = 0
         self.last_objinfo_offs = 0
         self.header = None
+        self.texture_file_index = None
+        self.texture_image_cache = {}
 
     def run(self):
         import io
@@ -9694,10 +9981,12 @@ class Manhunt2MdlReader:
             self.build_armature()
         self.read_object_infos()
         self.prepare_meshes()
-        self.write_import_log()
+        self.finalize_import_root()
+        if self.print_debug_log:
+            self.write_import_log()
         imported_objects = []
-        if self.armature_obj is not None:
-            imported_objects.append(self.armature_obj)
+        if self.root_obj is not None:
+            imported_objects.append(self.root_obj)
         imported_objects.extend(self.imported_mesh_objects)
         return imported_objects
 
@@ -9748,10 +10037,11 @@ class Manhunt2MdlReader:
     def log(self, message):
         text = str(message)
         self.debug_log.append(text)
-        try:
-            print(text)
-        except Exception:
-            pass
+        if self.print_debug_log:
+            try:
+                print(text)
+            except Exception:
+                pass
 
     def ensure_text_block(self, name, text):
         try:
@@ -9838,6 +10128,79 @@ class Manhunt2MdlReader:
         if scene_children is not None and collection.name not in {child.name for child in scene_children}:
             scene_children.link(collection)
         self.collection = collection
+
+    def finalize_import_root(self):
+        import bpy
+
+        try:
+            from .. import stamp_bleeds_entity_type
+        except Exception:
+            stamp_bleeds_entity_type = None
+
+        has_skin_weights = any(
+            bool(mesh_object.get("bleeds_mh2_has_skin_weights", False))
+            for mesh_object in self.imported_mesh_objects
+            if mesh_object is not None
+        )
+        mdl_type = "PED" if self.bone_map or has_skin_weights else "SIM"
+        entity_type = "PED_MODEL" if mdl_type == "PED" else "SIMPLE_MODEL"
+        platform = "PSP" if self.asset_variant == "PSP_BETA" else "PC"
+
+        root = self.armature_obj
+        if root is None:
+            root = bpy.data.objects.new("{}_Root".format(self.stem), None)
+            self.collection.objects.link(root)
+            for mesh_object in self.imported_mesh_objects:
+                if mesh_object is None or mesh_object.parent is not None:
+                    continue
+                mesh_object.parent = root
+                try:
+                    mesh_object.matrix_parent_inverse = root.matrix_world.inverted()
+                except Exception:
+                    pass
+
+        self.root_obj = root
+        try:
+            root.bleeds_is_mdl_root = True
+            root.bleeds_model_game = "MH2"
+            root.bleeds_mdl_platform = platform
+            root.bleeds_mdl_type = mdl_type
+            root.bleeds_mdl_filepath = self.path
+            root.bleeds_export_use_normals = True
+            root.bleeds_export_gouraud_shading = True
+        except Exception:
+            pass
+        root["bleeds_is_mdl_root"] = True
+        root["bleeds_model_game"] = "MH2"
+        root["bleeds_mdl_platform"] = platform
+        root["bleeds_mdl_type"] = mdl_type
+        root["bleeds_mdl_filepath"] = self.path
+        root["bleeds_export_use_normals"] = True
+        root["bleeds_export_gouraud_shading"] = True
+        root["bleeds_mh2_platform"] = platform
+        root["bleeds_mh2_asset_variant"] = self.asset_variant
+        root["bleeds_mh2_entry_layout"] = self.entry_layout_name
+        root["bleeds_mh2_bone_record_layout"] = self.bone_record_layout.get("name", "")
+        root["bleeds_mh2_object_header_layout"] = self.object_header_layout_name
+        root["bleeds_mh2_bone_count"] = int(len(self.bone_map))
+        root["bleeds_mh2_mesh_part_count"] = int(len(self.imported_mesh_objects))
+        root["bleeds_mh2_texture_source_path"] = self.texture_source_path
+        root["bleeds_mh2_texture_image_count"] = int(len(self.preloaded_texture_images))
+        root["bleeds_mh2_import_textures"] = bool(self.import_textures)
+        if stamp_bleeds_entity_type is not None:
+            stamp_bleeds_entity_type(root, entity_type)
+
+        for part_index, mesh_object in enumerate(self.imported_mesh_objects):
+            if mesh_object is None:
+                continue
+            mesh_object["bleeds_is_mdl_part"] = True
+            mesh_object["bleeds_mdl_part_index"] = int(part_index)
+            mesh_object["bleeds_model_game"] = "MH2"
+            mesh_object["bleeds_mdl_platform"] = platform
+            mesh_object["bleeds_mdl_type"] = mdl_type
+            mesh_object["bleeds_mdl_filepath"] = self.path
+            if stamp_bleeds_entity_type is not None:
+                stamp_bleeds_entity_type(mesh_object, entity_type)
 
     def score_object_info_chain(self, first_offset, last_offset):
         if not self.is_valid_offset(first_offset, 0x40, self.OBJECT_INFO_SIZE):
@@ -10528,17 +10891,21 @@ class Manhunt2MdlReader:
         return records
 
     def uv_base_candidates(self, vertex_element_type, vertex_stride):
-        if vertex_element_type == 0x52:
-            return ()
-        if vertex_element_type == 0x152:
-            return (22, 20, 24)
-        if vertex_element_type == 0x252:
-            return (22, 28, 24)
-        if vertex_element_type in (0x115E, 0x125E):
-            return (42, 32, 40, 44)
-        return tuple(offset for offset in (vertex_stride - 10, vertex_stride - 18, vertex_stride - 20) if offset >= 0)
+        layout = self.VERTEX_LAYOUT_BY_TYPE.get(int(vertex_element_type))
+        if layout is not None:
+            return tuple(int(offset) for offset in layout.get("uv_offsets", ()))
+        return tuple(
+            offset
+            for offset in (int(vertex_stride) - 8, int(vertex_stride) - 16, int(vertex_stride) - 20)
+            if offset >= 0
+        )
 
     def detect_uv_base_offset(self, vertex_start, vertex_element_type, vertex_stride, count):
+        layout = self.VERTEX_LAYOUT_BY_TYPE.get(int(vertex_element_type))
+        if layout is not None and int(vertex_stride) >= int(layout.get("minimum_stride", 0)):
+            uv_offsets = tuple(layout.get("uv_offsets", ()))
+            return int(uv_offsets[0]) if uv_offsets else None
+
         candidates = self.uv_base_candidates(vertex_element_type, vertex_stride)
         if not candidates:
             return None
@@ -10555,25 +10922,22 @@ class Manhunt2MdlReader:
                     row = self.file.read(vertex_stride)
                     if len(row) < vertex_stride:
                         break
-                    position_offset = self.detect_vertex_position_offset(row)
-                    uv_offset = int(base_offset) + int(position_offset)
-                    if uv_offset + 8 > len(row):
+                    if int(base_offset) + 8 > len(row):
                         continue
                     try:
-                        uv = struct.unpack_from("<2f", row, uv_offset)
+                        uv = struct.unpack_from("<2f", row, int(base_offset))
                     except Exception:
                         continue
                     if not all(math.isfinite(value) and abs(value) < 10000.0 for value in uv):
                         continue
                     valid += 1
-                    if previous is not None and (abs(uv[0] - previous[0]) > 0.000001 or abs(uv[1] - previous[1]) > 0.000001):
+                    if previous is not None and (
+                        abs(uv[0] - previous[0]) > 0.000001
+                        or abs(uv[1] - previous[1]) > 0.000001
+                    ):
                         varied += 1
                     previous = uv
                 score = valid * 3 + varied
-                if base_offset == 42 and vertex_element_type in (0x115E, 0x125E):
-                    score += 4
-                if base_offset == 22 and vertex_element_type in (0x152, 0x252):
-                    score += 4
                 if score > best_score:
                     best_score = score
                     best_offset = int(base_offset)
@@ -10581,18 +10945,117 @@ class Manhunt2MdlReader:
             self.file.seek(current_position)
         return best_offset
 
+    def convert_vertex_position(self, position, parent_matrix):
+        local_blender = self.source_vector_to_blender(position)
+        if parent_matrix is not None:
+            return parent_matrix @ local_blender
+        return local_blender
+
+    def convert_vertex_normal(self, normal, parent_matrix):
+        local_blender = self.source_vector_to_blender(normal)
+        if parent_matrix is not None:
+            local_blender = parent_matrix.to_3x3() @ local_blender
+        if local_blender.length > 0.000001:
+            local_blender.normalize()
+        return local_blender
+
+    def decode_exact_vertex_row(self, row, vertex_layout, parent_matrix):
+        position_offset = int(vertex_layout.get("position_offset", 0))
+        normal_offset = vertex_layout.get("normal_offset")
+        color_offset = vertex_layout.get("color_offset")
+        weight_offset = vertex_layout.get("weight_offset")
+        bone_index_offset = vertex_layout.get("bone_index_offset")
+        uv_offsets = tuple(int(offset) for offset in vertex_layout.get("uv_offsets", ()))
+
+        position = struct.unpack_from("<3f", row, position_offset)
+        if not all(math.isfinite(value) and abs(value) < 100000.0 for value in position):
+            raise ValueError("invalid vertex position")
+        output_position = self.convert_vertex_position(position, parent_matrix)
+
+        output_normal = None
+        if normal_offset is not None and int(normal_offset) + 8 <= len(row):
+            nx, ny, nz, normal_padding = struct.unpack_from("<4h", row, int(normal_offset))
+            output_normal = self.convert_vertex_normal(
+                (float(nx) / 32768.0, float(ny) / 32768.0, float(nz) / 32768.0),
+                parent_matrix,
+            )
+
+        output_color = None
+        if color_offset is not None and int(color_offset) + 4 <= len(row):
+            blue, green, red, alpha = struct.unpack_from("<4B", row, int(color_offset))
+            output_color = (
+                float(red) / 255.0,
+                float(green) / 255.0,
+                float(blue) / 255.0,
+                float(alpha) / 255.0,
+            )
+
+        output_uvs = []
+        for uv_offset in uv_offsets:
+            if uv_offset + 8 > len(row):
+                output_uvs.append((0.0, 0.0))
+                continue
+            u_value, v_value = struct.unpack_from("<2f", row, uv_offset)
+            if not all(math.isfinite(value) and abs(value) < 10000.0 for value in (u_value, v_value)):
+                output_uvs.append((0.0, 0.0))
+                continue
+            output_uvs.append((float(u_value), 1.0 - float(v_value)))
+
+        output_bone_indices = None
+        output_bone_weights = None
+        if (
+            weight_offset is not None
+            and bone_index_offset is not None
+            and int(weight_offset) + 16 <= len(row)
+            and int(bone_index_offset) + 4 <= len(row)
+        ):
+            raw_weights = struct.unpack_from("<4f", row, int(weight_offset))
+            raw_indices = struct.unpack_from("<4B", row, int(bone_index_offset))
+            output_bone_indices = tuple(int(value) for value in raw_indices)
+            output_bone_weights = tuple(
+                float(value) if math.isfinite(value) and value > 0.0 else 0.0
+                for value in raw_weights
+            )
+
+        return (
+            output_position,
+            output_normal,
+            output_color,
+            output_uvs,
+            output_bone_indices,
+            output_bone_weights,
+        )
+
     def read_vertex_buffer(self, vertex_start, vertex_element_type, vertex_stride, count, parent_bone_info):
         self.file.seek(vertex_start)
         parent_matrix = parent_bone_info.get("matrix") if parent_bone_info is not None else None
-        uv_base_offset = self.detect_uv_base_offset(vertex_start, vertex_element_type, vertex_stride, count)
+        vertex_layout = self.VERTEX_LAYOUT_BY_TYPE.get(int(vertex_element_type))
+        use_exact_layout = (
+            vertex_layout is not None
+            and int(vertex_stride) >= int(vertex_layout.get("minimum_stride", 0))
+        )
+        uv_base_offset = self.detect_uv_base_offset(
+            vertex_start,
+            vertex_element_type,
+            vertex_stride,
+            count,
+        )
         self.file.seek(vertex_start)
 
         vertices = []
-        uvs = [] if uv_base_offset is not None else None
+        normals = []
+        colors = []
+        uv_layer_count = len(tuple(vertex_layout.get("uv_offsets", ()))) if use_exact_layout else (1 if uv_base_offset is not None else 0)
+        uv_layers = [[] for uv_layer_index in range(uv_layer_count)]
+        bone_indices = []
+        bone_weights = []
         invalid_vertex_indices = set()
         position_offset_counts = {}
         min_value = Vector((999999.0, 999999.0, 999999.0))
         max_value = Vector((-999999.0, -999999.0, -999999.0))
+        has_skin_weights = False
+        weight_sum_min = 999999.0
+        weight_sum_max = -999999.0
 
         for vertex_index in range(int(count)):
             row = self.file.read(int(vertex_stride))
@@ -10600,25 +11063,83 @@ class Manhunt2MdlReader:
                 invalid_vertex_indices.update(range(vertex_index, int(count)))
                 while len(vertices) < int(count):
                     vertices.append(Vector((0.0, 0.0, 0.0)))
-                    if uvs is not None:
-                        uvs.append((0.0, 0.0))
+                    normals.append(Vector((0.0, 0.0, 1.0)))
+                    colors.append((1.0, 1.0, 1.0, 1.0))
+                    for uv_layer in uv_layers:
+                        uv_layer.append((0.0, 0.0))
+                    bone_indices.append((0, 0, 0, 0))
+                    bone_weights.append((0.0, 0.0, 0.0, 0.0))
                 break
 
-            position_offset = self.detect_vertex_position_offset(row)
+            if use_exact_layout:
+                position_offset = int(vertex_layout.get("position_offset", 0))
+                try:
+                    (
+                        output_position,
+                        output_normal,
+                        output_color,
+                        output_uvs,
+                        output_bone_indices,
+                        output_bone_weights,
+                    ) = self.decode_exact_vertex_row(row, vertex_layout, parent_matrix)
+                except Exception:
+                    output_position = Vector((0.0, 0.0, 0.0))
+                    output_normal = Vector((0.0, 0.0, 1.0))
+                    output_color = (1.0, 1.0, 1.0, 1.0)
+                    output_uvs = [(0.0, 0.0) for uv_layer_index in range(uv_layer_count)]
+                    output_bone_indices = (0, 0, 0, 0)
+                    output_bone_weights = (0.0, 0.0, 0.0, 0.0)
+                    invalid_vertex_indices.add(vertex_index)
+            else:
+                position_offset = self.detect_vertex_position_offset(row)
+                try:
+                    position = struct.unpack_from("<3f", row, position_offset)
+                except Exception:
+                    position = (0.0, 0.0, 0.0)
+                    invalid_vertex_indices.add(vertex_index)
+                if not all(math.isfinite(value) and abs(value) < 100000.0 for value in position):
+                    position = (0.0, 0.0, 0.0)
+                    invalid_vertex_indices.add(vertex_index)
+                output_position = self.convert_vertex_position(position, parent_matrix)
+                output_normal = Vector((0.0, 0.0, 1.0))
+                output_color = (1.0, 1.0, 1.0, 1.0)
+                output_uvs = []
+                if uv_base_offset is not None:
+                    uv_value = (0.0, 0.0)
+                    if int(uv_base_offset) + 8 <= len(row):
+                        try:
+                            decoded_uv = struct.unpack_from("<2f", row, int(uv_base_offset))
+                            if all(math.isfinite(value) and abs(value) < 10000.0 for value in decoded_uv):
+                                uv_value = (float(decoded_uv[0]), 1.0 - float(decoded_uv[1]))
+                        except Exception:
+                            pass
+                    output_uvs.append(uv_value)
+                output_bone_indices = (0, 0, 0, 0)
+                output_bone_weights = (0.0, 0.0, 0.0, 0.0)
+
             position_offset_counts[position_offset] = position_offset_counts.get(position_offset, 0) + 1
-            try:
-                position = struct.unpack_from("<3f", row, position_offset)
-            except Exception:
-                position = (0.0, 0.0, 0.0)
-                invalid_vertex_indices.add(vertex_index)
-
-            if not all(math.isfinite(value) and abs(value) < 100000.0 for value in position):
-                position = (0.0, 0.0, 0.0)
-                invalid_vertex_indices.add(vertex_index)
-
-            local_blender = self.source_vector_to_blender(position)
-            output_position = parent_matrix @ local_blender if parent_matrix is not None else local_blender
             vertices.append(output_position)
+            normals.append(output_normal if output_normal is not None else Vector((0.0, 0.0, 1.0)))
+            colors.append(output_color if output_color is not None else (1.0, 1.0, 1.0, 1.0))
+            for uv_layer_index, uv_layer in enumerate(uv_layers):
+                uv_layer.append(output_uvs[uv_layer_index] if uv_layer_index < len(output_uvs) else (0.0, 0.0))
+
+            if output_bone_indices is None:
+                output_bone_indices = (0, 0, 0, 0)
+            if output_bone_weights is None:
+                output_bone_weights = (0.0, 0.0, 0.0, 0.0)
+            bone_indices.append(tuple(output_bone_indices))
+            bone_weights.append(tuple(output_bone_weights))
+
+            active_weight_sum = sum(
+                float(weight)
+                for weight in output_bone_weights
+                if math.isfinite(float(weight)) and float(weight) > 0.000001
+            )
+            if active_weight_sum > 0.000001:
+                has_skin_weights = True
+                weight_sum_min = min(weight_sum_min, active_weight_sum)
+                weight_sum_max = max(weight_sum_max, active_weight_sum)
 
             if vertex_index not in invalid_vertex_indices:
                 min_value.x = min(min_value.x, output_position.x)
@@ -10627,18 +11148,6 @@ class Manhunt2MdlReader:
                 max_value.x = max(max_value.x, output_position.x)
                 max_value.y = max(max_value.y, output_position.y)
                 max_value.z = max(max_value.z, output_position.z)
-
-            if uvs is not None:
-                uv_offset = int(uv_base_offset) + int(position_offset)
-                uv_value = (0.0, 0.0)
-                if uv_offset + 8 <= len(row):
-                    try:
-                        decoded_uv = struct.unpack_from("<2f", row, uv_offset)
-                        if all(math.isfinite(value) and abs(value) < 10000.0 for value in decoded_uv):
-                            uv_value = (decoded_uv[0], 1.0 - decoded_uv[1])
-                    except Exception:
-                        pass
-                uvs.append(uv_value)
 
         valid_vertex_count = len(vertices) - len(invalid_vertex_indices)
         if valid_vertex_count > 0:
@@ -10653,11 +11162,16 @@ class Manhunt2MdlReader:
         else:
             bounds_text = "empty"
 
-        return vertices, uvs, {
+        return vertices, normals, colors, uv_layers, bone_indices, bone_weights, {
             "invalid_vertex_indices": invalid_vertex_indices,
             "invalid_vertex_count": len(invalid_vertex_indices),
             "position_offset_counts": position_offset_counts,
             "uv_base_offset": uv_base_offset,
+            "uv_layer_count": len(uv_layers),
+            "has_skin_weights": bool(has_skin_weights),
+            "weight_sum_min": 0.0 if weight_sum_min == 999999.0 else float(weight_sum_min),
+            "weight_sum_max": 0.0 if weight_sum_max == -999999.0 else float(weight_sum_max),
+            "vertex_layout_name": str(vertex_layout.get("name", "heuristic")) if use_exact_layout else "heuristic",
             "bounds_text": bounds_text,
         }
 
@@ -10665,24 +11179,29 @@ class Manhunt2MdlReader:
         materials = []
         if not self.import_materials:
             return materials
-        if not material_offset or num_materials <= 0 or not self.is_valid_offset(material_offset, 0x40, 16):
+        table_size = int(num_materials) * int(self.MATERIAL_RECORD_SIZE)
+        if (
+            not material_offset
+            or num_materials <= 0
+            or not self.is_valid_offset(material_offset, 0x40, table_size)
+        ):
             return materials
 
         current_position = self.file.tell()
         try:
             self.file.seek(material_offset)
             for material_index in range(int(num_materials)):
-                row = self.file.read(16)
-                if len(row) < 16:
+                row = self.file.read(int(self.MATERIAL_RECORD_SIZE))
+                if len(row) < int(self.MATERIAL_RECORD_SIZE):
                     break
-                texture_offset, loaded = struct.unpack("<IB", row[:5])
-                color = struct.unpack("4B", row[5:9])
+                texture_offset, loaded, red, green, blue, alpha = struct.unpack("<IB4B3x", row)
                 texture_name = self.read_c_string(texture_offset) if self.is_valid_offset(texture_offset, 0x40, 1) else ""
                 materials.append({
-                    "index": material_index,
+                    "index": int(material_index),
                     "tex_name": texture_name,
-                    "color": color,
+                    "color": (int(red), int(green), int(blue), int(alpha)),
                     "loaded": int(loaded),
+                    "record_offset": int(material_offset) + int(material_index) * int(self.MATERIAL_RECORD_SIZE),
                 })
         finally:
             self.file.seek(current_position)
@@ -10736,7 +11255,15 @@ class Manhunt2MdlReader:
 
         parent_bone_offset = int(object_info.get("parent_bone_offset", 0))
         parent_bone_info = self.bone_map.get(parent_bone_offset)
-        vertices, uvs, vertex_statistics = self.read_vertex_buffer(
+        (
+            vertices,
+            normals,
+            colors,
+            uv_layers,
+            bone_indices,
+            bone_weights,
+            vertex_statistics,
+        ) = self.read_vertex_buffer(
             vertex_start,
             vertex_element_type,
             vertex_stride,
@@ -10773,12 +11300,18 @@ class Manhunt2MdlReader:
             mesh_name,
             vertices,
             faces,
-            uvs,
+            uv_layers,
             materials,
+            normals=normals,
+            colors=colors,
+            bone_indices=bone_indices,
+            bone_weights=bone_weights,
             material_id_records=material_id_records,
             face_material_indices=face_material_indices,
         )
         if mesh_object is not None:
+            if mesh_object not in self.imported_mesh_objects:
+                self.imported_mesh_objects.append(mesh_object)
             mesh_object["bleeds_mh2_objinfo_offset"] = int(object_info.get("objinfo_offset", 0))
             mesh_object["bleeds_mh2_object_data_offset"] = int(object_offset)
             mesh_object["bleeds_mh2_parent_bone_offset"] = int(parent_bone_offset)
@@ -10792,10 +11325,18 @@ class Manhunt2MdlReader:
             mesh_object["bleeds_mh2_material_id_size"] = int(material_id_size)
             mesh_object["bleeds_mh2_vertex_start"] = int(vertex_start)
             mesh_object["bleeds_mh2_uv_base_offset"] = int(vertex_statistics["uv_base_offset"] or 0)
+            mesh_object["bleeds_mh2_uv_layer_count"] = int(vertex_statistics.get("uv_layer_count", 0))
+            mesh_object["bleeds_mh2_vertex_layout"] = str(vertex_statistics.get("vertex_layout_name", ""))
+            mesh_object["bleeds_mh2_has_skin_weights"] = bool(vertex_statistics.get("has_skin_weights", False))
+            mesh_object["bleeds_mh2_weight_sum_min"] = float(vertex_statistics.get("weight_sum_min", 0.0))
+            mesh_object["bleeds_mh2_weight_sum_max"] = float(vertex_statistics.get("weight_sum_max", 0.0))
             mesh_object["bleeds_mh2_invalid_vertex_count"] = int(vertex_statistics["invalid_vertex_count"])
             mesh_object["bleeds_mh2_mesh_space"] = "parent_bone_world" if parent_bone_info else "source_blender"
             if self.armature_obj is not None:
-                self.parent_mesh_to_armature(mesh_object)
+                self.parent_mesh_to_armature(
+                    mesh_object,
+                    create_rigid_parent_group=not bool(vertex_statistics.get("has_skin_weights", False)),
+                )
 
         parent_status = "armature_child" if (
             mesh_object is not None and getattr(mesh_object, "parent", None) == self.armature_obj
@@ -10804,7 +11345,7 @@ class Manhunt2MdlReader:
             "MH2 Mesh[{:02d}] {!r} object=0x{:08X} parent=0x{:08X} {!r} "
             "verts={}/{} invalid={} faces={}/{} stride={} vet=0x{:X} "
             "header_layout={} header={} matid_size={} face_start=0x{:08X} vertex_start=0x{:08X} "
-            "position_offsets={} uv_base={} space={} parent_state={} bounds={}".format(
+            "position_offsets={} uv_base={} uv_layers={} skin={} weight_sum=({:.6f},{:.6f}) layout={} space={} parent_state={} bounds={}".format(
                 object_index,
                 mesh_name,
                 object_offset,
@@ -10824,6 +11365,11 @@ class Manhunt2MdlReader:
                 vertex_start,
                 vertex_statistics["position_offset_counts"],
                 vertex_statistics["uv_base_offset"],
+                vertex_statistics.get("uv_layer_count", 0),
+                vertex_statistics.get("has_skin_weights", False),
+                vertex_statistics.get("weight_sum_min", 0.0),
+                vertex_statistics.get("weight_sum_max", 0.0),
+                vertex_statistics.get("vertex_layout_name", ""),
                 "parent_bone_world" if parent_bone_info else "source_blender",
                 parent_status,
                 vertex_statistics["bounds_text"],
@@ -10857,7 +11403,7 @@ class Manhunt2MdlReader:
         self.file.seek(current_position)
         return text.decode("ascii", errors="replace")
 
-    def parent_mesh_to_armature(self, mesh_object):
+    def parent_mesh_to_armature(self, mesh_object, create_rigid_parent_group=True):
         if mesh_object is None or self.armature_obj is None:
             return False
         try:
@@ -10868,7 +11414,7 @@ class Manhunt2MdlReader:
             return False
 
         parent_bone_name = str(mesh_object.get("bleeds_mh2_parent_bone_name", "") or "")
-        if parent_bone_name:
+        if parent_bone_name and bool(create_rigid_parent_group):
             try:
                 vertex_group = mesh_object.vertex_groups.get(parent_bone_name)
                 if vertex_group is None:
@@ -10900,7 +11446,327 @@ class Manhunt2MdlReader:
             self.imported_mesh_objects.append(mesh_object)
         return True
 
-    def make_mesh(self, name, vertices, faces, uvs, materials, material_id_records=None, face_material_indices=None):
+    def normalize_texture_name(self, value):
+        text = os.path.splitext(os.path.basename(str(value or "")))[0]
+        return "".join(character.lower() for character in text if character.isalnum())
+
+    def build_texture_index(self):
+        if self.texture_file_index is not None:
+            return self.texture_file_index
+
+        texture_index = {}
+        source_directory = os.path.abspath(os.path.dirname(self.path))
+        valid_extensions = {
+            ".dds",
+            ".png",
+            ".tga",
+            ".bmp",
+            ".jpg",
+            ".jpeg",
+            ".tif",
+            ".tiff",
+            ".webp",
+        }
+        if not os.path.isdir(source_directory):
+            self.texture_file_index = texture_index
+            return texture_index
+
+        root_depth = source_directory.rstrip(os.sep).count(os.sep)
+        scanned_file_count = 0
+        for current_directory, child_directories, filenames in os.walk(source_directory):
+            current_depth = current_directory.rstrip(os.sep).count(os.sep)
+            if current_depth - root_depth >= 2:
+                child_directories[:] = []
+            child_directories.sort()
+            for filename in sorted(filenames):
+                scanned_file_count += 1
+                if scanned_file_count > 20000:
+                    self.texture_file_index = texture_index
+                    return texture_index
+                stem, extension = os.path.splitext(filename)
+                if extension.lower() not in valid_extensions:
+                    continue
+                filepath = os.path.join(current_directory, filename)
+                keys = {
+                    filename.casefold(),
+                    stem.casefold(),
+                    self.normalize_texture_name(stem),
+                }
+                for key in keys:
+                    if key and key not in texture_index:
+                        texture_index[key] = filepath
+
+        self.texture_file_index = texture_index
+        return texture_index
+
+    def find_existing_texture_image(self, texture_name):
+        import bpy
+
+        normalized_name = self.normalize_texture_name(texture_name)
+        for image in bpy.data.images:
+            image_name = self.normalize_texture_name(getattr(image, "name", ""))
+            filepath_name = self.normalize_texture_name(getattr(image, "filepath", ""))
+            if normalized_name and normalized_name in (image_name, filepath_name):
+                return image
+        return None
+
+    def load_texture_image(self, texture_name):
+        import bpy
+
+        if not self.import_textures or not texture_name:
+            return None
+        normalized_name = self.normalize_texture_name(texture_name)
+        if normalized_name in self.texture_image_cache:
+            return self.texture_image_cache[normalized_name]
+
+        preloaded_image = self.preloaded_texture_lookup.get(normalized_name)
+        if preloaded_image is not None:
+            self.texture_image_cache[normalized_name] = preloaded_image
+            return preloaded_image
+
+        existing_image = self.find_existing_texture_image(texture_name)
+        if existing_image is not None:
+            self.texture_image_cache[normalized_name] = existing_image
+            return existing_image
+
+        texture_index = self.build_texture_index()
+        source_name = os.path.basename(str(texture_name))
+        source_stem = os.path.splitext(source_name)[0]
+        lookup_keys = (
+            source_name.casefold(),
+            source_stem.casefold(),
+            normalized_name,
+        )
+        texture_path = None
+        for lookup_key in lookup_keys:
+            if lookup_key and lookup_key in texture_index:
+                texture_path = texture_index[lookup_key]
+                break
+        if texture_path is None:
+            self.texture_image_cache[normalized_name] = None
+            return None
+
+        try:
+            image = bpy.data.images.load(texture_path, check_existing=True)
+        except Exception as exc:
+            self.log("MH2 texture load failed for {!r}: {}".format(texture_path, exc))
+            image = None
+        self.texture_image_cache[normalized_name] = image
+        return image
+
+    def configure_material_nodes(self, material, material_info, image):
+        color_bytes = tuple(material_info.get("color", (255, 255, 255, 255)))
+        while len(color_bytes) < 4:
+            color_bytes += (255,)
+        diffuse_color = tuple(float(value) / 255.0 for value in color_bytes[:4])
+        try:
+            material.diffuse_color = diffuse_color
+        except Exception:
+            pass
+        try:
+            material.use_nodes = True
+        except Exception:
+            return
+
+        node_tree = getattr(material, "node_tree", None)
+        if node_tree is None:
+            return
+        nodes = node_tree.nodes
+        links = node_tree.links
+
+        output_node = next((node for node in nodes if node.type == "OUTPUT_MATERIAL"), None)
+        if output_node is None:
+            output_node = nodes.new("ShaderNodeOutputMaterial")
+            output_node.location = (420.0, 0.0)
+
+        shader_node = next((node for node in nodes if node.type == "BSDF_PRINCIPLED"), None)
+        if shader_node is None:
+            shader_node = nodes.new("ShaderNodeBsdfPrincipled")
+            shader_node.location = (120.0, 0.0)
+
+        surface_input = output_node.inputs.get("Surface")
+        shader_output = shader_node.outputs.get("BSDF")
+        if surface_input is not None and shader_output is not None and not surface_input.is_linked:
+            links.new(shader_output, surface_input)
+
+        base_color_input = shader_node.inputs.get("Base Color")
+        if base_color_input is not None:
+            base_color_input.default_value = diffuse_color
+        alpha_input = shader_node.inputs.get("Alpha")
+        if alpha_input is not None:
+            alpha_input.default_value = diffuse_color[3]
+        roughness_input = shader_node.inputs.get("Roughness")
+        if roughness_input is not None:
+            roughness_input.default_value = 0.5
+
+        texture_node = nodes.get("MH2 Texture")
+        if image is not None:
+            if texture_node is None or texture_node.type != "TEX_IMAGE":
+                if texture_node is not None:
+                    nodes.remove(texture_node)
+                texture_node = nodes.new("ShaderNodeTexImage")
+                texture_node.name = "MH2 Texture"
+                texture_node.label = "MH2 Texture"
+            texture_node.location = (-220.0, 0.0)
+            texture_node.image = image
+            color_output = texture_node.outputs.get("Color")
+            alpha_output = texture_node.outputs.get("Alpha")
+            if base_color_input is not None and color_output is not None:
+                for link in list(base_color_input.links):
+                    links.remove(link)
+                links.new(color_output, base_color_input)
+            if alpha_input is not None and alpha_output is not None:
+                for link in list(alpha_input.links):
+                    links.remove(link)
+                links.new(alpha_output, alpha_input)
+            try:
+                material.blend_method = "HASHED"
+            except Exception:
+                pass
+
+    def get_or_create_material(self, material_info):
+        import bpy
+
+        material_index = int(material_info.get("index", 0))
+        texture_name = str(material_info.get("tex_name", "") or "MH2_Material_{:03d}".format(material_index))
+        source_path = os.path.abspath(str(self.path))
+        source_key = os.path.normcase(source_path)
+
+        material = None
+        for existing_material in bpy.data.materials:
+            try:
+                material_source = os.path.normcase(os.path.abspath(str(existing_material.get("bleeds_mh2_source_mdl_path", "") or "")))
+                original_texture_name = self.normalize_texture_name(existing_material.get("bleeds_mh2_texture_name", existing_material.name))
+            except Exception:
+                continue
+            if material_source == source_key and original_texture_name == self.normalize_texture_name(texture_name):
+                material = existing_material
+                break
+
+        if material is None:
+            base_material = bpy.data.materials.get(texture_name)
+            if base_material is None:
+                material = bpy.data.materials.new(texture_name)
+            else:
+                scoped_name = "{} [{}]".format(texture_name, self.stem)
+                material = bpy.data.materials.new(scoped_name)
+
+        image = self.load_texture_image(texture_name)
+        self.configure_material_nodes(material, material_info, image)
+        material["bleeds_model_game"] = "MH2"
+        material["bleeds_mh2_material_index"] = material_index
+        material["bleeds_mh2_texture_name"] = texture_name
+        material["bleeds_mh2_texture_loaded"] = bool(image is not None)
+        material["bleeds_mh2_loaded_flag"] = int(material_info.get("loaded", 0))
+        material["bleeds_mh2_source_mdl_path"] = source_path
+        material["bleeds_mh2_texture_source_path"] = str(self.texture_source_path or "")
+        return material
+
+    def get_skin_palette_names(self):
+        names = []
+        used_names = set()
+        for bone_index, bone_info in enumerate(self.bone_map.values()):
+            base_name = str(bone_info.get("name", "") or "Bone_{:02d}".format(bone_index))
+            bone_name = base_name
+            duplicate_index = 1
+            while bone_name in used_names:
+                bone_name = "{}_{}".format(base_name, duplicate_index)
+                duplicate_index += 1
+            used_names.add(bone_name)
+            names.append(bone_name)
+        return names
+
+    def apply_skin_weights(self, mesh_object, bone_indices, bone_weights):
+        if mesh_object is None or not bone_indices or not bone_weights:
+            return 0
+        palette_names = self.get_skin_palette_names()
+        if not palette_names:
+            return 0
+
+        vertex_groups = mesh_object.vertex_groups
+        while len(vertex_groups) > 0:
+            vertex_groups.remove(vertex_groups[0])
+        groups = [vertex_groups.new(name=name) for name in palette_names]
+
+        assigned_influence_count = 0
+        weighted_vertex_count = 0
+        maximum_vertex_count = min(len(mesh_object.data.vertices), len(bone_indices), len(bone_weights))
+        for vertex_index in range(maximum_vertex_count):
+            merged_weights = {}
+            for bone_index, weight in zip(bone_indices[vertex_index], bone_weights[vertex_index]):
+                try:
+                    bone_index = int(bone_index)
+                    weight = float(weight)
+                except Exception:
+                    continue
+                if not math.isfinite(weight) or weight <= 0.000001:
+                    continue
+                if bone_index < 0 or bone_index >= len(groups):
+                    continue
+                merged_weights[bone_index] = merged_weights.get(bone_index, 0.0) + weight
+
+            total_weight = sum(merged_weights.values())
+            if total_weight <= 0.000001:
+                continue
+            weighted_vertex_count += 1
+            for bone_index, weight in merged_weights.items():
+                groups[bone_index].add([vertex_index], float(weight) / float(total_weight), "REPLACE")
+                assigned_influence_count += 1
+
+        mesh_object["bleeds_mh2_skin_palette_size"] = len(palette_names)
+        mesh_object["bleeds_mh2_weighted_vertex_count"] = int(weighted_vertex_count)
+        mesh_object["bleeds_mh2_assigned_influence_count"] = int(assigned_influence_count)
+        return assigned_influence_count
+
+    def apply_vertex_colors(self, mesh, colors):
+        if not colors or len(colors) < len(mesh.vertices):
+            return None
+        try:
+            if hasattr(mesh, "color_attributes"):
+                color_layer = mesh.color_attributes.get("Color")
+                if color_layer is None:
+                    color_layer = mesh.color_attributes.new(name="Color", type="BYTE_COLOR", domain="CORNER")
+                for loop in mesh.loops:
+                    color_layer.data[loop.index].color = tuple(colors[loop.vertex_index])
+                return color_layer
+        except Exception:
+            pass
+        try:
+            color_layer = mesh.vertex_colors.get("Color") or mesh.vertex_colors.new(name="Color")
+            for loop in mesh.loops:
+                color_layer.data[loop.index].color = tuple(colors[loop.vertex_index])
+            return color_layer
+        except Exception:
+            return None
+
+    def apply_custom_normals(self, mesh, normals):
+        if not normals or len(normals) < len(mesh.vertices):
+            return False
+        try:
+            if hasattr(mesh, "use_auto_smooth"):
+                mesh.use_auto_smooth = True
+        except Exception:
+            pass
+        try:
+            mesh.normals_split_custom_set_from_vertices([tuple(normal) for normal in normals])
+            return True
+        except Exception:
+            return False
+
+    def make_mesh(
+        self,
+        name,
+        vertices,
+        faces,
+        uv_layers,
+        materials,
+        normals=None,
+        colors=None,
+        bone_indices=None,
+        bone_weights=None,
+        material_id_records=None,
+        face_material_indices=None,
+    ):
         import bpy
 
         if not vertices:
@@ -10908,22 +11774,31 @@ class Manhunt2MdlReader:
 
         mesh = bpy.data.meshes.new(name)
         mesh.from_pydata([tuple(vertex) for vertex in vertices], [], faces)
+        for polygon in mesh.polygons:
+            polygon.use_smooth = True
+        try:
+            if hasattr(mesh, "use_auto_smooth"):
+                mesh.use_auto_smooth = True
+        except Exception:
+            pass
         mesh.update()
 
-        if uvs is not None and len(uvs) >= len(vertices):
-            uv_layer = mesh.uv_layers.new(name="UVMap")
+        for uv_layer_index, source_uvs in enumerate(uv_layers or []):
+            if source_uvs is None or len(source_uvs) < len(vertices):
+                continue
+            layer_name = "UVMap" if uv_layer_index == 0 else "UVMap.{}".format(uv_layer_index + 1)
+            uv_layer = mesh.uv_layers.new(name=layer_name)
             for polygon in mesh.polygons:
                 for loop_index in polygon.loop_indices:
                     vertex_index = mesh.loops[loop_index].vertex_index
-                    if vertex_index < len(uvs):
-                        uv_layer.data[loop_index].uv = uvs[vertex_index]
+                    if vertex_index < len(source_uvs):
+                        uv_layer.data[loop_index].uv = tuple(source_uvs[vertex_index])
+
+        self.apply_vertex_colors(mesh, colors or [])
+        self.apply_custom_normals(mesh, normals or [])
 
         for material_info in materials:
-            material_index = int(material_info.get("index", len(mesh.materials)))
-            material_name = material_info.get("tex_name") or "MH2_Material_{:03d}".format(material_index)
-            material = bpy.data.materials.get(material_name) or bpy.data.materials.new(material_name)
-            material.use_nodes = True
-            mesh.materials.append(material)
+            mesh.materials.append(self.get_or_create_material(material_info))
 
         if face_material_indices is not None:
             for polygon_index, material_index in enumerate(face_material_indices):
@@ -10947,6 +11822,8 @@ class Manhunt2MdlReader:
         mesh_object["bleeds_mh2_bone_record_layout"] = self.bone_record_layout.get("name", "")
         mesh_object["bleeds_mh2_object_header_layout"] = self.object_header_layout_name
         mesh_object["bleeds_mdl_filepath"] = self.path
+        if bone_indices and bone_weights:
+            self.apply_skin_weights(mesh_object, bone_indices, bone_weights)
         return mesh_object
 
 
@@ -10984,6 +11861,10 @@ def import_mh2(
     layout_mode="DETECT",
     import_armature=True,
     import_materials=True,
+    import_textures=False,
+    preloaded_texture_images=None,
+    texture_source_path=None,
+    print_debug_log=False,
 ):
     return Manhunt2MdlReader(
         path=path,
@@ -10992,4 +11873,8 @@ def import_mh2(
         layout_mode=layout_mode,
         import_armature=import_armature,
         import_materials=import_materials,
+        import_textures=import_textures,
+        preloaded_texture_images=preloaded_texture_images,
+        texture_source_path=texture_source_path,
+        print_debug_log=print_debug_log,
     ).run()

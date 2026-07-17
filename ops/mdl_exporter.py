@@ -41,6 +41,22 @@ def find_mdl_root_from_object(obj: bpy.types.Object) -> Optional[bpy.types.Objec
         cur = cur.parent
     return None
 
+def use_gouraud_shading_for_export(root_obj: Optional[bpy.types.Object]) -> bool:
+    if root_obj is None:
+        return True
+    try:
+        if hasattr(root_obj, "bleeds_export_gouraud_shading"):
+            return bool(root_obj.bleeds_export_gouraud_shading)
+    except Exception:
+        pass
+    try:
+        if "bleeds_export_gouraud_shading" in root_obj:
+            return bool(root_obj.get("bleeds_export_gouraud_shading", True))
+    except Exception:
+        pass
+    return True
+
+
 def find_mdl_root(context: bpy.types.Context) -> bpy.types.Object:
 
     candidates: List[bpy.types.Object] = []
@@ -4125,7 +4141,10 @@ def build_source_corner_vertices_world(
             nx, ny, nz = 0.0, 0.0, 1.0
             if use_normals:
                 try:
-                    n = loop.normal
+                    if use_gouraud_shading_for_export(resolved_root):
+                        n = mesh_eval.vertices[vi].normal
+                    else:
+                        n = loop.normal
                     nw = (normal_mtx @ n).normalized()
                     nx, ny, nz = float(nw.x), float(nw.y), float(nw.z)
                 except Exception:
@@ -4752,7 +4771,10 @@ def build_simple_vertices_world(
                             nx, ny, nz = 0.0, 0.0, 1.0
                     else:
                         try:
-                            n = mesh_eval.loops[loop_index].normal
+                            if use_gouraud_shading_for_export(resolved_root):
+                                n = mesh_eval.vertices[vi].normal
+                            else:
+                                n = mesh_eval.loops[loop_index].normal
                             nw = (normal_mtx @ n).normalized()
                             nx, ny, nz = float(nw.x), float(nw.y), float(nw.z)
                         except Exception:

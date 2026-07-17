@@ -48,6 +48,41 @@ def find_mdl_root(obj: Optional[bpy.types.Object]) -> Optional[bpy.types.Object]
 
     return None
 
+
+def get_mdl_root_game(root: Optional[bpy.types.Object]) -> str:
+    if root is None:
+        return ""
+    try:
+        value = getattr(root, "bleeds_model_game", "")
+        if value:
+            return str(value).upper().strip()
+    except Exception:
+        pass
+    try:
+        return str(root.get("bleeds_model_game", "") or "").upper().strip()
+    except Exception:
+        return ""
+
+
+def gather_mdl_mesh_children(root: Optional[bpy.types.Object]):
+    if root is None:
+        return []
+    meshes = []
+    stack = list(getattr(root, "children", []) or [])
+    visited = set()
+    while stack:
+        obj = stack.pop(0)
+        if obj is None:
+            continue
+        pointer = id(obj)
+        if pointer in visited:
+            continue
+        visited.add(pointer)
+        if getattr(obj, "type", None) == "MESH":
+            meshes.append(obj)
+        stack.extend(list(getattr(obj, "children", []) or []))
+    return meshes
+
 def read_root_base_scale_pos(root: bpy.types.Object) -> Tuple[Vector, Vector]:
 
     if hasattr(root, "bleeds_leeds_scale_base") and hasattr(root, "bleeds_leeds_pos_base"):
@@ -148,7 +183,8 @@ class EXPORT_PT_MDL_LeedsScalePos(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        return find_mdl_root(context.object) is not None
+        root = find_mdl_root(context.object)
+        return root is not None and get_mdl_root_game(root) != "MH2"
 
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
@@ -192,6 +228,11 @@ class EXPORT_PT_MDL_LeedsScalePos(bpy.types.Panel):
             src = root.get("bleeds_mdl_filepath", "")
             if src:
                 meta.label(text=f"Source: {src}")
+
+        if hasattr(root, "bleeds_export_use_normals"):
+            meta.prop(root, "bleeds_export_use_normals", text="Export Normals")
+        if hasattr(root, "bleeds_export_gouraud_shading"):
+            meta.prop(root, "bleeds_export_gouraud_shading", text="Gouraud Shading")
 
         layout.separator()
         base_box = layout.box()
@@ -338,7 +379,8 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
 
     @classmethod
     def poll(cls, context: bpy.types.Context) -> bool:
-        return find_mdl_root(context.object) is not None
+        root = find_mdl_root(context.object)
+        return root is not None and get_mdl_root_game(root) != "MH2"
 
     def draw(self, context: bpy.types.Context) -> None:
         layout = self.layout
@@ -433,11 +475,100 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
                 row.alert = True
             row.label(text=f"{domain}: {attr_name} ({actual}/{expected})")
 
+class OBJECT_PT_MDL_Manhunt2Properties(bpy.types.Panel):
+    bl_idname = "OBJECT_PT_MDL_Manhunt2Properties"
+    bl_label = "BLeeds Manhunt 2 MDL"
+    bl_space_type = "PROPERTIES"
+    bl_region_type = "WINDOW"
+    bl_context = "object"
+
+    @classmethod
+    def poll(cls, context: bpy.types.Context) -> bool:
+        root = find_mdl_root(context.object)
+        return root is not None and get_mdl_root_game(root) == "MH2"
+
+    def draw(self, context: bpy.types.Context) -> None:
+        import os
+
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        root = find_mdl_root(context.object)
+        if root is None:
+            layout.label(text="No BLeeds MH2 MDL root found.")
+            return
+
+        meshes = gather_mdl_mesh_children(root)
+        active_mesh = context.object if context.object is not None and context.object.type == "MESH" else None
+        if active_mesh not in meshes:
+            active_mesh = meshes[0] if meshes else None
+
+        model_box = layout.box()
+        model_box.label(text="Model")
+        model_col = model_box.column(align=True)
+        model_col.label(text="Root: {}".format(root.name))
+        if hasattr(root, "bleeds_mdl_type"):
+            model_col.prop(root, "bleeds_mdl_type", text="MDL Type")
+        else:
+            model_col.label(text="MDL Type: {}".format(root.get("bleeds_mdl_type", "Unknown")))
+        if hasattr(root, "bleeds_mdl_platform"):
+            model_col.prop(root, "bleeds_mdl_platform", text="Platform")
+        else:
+            model_col.label(text="Platform: {}".format(root.get("bleeds_mdl_platform", "Unknown")))
+        source_path = str(getattr(root, "bleeds_mdl_filepath", root.get("bleeds_mdl_filepath", "")) or "")
+        if source_path:
+            model_col.label(text="Source: {}".format(os.path.basename(source_path)))
+        model_col.label(text="Bones: {}".format(int(root.get("bleeds_mh2_bone_count", 0))))
+        model_col.label(text="Mesh parts: {}".format(len(meshes)))
+
+        format_box = layout.box()
+        format_box.label(text="Detected MH2 Structure")
+        format_col = format_box.column(align=True)
+        format_col.label(text="Asset: {}".format(root.get("bleeds_mh2_asset_variant", "Unknown")))
+        format_col.label(text="Entry: {}".format(root.get("bleeds_mh2_entry_layout", "Unknown")))
+        format_col.label(text="Bones: {}".format(root.get("bleeds_mh2_bone_record_layout", "Unknown")))
+        format_col.label(text="Object header: {}".format(root.get("bleeds_mh2_object_header_layout", "Unknown")))
+
+        texture_box = layout.box()
+        texture_box.label(text="Textures")
+        texture_col = texture_box.column(align=True)
+        texture_path = str(root.get("bleeds_mh2_texture_source_path", "") or "")
+        if texture_path:
+            texture_col.label(text="TEX: {}".format(os.path.basename(texture_path)))
+        else:
+            texture_col.label(text="TEX: Not imported")
+        texture_col.label(text="Images: {}".format(int(root.get("bleeds_mh2_texture_image_count", 0))))
+
+        if active_mesh is None:
+            return
+
+        mesh = active_mesh.data
+        mesh_box = layout.box()
+        mesh_box.label(text="Active MH2 Mesh Part")
+        mesh_col = mesh_box.column(align=True)
+        mesh_col.label(text="Object: {}".format(active_mesh.name))
+        mesh_col.label(text="Vertices: {}".format(len(mesh.vertices)))
+        mesh_col.label(text="Faces: {}".format(len(mesh.polygons)))
+        mesh_col.label(text="Materials: {}".format(len(mesh.materials)))
+        parent_bone = str(active_mesh.get("bleeds_mh2_parent_bone_name", "") or "")
+        if parent_bone:
+            mesh_col.label(text="Parent bone: {}".format(parent_bone))
+        vertex_element_type = int(active_mesh.get("bleeds_mh2_vertex_element_type", 0))
+        mesh_col.label(text="Vertex element: 0x{:X}".format(vertex_element_type))
+        mesh_col.label(text="Vertex stride: 0x{:X}".format(int(active_mesh.get("bleeds_mh2_vertex_stride", 0))))
+        mesh_col.label(text="Vertex layout: {}".format(active_mesh.get("bleeds_mh2_vertex_layout", "Unknown")))
+        mesh_col.label(text="UV layers: {}".format(int(active_mesh.get("bleeds_mh2_uv_layer_count", len(mesh.uv_layers)))))
+        mesh_col.label(text="Skin weights: {}".format("Yes" if bool(active_mesh.get("bleeds_mh2_has_skin_weights", False)) else "No"))
+        mesh_col.label(text="Weighted vertices: {}".format(int(active_mesh.get("bleeds_mh2_weighted_vertex_count", 0))))
+
+
 def register() -> None:
     bpy.utils.register_class(EXPORT_OT_MDL_Bake_LeedsScalePos)
     bpy.utils.register_class(EXPORT_PT_MDL_LeedsScalePos)
     bpy.utils.register_class(EXPORT_OT_MDL_StampSemanticAttributes)
     bpy.utils.register_class(EXPORT_PT_MDL_SemanticAttributes)
+    bpy.utils.register_class(OBJECT_PT_MDL_Manhunt2Properties)
 
     if not hasattr(bpy.types.Object, "bleeds_is_mdl_root"):
         bpy.types.Object.bleeds_is_mdl_root = BoolProperty(
@@ -449,10 +580,11 @@ def register() -> None:
     if not hasattr(bpy.types.Object, "bleeds_mdl_platform"):
         bpy.types.Object.bleeds_mdl_platform = EnumProperty(
             name="Platform",
-            description="Stories platform for this MDL",
+            description="Leeds model platform for this MDL",
             items=[
                 ("PS2", "PS2", "PlayStation 2"),
                 ("PSP", "PSP", "PlayStation Portable"),
+                ("PC", "PC", "Windows PC"),
             ],
             default="PS2",
         )
@@ -472,11 +604,12 @@ def register() -> None:
     if not hasattr(bpy.types.Object, "bleeds_mdl_type"):
         bpy.types.Object.bleeds_mdl_type = EnumProperty(
             name="MDL Type",
-            description="Stories MDL type",
+            description="Leeds MDL model class",
             items=[
-                ("PED", "PED", "Ped/character model"),
-                ("SIM", "SIM", "Prop model"),
-                ("VEH", "VEH", "Vehicle model"),
+                ("SIM", "SimpleModel", "Prop or simple model"),
+                ("PED", "PedModel", "Pedestrian or skinned actor model"),
+                ("CUT", "CutsceneModel", "Cutscene actor model"),
+                ("VEH", "VehModel", "Vehicle model"),
             ],
             default="SIM",
         )
@@ -517,6 +650,7 @@ def register() -> None:
 
 def unregister() -> None:
 
+    bpy.utils.unregister_class(OBJECT_PT_MDL_Manhunt2Properties)
     bpy.utils.unregister_class(EXPORT_PT_MDL_SemanticAttributes)
     bpy.utils.unregister_class(EXPORT_OT_MDL_StampSemanticAttributes)
     bpy.utils.unregister_class(EXPORT_PT_MDL_LeedsScalePos)

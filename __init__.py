@@ -1,27 +1,26 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# BLeeds - R* Leeds tools for Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
-#
+
 # This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License
-# as published by the Free Software Foundation, either version 3 of the License,
-# or (at your option) any later version.
-#
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
 # This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty
-# of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-# See the GNU General Public License for more details.
-#
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.0.8"
+__version__ = "1.0.10"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 0, 8),
+    "version": (1, 0, 10),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Rockstar Leeds import/export tools for Blender 2.90 and newer",
@@ -50,6 +49,23 @@ def set_mesh_auto_smooth(mesh, enabled=True):
             mesh.use_auto_smooth = bool(enabled)
         except Exception:
             pass
+
+
+def set_mesh_gouraud_shading(mesh, enabled=True):
+    if mesh is None:
+        return
+    smooth = bool(enabled)
+    try:
+        for polygon in mesh.polygons:
+            polygon.use_smooth = smooth
+    except Exception:
+        pass
+
+    # Full Gouraud shading must not use Blender's angle-based Auto Smooth.
+    # Auto Smooth splits normals again at its default 30-degree threshold,
+    # which makes the low-poly Stories meshes look flat even though every
+    # polygon is marked smooth.
+    set_mesh_auto_smooth(mesh, False)
 
 
 def get_file_import_menu_type():
@@ -406,11 +422,19 @@ def set_object_selected(obj, selected=True):
         pass
 
 
-_BLEEDS_ENTITY_TYPE_VALUES = {"UNKNOWN", "OBJECT", "COLLISION", "2DFX"}
+_BLEEDS_ENTITY_TYPE_VALUES = {
+    "UNKNOWN",
+    "OBJECT",
+    "SIMPLE_MODEL",
+    "PED_MODEL",
+    "CUTSCENE_MODEL",
+    "VEHICLE_MODEL",
+    "COLLISION",
+    "2DFX",
+}
 
 
 def stamp_bleeds_entity_type(obj, entity_type):
-    """Persist BLeeds' own object classification without touching DemonFF RNA."""
     if obj is None:
         return
     value = str(entity_type or "UNKNOWN").upper().strip()
@@ -426,35 +450,85 @@ def stamp_bleeds_entity_type(obj, entity_type):
         pass
 
 
+def map_mdl_type_to_entity_type(mdl_type):
+    value = str(mdl_type or "").upper().strip()
+    return {
+        "SIM": "SIMPLE_MODEL",
+        "SIMPLEMODEL": "SIMPLE_MODEL",
+        "PED": "PED_MODEL",
+        "PEDMODEL": "PED_MODEL",
+        "CUT": "CUTSCENE_MODEL",
+        "CUTSCENEMODEL": "CUTSCENE_MODEL",
+        "VEH": "VEHICLE_MODEL",
+        "VEHMODEL": "VEHICLE_MODEL",
+        "VEHICLEMODEL": "VEHICLE_MODEL",
+    }.get(value, "UNKNOWN")
+
+
+def get_bleeds_type_owner(obj):
+    current = obj
+    while current is not None:
+        try:
+            explicit = str(getattr(current, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
+            if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
+                return current
+        except Exception:
+            pass
+        try:
+            explicit = str(current.get("blds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
+            if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
+                return current
+        except Exception:
+            pass
+        try:
+            if bool(getattr(current, "bleeds_is_mdl_root", False)) or bool(current.get("bleeds_is_mdl_root", False)):
+                return current
+        except Exception:
+            pass
+        current = getattr(current, "parent", None)
+    return obj
+
+
 def infer_bleeds_entity_type(obj):
     if obj is None:
         return "UNKNOWN"
-    try:
-        explicit = str(getattr(obj, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
-        if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
-            return explicit
-    except Exception:
-        pass
-    try:
-        explicit = str(obj.get("blds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
-        if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
-            return explicit
-    except Exception:
-        pass
-    try:
-        if bool(obj.get("bleeds_col2_object", False)):
-            return "COLLISION"
-        if str(obj.get("blds_kind", "")).upper().strip() == "LEEDS_2DFX":
-            return "2DFX"
-        if (
-            obj.get("blds_kind") is not None
-            or obj.get("blds_res_id") is not None
-            or obj.get("bleeds_is_mdl_root") is not None
-            or bool(getattr(obj, "bleeds_is_mdl_root", False))
-        ):
-            return "OBJECT"
-    except Exception:
-        pass
+
+    current = obj
+    while current is not None:
+        try:
+            explicit = str(getattr(current, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
+            if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
+                return explicit
+        except Exception:
+            pass
+        try:
+            explicit = str(current.get("blds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
+            if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
+                return explicit
+        except Exception:
+            pass
+        try:
+            mdl_type = getattr(current, "bleeds_mdl_type", current.get("bleeds_mdl_type", ""))
+            mapped = map_mdl_type_to_entity_type(mdl_type)
+            if mapped != "UNKNOWN":
+                return mapped
+        except Exception:
+            pass
+        try:
+            if bool(current.get("bleeds_col2_object", False)):
+                return "COLLISION"
+            if str(current.get("blds_kind", "")).upper().strip() == "LEEDS_2DFX":
+                return "2DFX"
+            if (
+                current.get("blds_kind") is not None
+                or current.get("blds_res_id") is not None
+                or current.get("blds_res_index") is not None
+            ):
+                return "OBJECT"
+        except Exception:
+            pass
+        current = getattr(current, "parent", None)
+
     return "UNKNOWN"
 
 
@@ -475,6 +549,7 @@ _classes = [
     gui.EXPORT_PT_MDL_LeedsScalePos,
     gui.EXPORT_OT_MDL_StampSemanticAttributes,
     gui.EXPORT_PT_MDL_SemanticAttributes,
+    gui.OBJECT_PT_MDL_Manhunt2Properties,
     gui.CW_InstanceProps,
     gui.OBJECT_PT_bleeds_entity_stamp,
     gui.CW_OT_LoadFromCustom,
@@ -516,11 +591,15 @@ def unregister_lvz_img_progress_properties():
 def register_bleeds_mdl_object_props():
     if not hasattr(bpy.types.Object, "bleeds_entity_type"):
         bpy.types.Object.bleeds_entity_type = EnumProperty(
-            name="Type",
-            description="BLeeds object classification stamp",
+            name="Leeds Type",
+            description="BLeeds Leeds-engine asset classification",
             items=[
                 ("UNKNOWN", "Unknown", "Not classified by BLeeds"),
-                ("OBJECT", "Object", "Renderable Leeds model or map object"),
+                ("SIMPLE_MODEL", "SimpleModel", "Leeds prop or simple model"),
+                ("PED_MODEL", "PedModel", "Leeds pedestrian or skinned actor model"),
+                ("CUTSCENE_MODEL", "CutsceneModel", "Leeds cutscene actor model"),
+                ("VEHICLE_MODEL", "VehModel", "Leeds vehicle model"),
+                ("OBJECT", "World Object", "Placed Leeds world or map object"),
                 ("COLLISION", "Collision", "Leeds collision object"),
                 ("2DFX", "2DFX", "Leeds 2D effect helper"),
             ],
@@ -537,10 +616,11 @@ def register_bleeds_mdl_object_props():
     if not hasattr(bpy.types.Object, "bleeds_mdl_platform"):
         bpy.types.Object.bleeds_mdl_platform = EnumProperty(
             name="Platform",
-            description="Stories platform for this MDL",
+            description="Leeds model platform for this MDL",
             items=[
                 ("PS2", "PS2", "PlayStation 2"),
                 ("PSP", "PSP", "PlayStation Portable"),
+                ("PC", "PC", "Windows PC"),
             ],
             default="PS2",
         )
@@ -560,11 +640,12 @@ def register_bleeds_mdl_object_props():
     if not hasattr(bpy.types.Object, "bleeds_mdl_type"):
         bpy.types.Object.bleeds_mdl_type = EnumProperty(
             name="MDL Type",
-            description="Stories MDL type",
+            description="Leeds MDL model class",
             items=[
-                ("PED", "PED", "Ped/character model"),
-                ("SIM", "SIM", "Prop model"),
-                ("VEH", "VEH", "Vehicle model"),
+                ("SIM", "SimpleModel", "Prop or simple model"),
+                ("PED", "PedModel", "Pedestrian or skinned actor model"),
+                ("CUT", "CutsceneModel", "Cutscene actor model"),
+                ("VEH", "VehModel", "Vehicle model"),
             ],
             default="SIM",
         )
@@ -589,6 +670,13 @@ def register_bleeds_mdl_object_props():
         bpy.types.Object.bleeds_export_use_normals = BoolProperty(
             name="Export Normals",
             description="Export normals into PS2 MDL DMA/VIF geometry streams",
+            default=True,
+        )
+
+    if not hasattr(bpy.types.Object, "bleeds_export_gouraud_shading"):
+        bpy.types.Object.bleeds_export_gouraud_shading = BoolProperty(
+            name="Gouraud Shading",
+            description="Use smooth per-vertex normals when exporting Leeds MDL geometry",
             default=True,
         )
 
@@ -620,6 +708,7 @@ def unregister_bleeds_mdl_object_props():
         "bleeds_mdl_filepath",
         "bleeds_imported_export_mode",
         "bleeds_export_use_normals",
+        "bleeds_export_gouraud_shading",
         "bleeds_leeds_scale_base",
         "bleeds_leeds_pos_base",
     ):

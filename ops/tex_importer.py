@@ -16,6 +16,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import tempfile
 from typing import List, Dict, Tuple, Optional, Any, Iterable
 
 import numpy as np
@@ -31,6 +32,8 @@ from ..leedsLib.tex import (
     parse_ps2_header,
     decode_psp_texture,
     decode_ps2_texture,
+    is_mh2_tex_data,
+    parse_mh2_tex_entries,
 )
 
 def normalize_leeds_texture_name(name: str) -> str:
@@ -44,6 +47,37 @@ def normalize_leeds_texture_name(name: str) -> str:
     return value
 
 LEEDS_TEXTURE_SIDECAR_EXTENSIONS: Tuple[str, ...] = (".xtx", ".chk", ".tex")
+
+
+def find_last_texture_raster_end(
+    raster_offset: int,
+    container_bases: Iterable[int],
+    global_offsets: Iterable[int],
+    data_size: int,
+) -> int:
+    start = int(raster_offset)
+    candidates: List[int] = []
+
+    for value in list(container_bases or []):
+        try:
+            offset = int(value)
+        except Exception:
+            continue
+        if offset > start:
+            candidates.append(offset)
+
+    for value in list(global_offsets or []):
+        try:
+            offset = int(value)
+        except Exception:
+            continue
+        if offset > start:
+            candidates.append(offset)
+
+    if int(data_size) > start:
+        candidates.append(int(data_size))
+
+    return min(candidates) if candidates else int(data_size)
 
 def find_sidecar_texture_for_mdl(mdl_path: str) -> Optional[str]:
     if not mdl_path:
@@ -77,6 +111,33 @@ def find_sidecar_texture_for_mdl(mdl_path: str) -> Optional[str]:
 
 def find_sidecar_txd_for_mdl(mdl_path: str) -> Optional[str]:
     return find_sidecar_texture_for_mdl(mdl_path)
+
+
+def find_mh2_sidecar_texture_for_mdl(mdl_path: str) -> Optional[str]:
+    if not mdl_path:
+        return None
+    base, _extension = os.path.splitext(os.path.abspath(mdl_path))
+    folder = os.path.dirname(base)
+    wanted_stem = os.path.basename(base).casefold()
+    try:
+        entries = sorted(os.listdir(folder or "."))
+    except Exception:
+        entries = []
+    for entry in entries:
+        stem, extension = os.path.splitext(entry)
+        if stem.casefold() != wanted_stem or extension.casefold() != ".tex":
+            continue
+        candidate = os.path.join(folder, entry)
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            with open(candidate, "rb") as input_file:
+                header_data = input_file.read()
+            if is_mh2_tex_data(header_data):
+                return candidate
+        except Exception:
+            continue
+    return None
 
 def get_image_original_texture_name(image: bpy.types.Image) -> str:
     try:
@@ -174,6 +235,151 @@ def remove_existing_bleeds_texture_links(material: bpy.types.Material, bsdf_node
         except Exception:
             pass
 
+def image_has_meaningful_alpha(image: bpy.types.Image) -> bool:
+    if image is None:
+        return False
+
+    try:
+        if "bleeds_texture_has_meaningful_alpha" in image:
+            return bool(image.get("bleeds_texture_has_meaningful_alpha", False))
+    except Exception:
+        pass
+
+    try:
+        pixels = image.pixels
+        pixel_count = len(pixels) // 4
+        if pixel_count <= 0:
+            return False
+
+        alpha_min = 1.0
+        alpha_max = 0.0
+        for pixel_index in range(pixel_count):
+            alpha_value = float(pixels[(pixel_index * 4) + 3])
+            if alpha_value < alpha_min:
+                alpha_min = alpha_value
+            if alpha_value > alpha_max:
+                alpha_max = alpha_value
+            if alpha_min < 0.999 and alpha_max > 0.001:
+                return True
+        return alpha_max > 0.001 and alpha_min < 0.999
+    except Exception:
+        return False
+
+
+def material_allows_texture_alpha(
+    material: bpy.types.Material,
+    image: bpy.types.Image,
+) -> bool:
+    if material is None:
+        return True
+
+    image_platform = ""
+    try:
+        image_platform = str(image.get("bleeds_texture_platform", "") or "").strip().lower()
+    except Exception:
+        image_platform = ""
+
+    if image_platform != "psp":
+        return True
+
+    try:
+        if "bleeds_mdl_allow_texture_alpha" in material:
+            return bool(material.get("bleeds_mdl_allow_texture_alpha", True))
+    except Exception:
+        pass
+
+    return True
+
+
+def psp_image_alpha_is_effectively_opaque(image: bpy.types.Image) -> bool:
+    if image is None:
+        return False
+
+    image_platform = ""
+    try:
+        image_platform = str(image.get("bleeds_texture_platform", "") or "").strip().lower()
+    except Exception:
+        image_platform = ""
+
+    if image_platform != "psp":
+        return False
+
+    try:
+        alpha_min = int(image.get("bleeds_texture_alpha_min", 255))
+        alpha_max = int(image.get("bleeds_texture_alpha_max", 255))
+    except Exception:
+        return False
+
+    return alpha_min >= 250 and alpha_max >= 250
+
+
+def configure_material_alpha_mode(
+    material: bpy.types.Material,
+    bsdf_node: bpy.types.Node,
+    texture_node: bpy.types.Node,
+    use_texture_alpha: bool,
+) -> None:
+    if material is None or bsdf_node is None:
+        return
+
+    alpha_input = None
+    try:
+        alpha_input = bsdf_node.inputs.get("Alpha")
+    except Exception:
+        alpha_input = None
+
+    if use_texture_alpha and texture_node is not None and alpha_input is not None:
+        try:
+            alpha_output = texture_node.outputs.get("Alpha")
+            if alpha_output is not None:
+                material.node_tree.links.new(alpha_output, alpha_input)
+        except Exception:
+            pass
+        try:
+            material.blend_method = "HASHED"
+        except Exception:
+            pass
+        try:
+            material.shadow_method = "HASHED"
+        except Exception:
+            pass
+        try:
+            if hasattr(material, "show_transparent_back"):
+                material.show_transparent_back = False
+        except Exception:
+            pass
+    else:
+        if alpha_input is not None:
+            try:
+                alpha_input.default_value = 1.0
+            except Exception:
+                pass
+        try:
+            material.blend_method = "OPAQUE"
+        except Exception:
+            pass
+        try:
+            material.shadow_method = "OPAQUE"
+        except Exception:
+            pass
+        try:
+            if hasattr(material, "show_transparent_back"):
+                material.show_transparent_back = False
+        except Exception:
+            pass
+        try:
+            diffuse = tuple(material.diffuse_color)
+            if len(diffuse) >= 4:
+                material.diffuse_color = (diffuse[0], diffuse[1], diffuse[2], 1.0)
+        except Exception:
+            pass
+
+    try:
+        material["bleeds_texture_uses_alpha"] = bool(use_texture_alpha)
+    except Exception:
+        pass
+
+
 def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image) -> bool:
     if material is None or image is None:
         return False
@@ -226,13 +432,20 @@ def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image
     except Exception:
         pass
 
+    use_texture_alpha = (
+        image_has_meaningful_alpha(image)
+        and material_allows_texture_alpha(material, image)
+        and not psp_image_alpha_is_effectively_opaque(image)
+    )
+    configure_material_alpha_mode(
+        material=material,
+        bsdf_node=bsdf,
+        texture_node=existing_node,
+        use_texture_alpha=use_texture_alpha,
+    )
+
     try:
-        if "Alpha" in existing_node.outputs and "Alpha" in bsdf.inputs:
-            links.new(existing_node.outputs["Alpha"], bsdf.inputs["Alpha"])
-            material.blend_method = "BLEND"
-            material.use_screen_refraction = False
-            if hasattr(material, "show_transparent_back"):
-                material.show_transparent_back = True
+        material.use_screen_refraction = False
     except Exception:
         pass
 
@@ -369,6 +582,86 @@ def import_sidecar_texture_for_mdl(
     )
     return texture_path, images, matched_materials, missing_names
 
+def load_mh2_dds_image(entry, input_path: str, prefix: str = "") -> Optional[bpy.types.Image]:
+    source_path = os.path.abspath(str(input_path))
+    source_key = os.path.normcase(source_path)
+    base_image_name = "{}{}".format(prefix, entry.name)
+    image_name = base_image_name
+
+    for existing_image in bpy.data.images:
+        try:
+            existing_source = os.path.normcase(os.path.abspath(str(existing_image.get("bleeds_texture_source_path", "") or "")))
+            existing_texture_name = normalize_leeds_texture_name(existing_image.get("bleeds_texture_name", existing_image.name))
+        except Exception:
+            continue
+        if existing_source == source_key and existing_texture_name == normalize_leeds_texture_name(entry.name):
+            return existing_image
+
+    existing = bpy.data.images.get(base_image_name)
+    if existing is not None:
+        source_stem = os.path.splitext(os.path.basename(source_path))[0]
+        image_name = "{} [{}]".format(base_image_name, source_stem)
+
+    temp_path = ""
+    try:
+        file_descriptor, temp_path = tempfile.mkstemp(prefix="bleeds_mh2_tex_", suffix=".dds")
+        try:
+            with os.fdopen(file_descriptor, "wb") as output_file:
+                output_file.write(entry.dds_data)
+        except Exception:
+            try:
+                os.close(file_descriptor)
+            except Exception:
+                pass
+            raise
+
+        image = bpy.data.images.load(temp_path, check_existing=False)
+        image.name = image_name
+        try:
+            image.pack()
+        except Exception:
+            pass
+        try:
+            image.filepath_raw = ""
+        except Exception:
+            pass
+        try:
+            image["bleeds_texture_name"] = str(entry.name)
+            image["bleeds_texture_source_path"] = source_path
+            image["bleeds_texture_platform"] = "mh2_pc"
+            image["bleeds_mh2_tex_width"] = int(entry.width)
+            image["bleeds_mh2_tex_height"] = int(entry.height)
+            image["bleeds_mh2_tex_bits_per_pixel"] = int(entry.bits_per_pixel)
+            image["bleeds_mh2_tex_mipmap_count"] = int(entry.mipmap_count)
+            image["bleeds_mh2_tex_dds_size"] = int(entry.data_size)
+        except Exception:
+            pass
+        return image
+    finally:
+        if temp_path:
+            try:
+                os.remove(temp_path)
+            except Exception:
+                pass
+
+
+def decode_mh2_tex_to_blender_images(
+    input_path: str,
+    prefix: str = "",
+) -> List[bpy.types.Image]:
+    if not os.path.isfile(input_path):
+        raise FileNotFoundError("Input file {!r} does not exist".format(input_path))
+    with open(input_path, "rb") as input_file:
+        data = input_file.read()
+    entries = parse_mh2_tex_entries(data)
+    images: List[bpy.types.Image] = []
+    for entry in entries:
+        image = load_mh2_dds_image(entry, input_path, prefix=prefix)
+        if image is not None:
+            images.append(image)
+    return images
+
+
 def decode_chk_to_blender_images(
     input_path: str,
     platform: str = 'auto',
@@ -379,6 +672,9 @@ def decode_chk_to_blender_images(
         raise FileNotFoundError(f"Input file '{input_path}' does not exist")
     with open(input_path, 'rb') as f:
         data = f.read()
+
+    if is_mh2_tex_data(data):
+        return decode_mh2_tex_to_blender_images(input_path, prefix=prefix)
 
     hdr = {
         'sig': data[0:4].decode('ascii', 'replace'),
@@ -397,6 +693,7 @@ def decode_chk_to_blender_images(
     visited = set()
 
     textures: List[Tuple[str, int, object]] = []
+    container_bases: List[int] = []
     base = slot_base_from_slot_ptr(first_slot)
     last_base = slot_base_from_slot_ptr(last_slot) if last_slot else None
 
@@ -407,6 +704,10 @@ def decode_chk_to_blender_images(
         cinfo = parse_container(data, base)
         if not cinfo:
             break
+        try:
+            container_bases.append(int(cinfo['base']))
+        except Exception:
+            pass
         name = cinfo['name']
 
         if name and all(32 <= ord(ch) < 127 for ch in name):
@@ -487,15 +788,21 @@ def decode_chk_to_blender_images(
     textures_sorted.sort(key=lambda x: x[3])
     offsets = [hdr_info[3] for hdr_info in textures_sorted]
     block_sizes: List[int] = []
-    for i in range(len(offsets)):
-        start = offsets[i]
-        if i + 1 < len(offsets):
-            end = offsets[i + 1]
+    for texture_index, start in enumerate(offsets):
+        structural_end = find_last_texture_raster_end(
+            raster_offset=start,
+            container_bases=container_bases,
+            global_offsets=(hdr['glob1'], hdr['glob2'], hdr['coll_size']),
+            data_size=len(data),
+        )
+
+        if texture_index + 1 < len(offsets):
+            next_raster_offset = offsets[texture_index + 1]
+            end = min(int(next_raster_offset), int(structural_end))
         else:
-            glob_candidates = [hdr['glob1'], hdr['glob2'], hdr['coll_size'], len(data)]
-            end_candidates = [ec for ec in glob_candidates if ec > start]
-            end = min(end_candidates) if end_candidates else len(data)
-        block_sizes.append(max(0, end - start))
+            end = int(structural_end)
+
+        block_sizes.append(max(0, int(end) - int(start)))
     blender_images: List[bpy.types.Image] = []
 
     for ((name, tex_off, header, roff), blk_size) in zip(textures_sorted, block_sizes):
@@ -516,16 +823,41 @@ def decode_chk_to_blender_images(
         image_name = f"{prefix}{name}"
 
         img = bpy.data.images.new(name=image_name, width=w, height=h, alpha=True)
+        alpha_values = rgba[:, :, 3]
+        alpha_min = int(alpha_values.min()) if alpha_values.size else 255
+        alpha_max = int(alpha_values.max()) if alpha_values.size else 255
+        has_meaningful_alpha = bool(alpha_max > 0 and alpha_min < 255)
+
         try:
             img["bleeds_texture_name"] = str(name)
             img["bleeds_texture_source_path"] = str(input_path)
             img["bleeds_texture_platform"] = str(platform)
+            img["bleeds_texture_alpha_min"] = alpha_min
+            img["bleeds_texture_alpha_max"] = alpha_max
+            img["bleeds_texture_has_meaningful_alpha"] = has_meaningful_alpha
         except Exception:
             pass
 
         img.pixels = pixels
         blender_images.append(img)
     return blender_images
+
+def import_mh2_sidecar_texture_for_mdl(
+    mdl_path: str,
+    imported_objects: Optional[Iterable[bpy.types.Object]] = None,
+) -> Tuple[Optional[str], List[bpy.types.Image], int, List[str]]:
+    texture_path = find_mh2_sidecar_texture_for_mdl(mdl_path)
+    if not texture_path:
+        return None, [], 0, []
+    images = decode_mh2_tex_to_blender_images(texture_path, prefix="")
+    if imported_objects is None:
+        return texture_path, images, 0, []
+    matched_materials, _image_count, missing_names = apply_images_to_imported_mdl_materials(
+        images,
+        imported_objects,
+    )
+    return texture_path, images, matched_materials, missing_names
+
 
 def import_sidecar_txd_for_mdl(mdl_path: str, imported_objects: Iterable[bpy.types.Object], platform: str = "auto") -> Tuple[Optional[str], List[bpy.types.Image], int, List[str]]:
     return import_sidecar_texture_for_mdl(mdl_path, imported_objects, platform=platform)

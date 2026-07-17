@@ -124,7 +124,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
             ("SIM", "SimpleModel", "Simple / prop model without bones"),
             ("PED", "PedModel / Actor", "Pedestrian / actor model with bones"),
             ("CUT", "CutsceneModel / Actor", "Cutscene / actor model with bones"),
-            ("VEH", "VehicleModel", "Vehicle model"),
+            ("VEH", "VehModel", "Vehicle model"),
         ),
         default="AUTO",
         options={"HIDDEN"},
@@ -132,7 +132,13 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
     import_texture: BoolProperty(
         name="Import Texture",
-        description="Attempt to import a same-name Leeds texture dictionary (.xtx/.chk/.tex) beside the MDL and apply it to matching MDL materials",
+        description="Import the same-name Leeds texture dictionary beside the MDL, including Manhunt 2 TCDT/Z2HM TEX files",
+        default=False,
+    )
+
+    print_debug_log: BoolProperty(
+        name="Print Debug Log",
+        description="Print detailed MDL parser output to the system console and write an import log beside each imported MDL",
         default=False,
     )
 
@@ -201,6 +207,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "import_texture")
+        layout.prop(self, "print_debug_log")
 
     def gatherImportFilepaths(self):
         paths = []
@@ -266,6 +273,14 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                     or (self.import_game == "AUTO" and self.isManhunt2PcContainer(filepath))
                 )
                 if use_manhunt2_pc_reader:
+                    texture_path = None
+                    texture_images = []
+                    if self.import_texture:
+                        texture_path, texture_images, _matched, _missing = tex_importer.import_mh2_sidecar_texture_for_mdl(
+                            filepath,
+                            imported_objects=None,
+                        )
+
                     imported_objects = mdl_core.import_mh2(
                         path=filepath,
                         context=context,
@@ -273,7 +288,37 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                         layout_mode=self.mh2_layout,
                         import_armature=self.mh2_import_armature,
                         import_materials=self.mh2_import_materials,
+                        import_textures=self.import_texture,
+                        preloaded_texture_images=texture_images,
+                        texture_source_path=texture_path,
+                        print_debug_log=self.print_debug_log,
                     )
+
+                    if self.import_texture:
+                        loaded_materials = set()
+                        for imported_object in imported_objects or []:
+                            if imported_object is None or getattr(imported_object, "type", None) != "MESH":
+                                continue
+                            for material in list(getattr(imported_object.data, "materials", []) or []):
+                                if material is None:
+                                    continue
+                                try:
+                                    if bool(material.get("bleeds_mh2_texture_loaded", False)):
+                                        loaded_materials.add(material.name)
+                                except Exception:
+                                    pass
+                        if texture_path is None:
+                            self.report({"WARNING"}, "No same-name Manhunt 2 TEX file found beside: {}".format(os.path.basename(filepath)))
+                        else:
+                            self.report(
+                                {"INFO"},
+                                "{}: imported {} MH2 texture image(s), {} material(s) matched.".format(
+                                    os.path.basename(filepath),
+                                    len(texture_images),
+                                    len(loaded_materials),
+                                ),
+                            )
+
                     all_created_objects.extend(imported_objects or [])
                     imported_count += 1
                     continue
@@ -287,6 +332,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                     collection_name=collection_name,
                     create_armature=self.create_armature,
                     link_to_scene=self.link_to_scene,
+                    print_debug_log=self.print_debug_log,
                 )
 
                 if self.import_texture:
@@ -340,7 +386,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_stories_mdl"
     bl_label = "Export R* Leeds Stories MDL"
-    bl_description = "Export the active model to a Rockstar Leeds MDL file"
+    bl_description = "Export the active Leeds model to an MDL file"
     bl_options = {"UNDO"}
 
     filename_ext = ".mdl"
@@ -363,10 +409,10 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
     mdl_type: EnumProperty(
         name="Type",
-        description="Export type (PROP uses Atomic root; PED uses Clump+Atomic)",
+        description="Leeds MDL model class to export",
         items=(
-            ("SIM", "SIM", "Prop / SimpleModel"),
-            ("PED", "PED", "Ped / Clump"),
+            ("SIM", "SimpleModel", "Prop or simple Atomic model"),
+            ("PED", "PedModel", "Skinned pedestrian or actor Clump"),
         ),
         default="SIM",
     )
@@ -393,8 +439,8 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
     use_normals: BoolProperty(
         name="Export Normals",
-        description="Include the normals stream in the PS2 DMA payload if exists",
-        default=False,
+        description="Include smooth vertex normals in the Stories MDL geometry stream",
+        default=True,
     )
 
     imported_export_mode: EnumProperty(

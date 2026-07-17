@@ -17,6 +17,7 @@
 
 import os
 import struct
+import math
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Any
 
@@ -25,7 +26,7 @@ from mathutils import Matrix, Vector
 
 from ..leedsLib import mdl as stories_mdl
 from ..leedsLib import lvz_img as embedded_mdl
-from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth, stamp_bleeds_entity_type
+from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth, set_mesh_gouraud_shading, stamp_bleeds_entity_type
 
 #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
 #   This script is for Stories .MDLs, the file format for actors & props            #
@@ -63,12 +64,34 @@ class StoriesImportContext:
     import_type: int
     atomic: Any
     debug_log: List[str] = field(default_factory=list)
+    print_debug_log: bool = False
 
     def log(self, msg: str) -> None:
         self.debug_log.append(str(msg))
-        print(msg)
+        if self.print_debug_log:
+            print(msg)
+
+@dataclass
+class StoriesGouraudPartData:
+    verts: List[Tuple[float, float, float]] = field(default_factory=list)
+    faces: List[Tuple[int, int, int]] = field(default_factory=list)
+    face_uvs: List[List[Tuple[float, float]]] = field(default_factory=list)
+    face_colors: List[List[Tuple[int, int, int, int]]] = field(default_factory=list)
+    face_normals: List[List[Tuple[float, float, float]]] = field(default_factory=list)
+    representative_uvs: List[Tuple[float, float]] = field(default_factory=list)
+    representative_colors: List[Tuple[int, int, int, int]] = field(default_factory=list)
+    normals: List[Tuple[float, float, float]] = field(default_factory=list)
+    skin_indices: List[List[int]] = field(default_factory=list)
+    skin_weights: List[List[float]] = field(default_factory=list)
+    skin_raw_dwords: List[List[int]] = field(default_factory=list)
+    source_vertex_count: int = 0
+    removed_degenerate_face_count: int = 0
+    removed_duplicate_face_count: int = 0
 
 MATERIAL_CACHE: Dict[str, bpy.types.Material] = {}
+
+def convertStoriesPs2UvToBlender(u: float, v: float) -> Tuple[float, float]:
+    return (float(u), float(v))
 
 def getArmatureFrameMatrix(arm_info: Any, dict_name: str, ptr: int, fallback: Matrix = None) -> Matrix:
     if fallback is None:
@@ -1232,6 +1255,7 @@ def createVehicleAtomicMeshObject(
 
     me = bpy.data.meshes.new(name)
     me.from_pydata(merged_verts, [], merged_faces)
+    set_mesh_gouraud_shading(me, True)
     me.update(calc_edges=True)
 
     materials = list(getattr(geo, "materials", []) or [])
@@ -1257,7 +1281,7 @@ def createVehicleAtomicMeshObject(
                 vert_index = me.loops[loop_index].vertex_index
                 if vert_index < len(merged_uvs):
                     u, v = merged_uvs[vert_index]
-                    uv_data[loop_index].uv = (float(u), 1.0 - float(v))
+                    uv_data[loop_index].uv = convertStoriesPs2UvToBlender(u, v)
 
     if merged_colors:
         color_attr = get_or_create_corner_color_layer(me, "Col")
@@ -1457,6 +1481,7 @@ def build_ps2_cutscene_actor_mesh(
 
     me = bpy.data.meshes.new(name)
     me.from_pydata(merged_verts, [], merged_faces)
+    set_mesh_gouraud_shading(me, True)
     me.update(calc_edges=True)
 
     if merged_uvs and len(me.loops) > 0:
@@ -1469,7 +1494,7 @@ def build_ps2_cutscene_actor_mesh(
                 vert_index = me.loops[loop_index].vertex_index
                 if vert_index < len(merged_uvs):
                     u, v = merged_uvs[vert_index]
-                    uv_data[loop_index].uv = (u, 1.0 - v)
+                    uv_data[loop_index].uv = convertStoriesPs2UvToBlender(u, v)
 
     if merged_colors and len(me.loops) > 0:
         color_attr = get_or_create_corner_color_layer(me, "Col")
@@ -2067,6 +2092,580 @@ def writePs2MdlSemanticAttributes(mesh: bpy.types.Mesh, part: Any, part_index: i
     except Exception:
         pass
 
+def writeStoriesGouraudSemanticAttributes(
+    mesh: bpy.types.Mesh,
+    gouraud_part: StoriesGouraudPartData,
+    part_index: int,
+    material_id: int,
+) -> None:
+    if mesh is None:
+        return
+
+    try:
+        mesh.update(calc_edges=True)
+    except Exception:
+        try:
+            mesh.update()
+        except Exception:
+            pass
+
+    face_part = ensureMdlIntAttribute(mesh, "bleeds_mdl_part_index", 'FACE')
+    face_material = ensureMdlIntAttribute(mesh, "bleeds_mdl_material_index", 'FACE')
+    face_strip = ensureMdlIntAttribute(mesh, "bleeds_mdl_source_strip_index", 'FACE')
+    face_strip_tri = ensureMdlIntAttribute(mesh, "bleeds_mdl_source_strip_triangle_index", 'FACE')
+
+    corner_emit = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_emit_index", 'CORNER')
+    corner_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_export_vertex_index", 'CORNER')
+    corner_strip = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_index", 'CORNER')
+    corner_strip_vertex = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_vertex_index", 'CORNER')
+
+    point_emit = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_emit_index", 'POINT')
+    point_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_export_vertex_index", 'POINT')
+    point_strip = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_strip_index", 'POINT')
+    point_strip_vertex = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_strip_vertex_index", 'POINT')
+    point_skin_raw0 = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_skin_raw0", 'POINT')
+    point_skin_raw1 = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_skin_raw1", 'POINT')
+    point_skin_raw2 = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_skin_raw2", 'POINT')
+    point_skin_raw3 = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_skin_raw3", 'POINT')
+    skin_node_attrs = [
+        ensureMdlIntAttribute(mesh, "bleeds_skin_node_0", 'POINT'),
+        ensureMdlIntAttribute(mesh, "bleeds_skin_node_1", 'POINT'),
+        ensureMdlIntAttribute(mesh, "bleeds_skin_node_2", 'POINT'),
+        ensureMdlIntAttribute(mesh, "bleeds_skin_node_3", 'POINT'),
+    ]
+    skin_weight_attrs = [
+        ensureMdlFloatAttribute(mesh, "bleeds_skin_weight_0", 'POINT'),
+        ensureMdlFloatAttribute(mesh, "bleeds_skin_weight_1", 'POINT'),
+        ensureMdlFloatAttribute(mesh, "bleeds_skin_weight_2", 'POINT'),
+        ensureMdlFloatAttribute(mesh, "bleeds_skin_weight_3", 'POINT'),
+    ]
+    skin_source_part = ensureMdlIntAttribute(mesh, "bleeds_skin_source_part", 'POINT')
+    skin_source_vertex = ensureMdlIntAttribute(mesh, "bleeds_skin_source_vertex", 'POINT')
+    skin_is_imported = ensureMdlIntAttribute(mesh, "bleeds_skin_is_imported", 'POINT')
+    skin_is_modified = ensureMdlIntAttribute(mesh, "bleeds_skin_is_modified", 'POINT')
+    skin_confidence = ensureMdlFloatAttribute(mesh, "bleeds_skin_confidence", 'POINT')
+
+    raw_skin_values = list(gouraud_part.skin_raw_dwords or [])
+    skin_indices = list(gouraud_part.skin_indices or [])
+    skin_weights = list(gouraud_part.skin_weights or [])
+
+    for vertex in mesh.vertices:
+        vertex_index = int(vertex.index)
+        setMdlIntAttributeValue(point_emit, vertex_index, vertex_index)
+        setMdlIntAttributeValue(point_export, vertex_index, vertex_index)
+        setMdlIntAttributeValue(point_strip, vertex_index, 0)
+        setMdlIntAttributeValue(point_strip_vertex, vertex_index, vertex_index)
+
+        raw4 = [0, 0, 0, 0]
+        if vertex_index < len(raw_skin_values):
+            raw4 = list(raw_skin_values[vertex_index])[:4]
+        while len(raw4) < 4:
+            raw4.append(0)
+        setMdlIntAttributeValue(point_skin_raw0, vertex_index, signedInt32ForIdProp(raw4[0]))
+        setMdlIntAttributeValue(point_skin_raw1, vertex_index, signedInt32ForIdProp(raw4[1]))
+        setMdlIntAttributeValue(point_skin_raw2, vertex_index, signedInt32ForIdProp(raw4[2]))
+        setMdlIntAttributeValue(point_skin_raw3, vertex_index, signedInt32ForIdProp(raw4[3]))
+
+        node_values = [0, 0, 0, 0]
+        weight_values = [0.0, 0.0, 0.0, 0.0]
+        if vertex_index < len(skin_indices):
+            node_values = [int(value) for value in list(skin_indices[vertex_index])[:4]]
+        if vertex_index < len(skin_weights):
+            weight_values = [float(value) for value in list(skin_weights[vertex_index])[:4]]
+        while len(node_values) < 4:
+            node_values.append(0)
+        while len(weight_values) < 4:
+            weight_values.append(0.0)
+        node_values, weight_values = normalizeMdlSkinNodeWeights(node_values, weight_values)
+
+        for slot_index in range(4):
+            setMdlIntAttributeValue(skin_node_attrs[slot_index], vertex_index, int(node_values[slot_index]))
+            setMdlFloatAttributeValue(skin_weight_attrs[slot_index], vertex_index, float(weight_values[slot_index]))
+
+        setMdlIntAttributeValue(skin_source_part, vertex_index, int(part_index))
+        setMdlIntAttributeValue(skin_source_vertex, vertex_index, vertex_index)
+        setMdlIntAttributeValue(skin_is_imported, vertex_index, 1)
+        setMdlIntAttributeValue(skin_is_modified, vertex_index, 0)
+        setMdlFloatAttributeValue(skin_confidence, vertex_index, 1.0)
+
+    for polygon in mesh.polygons:
+        polygon_index = int(polygon.index)
+        setMdlIntAttributeValue(face_part, polygon_index, int(part_index))
+        setMdlIntAttributeValue(face_material, polygon_index, int(material_id))
+        setMdlIntAttributeValue(face_strip, polygon_index, 0)
+        setMdlIntAttributeValue(face_strip_tri, polygon_index, polygon_index)
+
+        for loop_index in polygon.loop_indices:
+            loop_index = int(loop_index)
+            if loop_index < 0 or loop_index >= len(mesh.loops):
+                continue
+            vertex_index = int(mesh.loops[loop_index].vertex_index)
+            setMdlIntAttributeValue(corner_emit, loop_index, vertex_index)
+            setMdlIntAttributeValue(corner_export, loop_index, vertex_index)
+            setMdlIntAttributeValue(corner_strip, loop_index, 0)
+            setMdlIntAttributeValue(corner_strip_vertex, loop_index, vertex_index)
+
+    try:
+        mesh["bleeds_mdl_semantic_attributes_version"] = 2
+        mesh["bleeds_mdl_skin_attribute_schema"] = "RSLTANIM_NODE_FLOAT_POINT_V1"
+        mesh["bleeds_mdl_semantic_attributes_origin"] = "IMPORTED_PS2"
+        mesh["bleeds_mdl_source_part_index"] = int(part_index)
+        mesh["bleeds_mdl_source_material_index"] = int(material_id)
+        mesh["bleeds_mdl_source_part_vertex_count"] = int(len(mesh.vertices))
+        mesh["bleeds_mdl_source_part_face_count"] = int(len(mesh.polygons))
+        mesh["bleeds_mdl_source_loop_count"] = int(len(mesh.loops))
+        mesh["bleeds_mdl_source_strip_count"] = 0
+        mesh["bleeds_mdl_source_strip_counts"] = []
+        mesh["bleeds_mdl_vertex_stream_attribute_rebuilt"] = 1
+    except Exception:
+        pass
+
+def collectPs2PartSkinData(
+    part: Any,
+    vertex_count: int,
+) -> Tuple[List[List[int]], List[List[float]], List[List[int]]]:
+    count = max(0, int(vertex_count))
+    skin_indices: List[List[int]] = [[0, 0, 0, 0] for _ in range(count)]
+    skin_weights: List[List[float]] = [[0.0, 0.0, 0.0, 0.0] for _ in range(count)]
+    skin_raw_dwords: List[List[int]] = [[0, 0, 0, 0] for _ in range(count)]
+
+    raw_values = list(getattr(part, "skin_raw_dwords", []) or [])
+    for vertex_index in range(min(count, len(raw_values))):
+        values = list(raw_values[vertex_index])[:4]
+        while len(values) < 4:
+            values.append(0)
+        skin_raw_dwords[vertex_index] = [int(value) & 0xFFFFFFFF for value in values[:4]]
+
+    for strip in list(getattr(part, "strips_meta", []) or []):
+        base_vertex_index = int(getattr(strip, "base_vertex_index", 0) or 0)
+        strip_vertex_count = int(getattr(strip, "vertex_count", 0) or 0)
+        strip_indices = list(getattr(strip, "skin_indices", []) or [])
+        strip_weights = list(getattr(strip, "skin_weights", []) or [])
+        strip_raw = list(getattr(strip, "skin_raw_dwords", []) or [])
+
+        for local_vertex_index in range(max(0, strip_vertex_count)):
+            vertex_index = base_vertex_index + local_vertex_index
+            if vertex_index < 0 or vertex_index >= count:
+                continue
+
+            if local_vertex_index < len(strip_indices):
+                values = list(strip_indices[local_vertex_index])[:4]
+                while len(values) < 4:
+                    values.append(0)
+                skin_indices[vertex_index] = [int(value) for value in values[:4]]
+
+            if local_vertex_index < len(strip_weights):
+                values = list(strip_weights[local_vertex_index])[:4]
+                while len(values) < 4:
+                    values.append(0.0)
+                skin_weights[vertex_index] = [float(value) for value in values[:4]]
+
+            if local_vertex_index < len(strip_raw):
+                values = list(strip_raw[local_vertex_index])[:4]
+                while len(values) < 4:
+                    values.append(0)
+                skin_raw_dwords[vertex_index] = [int(value) & 0xFFFFFFFF for value in values[:4]]
+
+    return skin_indices, skin_weights, skin_raw_dwords
+
+def normalizeStoriesGouraudNormal(
+    normal_sum: Tuple[float, float, float],
+) -> Tuple[float, float, float]:
+    x = float(normal_sum[0])
+    y = float(normal_sum[1])
+    z = float(normal_sum[2])
+    length_squared = (x * x) + (y * y) + (z * z)
+    if length_squared <= 0.000000000001:
+        return (0.0, 0.0, 1.0)
+    inverse_length = length_squared ** -0.5
+    return (x * inverse_length, y * inverse_length, z * inverse_length)
+
+def normalizedStoriesGouraudNormal(normal: Any) -> Tuple[float, float, float]:
+    try:
+        x = float(normal[0])
+        y = float(normal[1])
+        z = float(normal[2])
+    except Exception:
+        return (0.0, 0.0, 1.0)
+
+    length_squared = (x * x) + (y * y) + (z * z)
+    if length_squared <= 0.000000000001:
+        return (0.0, 0.0, 1.0)
+
+    inverse_length = length_squared ** -0.5
+    return (x * inverse_length, y * inverse_length, z * inverse_length)
+
+
+def effectiveStoriesSkinSignature(
+    bone_indices: List[int],
+    bone_weights: List[float],
+) -> Tuple[Tuple[int, float], ...]:
+    influences = []
+    for bone_index, bone_weight in zip(list(bone_indices or []), list(bone_weights or [])):
+        weight = float(bone_weight)
+        if weight <= 0.000001:
+            continue
+        influences.append((int(bone_index), round(weight, 6)))
+    influences.sort(key=lambda item: (item[0], item[1]))
+    return tuple(influences)
+
+
+def buildStoriesGouraudPartData(
+    part: Any,
+    smoothing_angle_degrees: float = 55.0,
+) -> StoriesGouraudPartData:
+    source_verts = list(getattr(part, "verts", []) or [])
+    source_faces = list(getattr(part, "faces", []) or [])
+    source_uvs = list(getattr(part, "uvs", []) or [])
+    source_colors = list(getattr(part, "vertex_colors", None) or getattr(part, "loop_colors", None) or [])
+    source_normals = list(getattr(part, "normals", []) or [])
+    source_vertex_count = len(source_verts)
+
+    source_skin_indices, source_skin_weights, source_skin_raw = collectPs2PartSkinData(
+        part,
+        source_vertex_count,
+    )
+
+    result = StoriesGouraudPartData(source_vertex_count=source_vertex_count)
+    old_to_new: List[int] = [-1 for _ in range(source_vertex_count)]
+
+    cosine_threshold = math.cos(math.radians(float(smoothing_angle_degrees)))
+    clusters_by_position_and_skin: Dict[Any, List[int]] = {}
+    cluster_normals: List[List[Tuple[float, float, float]]] = []
+    accumulated_normals: List[List[float]] = []
+    accumulated_normal_counts: List[int] = []
+
+    source_uv_values: List[Tuple[float, float]] = []
+    source_color_values: List[Tuple[int, int, int, int]] = []
+    source_normal_values: List[Tuple[float, float, float]] = []
+
+    for source_vertex_index, source_vertex in enumerate(source_verts):
+        position = (
+            float(source_vertex[0]),
+            float(source_vertex[1]),
+            float(source_vertex[2]),
+        )
+
+        if source_vertex_index < len(source_uvs):
+            uv_value = (
+                float(source_uvs[source_vertex_index][0]),
+                float(source_uvs[source_vertex_index][1]),
+            )
+        else:
+            uv_value = (0.0, 0.0)
+        source_uv_values.append(uv_value)
+
+        if source_vertex_index < len(source_colors):
+            source_color = source_colors[source_vertex_index]
+            color_value = (
+                int(source_color[0]),
+                int(source_color[1]),
+                int(source_color[2]),
+                int(source_color[3]),
+            )
+        else:
+            color_value = (255, 255, 255, 255)
+        source_color_values.append(color_value)
+
+        bone_indices = list(source_skin_indices[source_vertex_index])[:4]
+        while len(bone_indices) < 4:
+            bone_indices.append(0)
+        bone_weights = list(source_skin_weights[source_vertex_index])[:4]
+        while len(bone_weights) < 4:
+            bone_weights.append(0.0)
+        raw_skin = list(source_skin_raw[source_vertex_index])[:4]
+        while len(raw_skin) < 4:
+            raw_skin.append(0)
+
+        if source_vertex_index < len(source_normals):
+            source_normal = normalizedStoriesGouraudNormal(source_normals[source_vertex_index])
+        else:
+            source_normal = (0.0, 0.0, 1.0)
+        source_normal_values.append(source_normal)
+
+        position_key = tuple(round(value, 6) for value in position)
+        skin_key = effectiveStoriesSkinSignature(bone_indices, bone_weights)
+        cluster_key = (position_key, skin_key)
+
+        new_vertex_index = None
+        for candidate_index in clusters_by_position_and_skin.get(cluster_key, []):
+            candidate_normals = cluster_normals[candidate_index]
+            compatible = True
+            for candidate_normal in candidate_normals:
+                dot_value = (
+                    (source_normal[0] * candidate_normal[0])
+                    + (source_normal[1] * candidate_normal[1])
+                    + (source_normal[2] * candidate_normal[2])
+                )
+                if dot_value < cosine_threshold:
+                    compatible = False
+                    break
+            if compatible:
+                new_vertex_index = candidate_index
+                break
+
+        if new_vertex_index is None:
+            new_vertex_index = len(result.verts)
+            clusters_by_position_and_skin.setdefault(cluster_key, []).append(new_vertex_index)
+            cluster_normals.append([])
+            result.verts.append(position)
+            result.representative_uvs.append(uv_value)
+            result.representative_colors.append(color_value)
+            result.skin_indices.append([int(value) for value in bone_indices])
+            result.skin_weights.append([float(value) for value in bone_weights])
+            result.skin_raw_dwords.append([int(value) & 0xFFFFFFFF for value in raw_skin])
+            accumulated_normals.append([0.0, 0.0, 0.0])
+            accumulated_normal_counts.append(0)
+
+        old_to_new[source_vertex_index] = new_vertex_index
+        cluster_normals[new_vertex_index].append(source_normal)
+        accumulated_normals[new_vertex_index][0] += source_normal[0]
+        accumulated_normals[new_vertex_index][1] += source_normal[1]
+        accumulated_normals[new_vertex_index][2] += source_normal[2]
+        accumulated_normal_counts[new_vertex_index] += 1
+
+    seen_faces = set()
+    for source_face in source_faces:
+        if len(source_face) < 3:
+            continue
+
+        try:
+            source_indices = (
+                int(source_face[0]),
+                int(source_face[1]),
+                int(source_face[2]),
+            )
+            remapped_face = (
+                old_to_new[source_indices[0]],
+                old_to_new[source_indices[1]],
+                old_to_new[source_indices[2]],
+            )
+        except Exception:
+            continue
+
+        if min(remapped_face) < 0 or len(set(remapped_face)) < 3:
+            result.removed_degenerate_face_count += 1
+            continue
+
+        canonical_face = tuple(sorted(remapped_face))
+        if canonical_face in seen_faces:
+            result.removed_duplicate_face_count += 1
+            continue
+        seen_faces.add(canonical_face)
+
+        result.faces.append(remapped_face)
+        result.face_uvs.append([
+            source_uv_values[source_indices[0]],
+            source_uv_values[source_indices[1]],
+            source_uv_values[source_indices[2]],
+        ])
+        result.face_colors.append([
+            source_color_values[source_indices[0]],
+            source_color_values[source_indices[1]],
+            source_color_values[source_indices[2]],
+        ])
+        result.face_normals.append([
+            source_normal_values[source_indices[0]],
+            source_normal_values[source_indices[1]],
+            source_normal_values[source_indices[2]],
+        ])
+
+    for normal_index, normal_sum in enumerate(accumulated_normals):
+        if accumulated_normal_counts[normal_index] > 0:
+            result.normals.append(normalizeStoriesGouraudNormal(tuple(normal_sum)))
+        else:
+            result.normals.append((0.0, 0.0, 1.0))
+
+    return result
+
+def vectorDot3(
+    left: Tuple[float, float, float],
+    right: Tuple[float, float, float],
+) -> float:
+    return (
+        float(left[0]) * float(right[0])
+        + float(left[1]) * float(right[1])
+        + float(left[2]) * float(right[2])
+    )
+
+
+def polygonAreaWeight(polygon: Any) -> float:
+    try:
+        area = float(polygon.area)
+        if math.isfinite(area) and area > 0.000000000001:
+            return area
+    except Exception:
+        pass
+    return 1.0
+
+
+def buildStoriesTopologyVertexNormals(
+    mesh: bpy.types.Mesh,
+) -> List[Tuple[float, float, float]]:
+    accumulated = [[0.0, 0.0, 0.0] for _ in range(len(mesh.vertices))]
+
+    for polygon in mesh.polygons:
+        polygon_normal = normalizedStoriesGouraudNormal(tuple(polygon.normal))
+        weight = polygonAreaWeight(polygon)
+
+        for vertex_index in polygon.vertices:
+            index = int(vertex_index)
+            if index < 0 or index >= len(accumulated):
+                continue
+            accumulated[index][0] += polygon_normal[0] * weight
+            accumulated[index][1] += polygon_normal[1] * weight
+            accumulated[index][2] += polygon_normal[2] * weight
+
+    return [
+        normalizedStoriesGouraudNormal(tuple(normal_sum))
+        for normal_sum in accumulated
+    ]
+
+
+def sanitizeStoriesImportedLoopNormal(
+    imported_normal: Tuple[float, float, float],
+    polygon_normal: Tuple[float, float, float],
+    topology_vertex_normal: Tuple[float, float, float],
+    minimum_face_alignment: float = 0.25,
+) -> Tuple[Tuple[float, float, float], bool]:
+    imported = normalizedStoriesGouraudNormal(imported_normal)
+    face = normalizedStoriesGouraudNormal(polygon_normal)
+    topology = normalizedStoriesGouraudNormal(topology_vertex_normal)
+
+    imported_alignment = vectorDot3(imported, face)
+    if math.isfinite(imported_alignment) and imported_alignment >= float(minimum_face_alignment):
+        return imported, False
+
+    topology_alignment = vectorDot3(topology, face)
+    if not math.isfinite(topology_alignment) or topology_alignment < float(minimum_face_alignment):
+        topology = face
+
+    return topology, True
+
+
+def applyStoriesCustomLoopNormals(
+    mesh: bpy.types.Mesh,
+    face_normals: List[List[Tuple[float, float, float]]],
+) -> bool:
+    if mesh is None or not face_normals:
+        return False
+
+    try:
+        mesh.update(calc_edges=True)
+    except Exception:
+        try:
+            mesh.update()
+        except Exception:
+            pass
+
+    topology_vertex_normals = buildStoriesTopologyVertexNormals(mesh)
+    loop_normals: List[Tuple[float, float, float]] = [
+        (0.0, 0.0, 1.0) for _ in range(len(mesh.loops))
+    ]
+    assigned_loop_count = 0
+    repaired_loop_count = 0
+
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
+        if polygon.index < 0 or polygon.index >= len(face_normals):
+            continue
+
+        polygon_normal = normalizedStoriesGouraudNormal(tuple(polygon.normal))
+        polygon_normals = list(face_normals[polygon.index] or [])
+
+        for corner_index, loop_index in enumerate(polygon.loop_indices):
+            if loop_index < 0 or loop_index >= len(loop_normals):
+                continue
+            if corner_index >= len(polygon_normals):
+                continue
+
+            vertex_index = int(mesh.loops[loop_index].vertex_index)
+            if 0 <= vertex_index < len(topology_vertex_normals):
+                topology_normal = topology_vertex_normals[vertex_index]
+            else:
+                topology_normal = polygon_normal
+
+            repaired_normal, was_repaired = sanitizeStoriesImportedLoopNormal(
+                polygon_normals[corner_index],
+                polygon_normal,
+                topology_normal,
+            )
+            loop_normals[loop_index] = repaired_normal
+            assigned_loop_count += 1
+            if was_repaired:
+                repaired_loop_count += 1
+
+    try:
+        mesh["bleeds_mdl_custom_loop_normal_repaired_count"] = int(repaired_loop_count)
+        mesh["bleeds_mdl_custom_loop_normal_repair_mode"] = (
+            "IMPORTED_NORMAL_WITH_AREA_WEIGHTED_TOPOLOGY_OUTLIER_REPAIR"
+        )
+        mesh["bleeds_mdl_custom_loop_normal_minimum_face_alignment"] = 0.25
+    except Exception:
+        pass
+
+    if assigned_loop_count != len(mesh.loops):
+        return False
+
+    try:
+        if hasattr(mesh, "use_auto_smooth"):
+            mesh.use_auto_smooth = True
+        if hasattr(mesh, "auto_smooth_angle"):
+            mesh.auto_smooth_angle = math.pi
+    except Exception:
+        pass
+
+    try:
+        mesh.normals_split_custom_set(loop_normals)
+        mesh.update()
+        return True
+    except Exception:
+        try:
+            mesh.normals_split_custom_set_from_vertices(topology_vertex_normals)
+            mesh.update()
+            return True
+        except Exception:
+            return False
+
+
+def assignPs2SkinData(
+    obj: bpy.types.Object,
+    skin_indices: List[List[int]],
+    skin_weights: List[List[float]],
+    import_type: int,
+    arm_obj: bpy.types.Object,
+) -> None:
+    if arm_obj is None:
+        return
+
+    mesh = obj.data
+    vertex_count = len(mesh.vertices)
+    if vertex_count == 0:
+        return
+
+    obj.vertex_groups.clear()
+
+    bone_names = getPs2PedSkinPaletteBoneNames(import_type, arm_obj)
+    stampPs2PedSkinPaletteAttributes(obj, import_type, arm_obj)
+    try:
+        stampPs2PedSkinPaletteAttributes(mesh, import_type, arm_obj)
+    except Exception:
+        pass
+
+    assignments: Dict[int, Dict[str, float]] = {}
+    limit = min(vertex_count, len(skin_indices), len(skin_weights))
+    for vertex_index in range(limit):
+        for bone_index, weight in zip(skin_indices[vertex_index], skin_weights[vertex_index]):
+            accumulateMdlVertexSkinWeight(
+                assignments,
+                vertex_index,
+                bone_index,
+                weight,
+                bone_names,
+            )
+
+    writeMdlVertexSkinAssignments(obj, assignments)
+
 def assign_ps2_skin(
     obj: bpy.types.Object,
     part: Any,
@@ -2170,68 +2769,114 @@ def build_ps2_meshes(
 
     base_name = os.path.splitext(os.path.basename(stories_ctx.filepath))[0]
     parts_to_import = list(getattr(geo, "parts", []) or [])
-    if mdl_type_u == "CUT":
+    if mdl_type_u in {"PED", "CUT"}:
         original_packet_count = len(parts_to_import)
         parts_to_import = buildCutsceneActorPartsByMaterial(parts_to_import)
         try:
+            model_label = "PedModel" if mdl_type_u == "PED" else "CutsceneModel"
             stories_ctx.log(
-                f"✔ Cutscene actor import: grouped {original_packet_count} source DMA packets into {len(parts_to_import)} material part meshes."
+                f"✔ {model_label} Gouraud import: grouped {original_packet_count} source DMA packets into {len(parts_to_import)} material meshes before welding strip seams."
             )
         except Exception:
             pass
 
     for part_index, part in enumerate(parts_to_import):
-        if mdl_type_u == "CUT":
-            name = f"{base_name}_ps2_part{part_index:02d}_mat{int(getattr(part, 'material_id', 0) or 0):02d}"
+        if mdl_type_u in {"PED", "CUT"}:
+            name = f"{base_name}_ps2_mat{int(getattr(part, 'material_id', 0) or 0):02d}"
         else:
             name = f"{base_name}_ps2_p{part_index:02d}"
 
-        verts = list(part.verts)
-        faces = list(part.faces)
+        gouraud_part = buildStoriesGouraudPartData(part)
+        verts = list(gouraud_part.verts)
+        faces = list(gouraud_part.faces)
+
+        try:
+            stories_ctx.log(
+                "✔ Stories topology Gouraud material {}: {} source vertices -> {} shared vertices, {} faces; removed {} strip-degenerate and {} duplicate faces.".format(
+                    int(getattr(part, "material_id", 0) or 0),
+                    int(gouraud_part.source_vertex_count),
+                    len(verts),
+                    len(faces),
+                    int(gouraud_part.removed_degenerate_face_count),
+                    int(gouraud_part.removed_duplicate_face_count),
+                )
+            )
+        except Exception:
+            pass
 
         me = bpy.data.meshes.new(name)
         me.from_pydata(verts, [], faces)
+        set_mesh_gouraud_shading(me, True)
         me.update(calc_edges=True)
 
-        uvs = getattr(part, "uvs", None)
-        if uvs:
+        if gouraud_part.face_uvs:
             uv_layer = me.uv_layers.new(name="UVMap")
             uv_data = uv_layer.data
             for poly in me.polygons:
-                for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                    if loop_index >= len(me.loops):
+                if poly.index >= len(gouraud_part.face_uvs):
+                    continue
+                face_uvs = gouraud_part.face_uvs[poly.index]
+                for corner_index, loop_index in enumerate(poly.loop_indices):
+                    if loop_index >= len(uv_data) or corner_index >= len(face_uvs):
                         continue
-                    vert_index = me.loops[loop_index].vertex_index
-                    if vert_index < len(uvs):
-                        u, v = uvs[vert_index]
-                        uv_data[loop_index].uv = (u, 1.0 - v)
+                    u, v = face_uvs[corner_index]
+                    uv_data[loop_index].uv = convertStoriesPs2UvToBlender(u, v)
 
-        colors = getattr(part, "vertex_colors", None)
-        if not colors:
-            colors = getattr(part, "loop_colors", None)
-        if colors:
+        if gouraud_part.face_colors:
             color_attr = get_or_create_corner_color_layer(me, "Col")
-            if color_attr is None:
-                col_data = []
-            else:
-                col_data = color_attr.data
+            col_data = color_attr.data if color_attr is not None else []
             for poly in me.polygons:
-                for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                    if loop_index >= len(me.loops):
+                if poly.index >= len(gouraud_part.face_colors):
+                    continue
+                face_colors = gouraud_part.face_colors[poly.index]
+                for corner_index, loop_index in enumerate(poly.loop_indices):
+                    if loop_index >= len(col_data) or corner_index >= len(face_colors):
                         continue
-                    vert_index = me.loops[loop_index].vertex_index
-                    if vert_index < len(colors) and loop_index < len(col_data):
-                        r, g, b, a = colors[vert_index]
-                        col_data[loop_index].color = (
-                            r / 255.0,
-                            g / 255.0,
-                            b / 255.0,
-                            a / 255.0,
-                        )
+                    r, g, b, a = face_colors[corner_index]
+                    col_data[loop_index].color = (
+                        int(r) / 255.0,
+                        int(g) / 255.0,
+                        int(b) / 255.0,
+                        int(a) / 255.0,
+                    )
+
+        custom_loop_normals_applied = applyStoriesCustomLoopNormals(
+            me,
+            gouraud_part.face_normals,
+        )
+        try:
+            repaired_normal_count = int(
+                me.get("bleeds_mdl_custom_loop_normal_repaired_count", 0)
+            )
+            stories_ctx.log(
+                "✔ Stories material {}: applied {} imported custom loop normals, repaired {} outlier loop normals with area-weighted topology normals; Blender geometric smoothing is {}.".format(
+                    int(getattr(part, "material_id", 0) or 0),
+                    len(me.loops) if custom_loop_normals_applied else 0,
+                    repaired_normal_count,
+                    "disabled for shading" if custom_loop_normals_applied else "used as fallback",
+                )
+            )
+        except Exception:
+            pass
 
         obj = bpy.data.objects.new(name, me)
         collection.objects.link(obj)
-        writePs2MdlSemanticAttributes(me, part, part_index)
+        writeStoriesGouraudSemanticAttributes(
+            me,
+            gouraud_part,
+            part_index,
+            int(getattr(part, "material_id", 0) or 0),
+        )
+        try:
+            me["bleeds_mdl_vertex_stream_attribute_rebuilt"] = 1
+            me["bleeds_mdl_gouraud_welded"] = True
+            me["bleeds_mdl_gouraud_weld_mode"] = "POSITION_SKIN_NORMAL_CLUSTER_LOOP_UV_CUSTOM_LOOP_NORMALS"
+            me["bleeds_mdl_custom_loop_normals"] = bool(custom_loop_normals_applied)
+            me["bleeds_mdl_custom_loop_normal_count"] = int(len(me.loops) if custom_loop_normals_applied else 0)
+            me["bleeds_mdl_gouraud_source_vertex_count"] = int(gouraud_part.source_vertex_count)
+            me["bleeds_mdl_gouraud_shared_vertex_count"] = int(len(gouraud_part.verts))
+        except Exception:
+            pass
 
         if geo.materials and 0 <= part.material_id < len(geo.materials):
             mat_desc = geo.materials[part.material_id]
@@ -2254,11 +2899,27 @@ def build_ps2_meshes(
 
             match_mesh_to_armature_space(obj, stories_ctx, arm_obj)
 
-            assign_ps2_skin(obj, part, stories_ctx.import_type, arm_obj)
+            assignPs2SkinData(
+                obj,
+                gouraud_part.skin_indices,
+                gouraud_part.skin_weights,
+                stories_ctx.import_type,
+                arm_obj,
+            )
 
         writeMdlPartMatrixProperties(obj, part_index)
 
         created_objects.append(obj)
+
+        try:
+            obj["bleeds_mdl_gouraud_welded"] = True
+            obj["bleeds_mdl_gouraud_weld_mode"] = "POSITION_SKIN_NORMAL_CLUSTER_LOOP_UV_CUSTOM_LOOP_NORMALS"
+            obj["bleeds_mdl_custom_loop_normals"] = bool(custom_loop_normals_applied)
+            obj["bleeds_mdl_custom_loop_normal_count"] = int(len(me.loops) if custom_loop_normals_applied else 0)
+            obj["bleeds_mdl_gouraud_source_vertex_count"] = int(gouraud_part.source_vertex_count)
+            obj["bleeds_mdl_gouraud_shared_vertex_count"] = int(len(gouraud_part.verts))
+        except Exception:
+            pass
 
         try:
             obj["bleeds_mdl_part_index"] = int(part_index)
@@ -2266,12 +2927,12 @@ def build_ps2_meshes(
             obj["bleeds_mdl_part_uv_scale"] = [float(v) for v in getattr(part, "uv_scale", (1.0, 1.0))[:2]]
             obj["bleeds_mdl_part_geom_flags"] = signedInt32ForIdProp(getattr(part, "geom_flags", 0))
             obj["bleeds_mdl_part_strip_vertex_count"] = int(getattr(part, "strip_vertex_count_hint", 0))
-            if mdl_type_u == "CUT" and hasattr(part, "source_packet_indices"):
-                obj["bleeds_mdl_cutscene_grouped_part"] = True
-                obj["bleeds_mdl_cutscene_source_packet_indices"] = [int(v) for v in getattr(part, "source_packet_indices", [])]
-                obj["bleeds_mdl_cutscene_source_packet_count"] = int(len(getattr(part, "source_packet_indices", []) or []))
-                obj["bleeds_mdl_cutscene_source_packet_vertex_starts"] = [int(v) for v in getattr(part, "source_packet_vertex_starts", [])]
-                obj["bleeds_mdl_cutscene_source_packet_face_starts"] = [int(v) for v in getattr(part, "source_packet_face_starts", [])]
+            if mdl_type_u in {"PED", "CUT"} and hasattr(part, "source_packet_indices"):
+                obj["bleeds_mdl_grouped_material_part"] = True
+                obj["bleeds_mdl_source_packet_indices"] = [int(v) for v in getattr(part, "source_packet_indices", [])]
+                obj["bleeds_mdl_source_packet_count"] = int(len(getattr(part, "source_packet_indices", []) or []))
+                obj["bleeds_mdl_source_packet_vertex_starts"] = [int(v) for v in getattr(part, "source_packet_vertex_starts", [])]
+                obj["bleeds_mdl_source_packet_face_starts"] = [int(v) for v in getattr(part, "source_packet_face_starts", [])]
 
             try:
                 if hasattr(part, "entry_unknown0"):
@@ -2294,7 +2955,7 @@ def build_ps2_meshes(
             pass
 
         try:
-            norms = getattr(part, "normals", None)
+            norms = list(gouraud_part.normals)
             if norms:
                 obj["bleeds_imported_normals"] = [
                     (float(n[0]), float(n[1]), float(n[2])) for n in norms
@@ -2303,7 +2964,7 @@ def build_ps2_meshes(
             pass
 
         try:
-            imported_uvs = getattr(part, "uvs", None)
+            imported_uvs = list(gouraud_part.representative_uvs)
             if imported_uvs:
                 obj["bleeds_imported_uvs"] = [
                     (float(uv[0]), float(uv[1])) for uv in imported_uvs
@@ -2312,7 +2973,7 @@ def build_ps2_meshes(
             pass
 
         try:
-            imported_colors = getattr(part, "vertex_colors", None) or getattr(part, "loop_colors", None)
+            imported_colors = list(gouraud_part.representative_colors)
             if imported_colors:
                 obj["bleeds_imported_colors"] = [
                     (int(c[0]), int(c[1]), int(c[2]), int(c[3])) for c in imported_colors
@@ -2321,7 +2982,7 @@ def build_ps2_meshes(
             pass
 
         try:
-            skin_raw = getattr(part, "skin_raw_dwords", None)
+            skin_raw = list(gouraud_part.skin_raw_dwords)
             if skin_raw:
                 flat_skin_raw = []
                 for raw4 in skin_raw:
@@ -2357,7 +3018,39 @@ def build_psp_meshes(
 
         me = bpy.data.meshes.new(name)
         me.from_pydata(verts, [], faces)
+        set_mesh_gouraud_shading(me, True)
         me.update(calc_edges=True)
+
+        psp_custom_normals_applied = False
+        imported_normals = list(getattr(mesh_data, "normals", []) or [])
+        if imported_normals and len(imported_normals) == len(verts):
+            normalized_vertex_normals: List[Tuple[float, float, float]] = []
+            valid_normal_count = 0
+            for normal in imported_normals:
+                nx = float(normal[0])
+                ny = float(normal[1])
+                nz = float(normal[2])
+                length_squared = nx * nx + ny * ny + nz * nz
+                if length_squared > 1.0e-12:
+                    inverse_length = length_squared ** -0.5
+                    normalized_vertex_normals.append(
+                        (nx * inverse_length, ny * inverse_length, nz * inverse_length)
+                    )
+                    valid_normal_count += 1
+                else:
+                    normalized_vertex_normals.append((0.0, 0.0, 1.0))
+
+            if valid_normal_count == len(normalized_vertex_normals):
+                try:
+                    me.normals_split_custom_set_from_vertices(normalized_vertex_normals)
+                    if hasattr(me, "use_auto_smooth"):
+                        me.use_auto_smooth = True
+                    if hasattr(me, "auto_smooth_angle"):
+                        me.auto_smooth_angle = math.pi
+                    me.update()
+                    psp_custom_normals_applied = True
+                except Exception:
+                    psp_custom_normals_applied = False
 
         if getattr(mesh_data, "uvs", None):
             uv_layer = me.uv_layers.new(name="UVMap")
@@ -2369,7 +3062,7 @@ def build_psp_meshes(
                     vert_index = me.loops[loop_index].vertex_index
                     if vert_index < len(mesh_data.uvs):
                         u, v = mesh_data.uvs[vert_index]
-                        uv_data[loop_index].uv = (u, 1.0 - v)
+                        uv_data[loop_index].uv = (float(u), float(v))
 
         colors = getattr(mesh_data, "colors", None)
         if colors:
@@ -2395,14 +3088,67 @@ def build_psp_meshes(
         obj = bpy.data.objects.new(name, me)
         collection.objects.link(obj)
 
+        try:
+            obj["bleeds_psp_vertex_stride"] = int(getattr(geo, "vertex_stride", 0) or 0)
+            obj["bleeds_psp_vertex_buffer_offset"] = int(getattr(geo, "vertex_buffer_offset", 0) or 0)
+            obj["bleeds_psp_geometry_data_end"] = int(getattr(geo, "geometry_data_end", 0) or 0)
+            obj["bleeds_psp_full_skin_influences"] = bool(getattr(mesh_data, "bone_weights", None))
+            obj["bleeds_psp_custom_normals"] = bool(psp_custom_normals_applied)
+            me["bleeds_psp_vertex_stride"] = int(getattr(geo, "vertex_stride", 0) or 0)
+            me["bleeds_psp_full_skin_influences"] = bool(getattr(mesh_data, "bone_weights", None))
+            me["bleeds_psp_custom_normals"] = bool(psp_custom_normals_applied)
+        except Exception:
+            pass
+
         if geo.materials and 0 <= mesh_data.mat_id < len(geo.materials):
             mat_desc = geo.materials[mesh_data.mat_id]
             mat = get_or_create_material_for_stories(mat_desc, mesh_data.mat_id)
             if mat is not None:
+                material_rgba = int(getattr(mat_desc, "rgba", 0) or 0) & 0xFFFFFFFF
+                allow_texture_alpha = material_rgba in {0x00000000, 0xFFFFFFFF}
+
+                try:
+                    mat["bleeds_mdl_platform"] = "PSP"
+                    mat["bleeds_mdl_material_rgba_hex"] = "0x{:08X}".format(material_rgba)
+                    mat["bleeds_mdl_allow_texture_alpha"] = bool(allow_texture_alpha)
+                    mat["bleeds_mdl_texture_alpha_policy"] = (
+                        "PSP_MATERIAL_WHITE_OR_ZERO"
+                        if allow_texture_alpha
+                        else "PSP_FORCE_OPAQUE_NONWHITE_MATERIAL"
+                    )
+                except Exception:
+                    pass
+
                 if len(obj.data.materials) == 0:
                     obj.data.materials.append(mat)
                 else:
                     obj.data.materials[0] = mat
+
+                try:
+                    obj["bleeds_psp_native_uv_orientation"] = True
+                    obj["bleeds_psp_uv_v_flipped"] = False
+                    obj["bleeds_psp_material_rgba_hex"] = "0x{:08X}".format(material_rgba)
+                    obj["bleeds_psp_allow_texture_alpha"] = bool(allow_texture_alpha)
+                    me["bleeds_psp_native_uv_orientation"] = True
+                    me["bleeds_psp_uv_v_flipped"] = False
+                    me["bleeds_psp_material_rgba_hex"] = "0x{:08X}".format(material_rgba)
+                    me["bleeds_psp_allow_texture_alpha"] = bool(allow_texture_alpha)
+                except Exception:
+                    pass
+
+                try:
+                    stories_ctx.log(
+                        "✔ PSP mesh {} material {} '{}': native UV V orientation; texture alpha {} "
+                        "from material RGBA 0x{:08X}.".format(
+                            mesh_index,
+                            int(mesh_data.mat_id),
+                            str(getattr(mat_desc, "texture", "") or ""),
+                            "enabled" if allow_texture_alpha else "forced opaque",
+                            material_rgba,
+                        )
+                    )
+                except Exception:
+                    pass
 
         if arm_obj is not None:
             match_mesh_to_armature_space(obj, stories_ctx, arm_obj)
@@ -2665,6 +3411,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
 
     mesh = bpy.data.meshes.new(name)
     mesh.from_pydata(vertices, [], faces)
+    set_mesh_gouraud_shading(mesh, True)
     set_mesh_auto_smooth_if_available(mesh)
     mesh.validate(clean_customdata=False)
     mesh.update()
@@ -2725,9 +3472,12 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
 
 def set_mesh_auto_smooth_if_available(mesh: bpy.types.Mesh) -> None:
     try:
-        set_mesh_auto_smooth(mesh, True)
+        set_mesh_gouraud_shading(mesh, True)
     except Exception:
-        pass
+        try:
+            set_mesh_auto_smooth(mesh, True)
+        except Exception:
+            pass
 
 def importRawEmbeddedStoriesMdl(
     context: bpy.types.Context,
@@ -2736,6 +3486,7 @@ def importRawEmbeddedStoriesMdl(
     platform: str,
     collection_name: str,
     link_to_scene: bool,
+    print_debug_log: bool = False,
 ) -> Tuple[List[bpy.types.Object], Dict[str, Any]]:
     with open(filepath, "rb") as f:
         data = f.read()
@@ -2766,10 +3517,11 @@ def importRawEmbeddedStoriesMdl(
         "score": 200000 + int(vertex_count) + int(face_count),
     }
     objects = buildRawEmbeddedStoriesMdlMeshObject(context, filepath, groups, collection_name, detected)
-    print(
-        f"[mdl-auto] {os.path.basename(filepath)} -> raw embedded WRLD MDL "
-        f"format={detected['format']} verts={vertex_count} faces={face_count} materials={detected['material_count']}"
-    )
+    if print_debug_log:
+        print(
+            f"[mdl-auto] {os.path.basename(filepath)} -> raw embedded WRLD MDL "
+            f"format={detected['format']} verts={vertex_count} faces={face_count} materials={detected['material_count']}"
+        )
     return objects, detected
 
 def probeStoriesMdlHeader(filepath: str) -> Dict[str, Any]:
@@ -2979,6 +3731,7 @@ def import_stories_mdl_auto(
     collection_name: str,
     create_armature: bool,
     link_to_scene: bool,
+    print_debug_log: bool = False,
 ) -> Tuple[List[bpy.types.Object], Dict[str, Any]]:
     import_game_u = str(import_game or "AUTO").upper().strip()
     platform_u = str(platform or "AUTO").upper().strip()
@@ -2995,6 +3748,7 @@ def import_stories_mdl_auto(
                 platform=platform_u,
                 collection_name=collection_name,
                 link_to_scene=link_to_scene,
+                print_debug_log=print_debug_log,
             )
     except Exception:
         pass
@@ -3024,6 +3778,7 @@ def import_stories_mdl_auto(
         collection_name=collection_name,
         create_armature=create_armature,
         link_to_scene=link_to_scene,
+        print_debug_log=print_debug_log,
     )
 
     for obj in created_objects:
@@ -3036,11 +3791,12 @@ def import_stories_mdl_auto(
         except Exception:
             pass
 
-    print(
-        f"[mdl-auto] {os.path.basename(filepath)} -> "
-        f"game={detected.get('game', '') or '?'} platform={detected_platform} type={detected_mdl_type} "
-        f"verts={int(detected.get('vertex_count', 0) or 0)} faces={int(detected.get('face_count', 0) or 0)}"
-    )
+    if print_debug_log:
+        print(
+            f"[mdl-auto] {os.path.basename(filepath)} -> "
+            f"game={detected.get('game', '') or '?'} platform={detected_platform} type={detected_mdl_type} "
+            f"verts={int(detected.get('vertex_count', 0) or 0)} faces={int(detected.get('face_count', 0) or 0)}"
+        )
 
     return created_objects, detected
 
@@ -3052,8 +3808,14 @@ def import_stories_mdl(
     collection_name: str,
     create_armature: bool,
     link_to_scene: bool,
+    print_debug_log: bool = False,
 ) -> List[bpy.types.Object]:
-    stories_reader = stories_mdl.read_stories(filepath, platform, mdl_type)
+    stories_reader = stories_mdl.read_stories(
+        filepath,
+        platform,
+        mdl_type,
+        print_debug_log=print_debug_log,
+    )
     ctx_raw = stories_reader.read()
 
     stories_ctx = StoriesImportContext(
@@ -3064,6 +3826,7 @@ def import_stories_mdl(
         import_type=ctx_raw.import_type,
         atomic=ctx_raw.atomic,
         debug_log=list(ctx_raw.debug_log),
+        print_debug_log=bool(print_debug_log),
     )
 
     for attr_name in (
@@ -3109,21 +3872,38 @@ def import_stories_mdl(
         scale_base = (float(geo.scale[0]), float(geo.scale[1]), float(geo.scale[2]))
         pos_base = (float(geo.pos[0]), float(geo.pos[1]), float(geo.pos[2]))
 
+    import_type_value = int(getattr(stories_ctx, "import_type", 0) or 0)
+    game = "LCS" if import_type_value in (0, 1) else "VCS"
+    entity_type = {
+        "SIM": "SIMPLE_MODEL",
+        "PED": "PED_MODEL",
+        "CUT": "CUTSCENE_MODEL",
+        "VEH": "VEHICLE_MODEL",
+    }.get(str(mdl_type).upper().strip(), "SIMPLE_MODEL")
+
     try:
         root_obj.bleeds_is_mdl_root = True
+        root_obj.bleeds_model_game = game
         root_obj.bleeds_mdl_platform = platform
         root_obj.bleeds_mdl_type = mdl_type
         root_obj.bleeds_mdl_filepath = filepath
+        root_obj.bleeds_export_use_normals = True
+        root_obj.bleeds_export_gouraud_shading = True
         root_obj.bleeds_leeds_scale_base = scale_base
         root_obj.bleeds_leeds_pos_base = pos_base
     except Exception:
-        root_obj["bleeds_is_mdl_root"] = True
-        stamp_bleeds_entity_type(root_obj, "OBJECT")
-        root_obj["bleeds_mdl_platform"] = str(platform)
-        root_obj["bleeds_mdl_type"] = str(mdl_type)
-        root_obj["bleeds_mdl_filepath"] = str(filepath)
-        root_obj["bleeds_leeds_scale_base"] = [float(scale_base[0]), float(scale_base[1]), float(scale_base[2])]
-        root_obj["bleeds_leeds_pos_base"] = [float(pos_base[0]), float(pos_base[1]), float(pos_base[2])]
+        pass
+
+    root_obj["bleeds_is_mdl_root"] = True
+    root_obj["bleeds_model_game"] = str(game)
+    root_obj["bleeds_mdl_platform"] = str(platform)
+    root_obj["bleeds_mdl_type"] = str(mdl_type)
+    root_obj["bleeds_mdl_filepath"] = str(filepath)
+    root_obj["bleeds_export_use_normals"] = True
+    root_obj["bleeds_export_gouraud_shading"] = True
+    root_obj["bleeds_leeds_scale_base"] = [float(scale_base[0]), float(scale_base[1]), float(scale_base[2])]
+    root_obj["bleeds_leeds_pos_base"] = [float(pos_base[0]), float(pos_base[1]), float(pos_base[2])]
+    stamp_bleeds_entity_type(root_obj, entity_type)
 
     try:
         root_obj["bleeds_mdl_import_type"] = int(getattr(stories_ctx, "import_type", 0))
@@ -3293,6 +4073,28 @@ def import_stories_mdl(
         parent_object_keep_world(arm_obj, root_obj)
         created_objects.insert(0, arm_obj)
 
+    for created_object in created_objects:
+        if created_object is None or getattr(created_object, "type", None) != "MESH":
+            continue
+        stamp_bleeds_entity_type(created_object, entity_type)
+        created_object["bleeds_mdl_type"] = str(mdl_type)
+        created_object["bleeds_model_game"] = str(game)
+        created_object["bleeds_mdl_platform"] = str(platform)
+        created_object["bleeds_mdl_filepath"] = str(filepath)
+
     created_objects.insert(0, root_obj)
+
+    if print_debug_log:
+        debug_log_path = os.path.splitext(filepath)[0] + "_import_log.txt"
+        completion_line = "✔ Complete MDL import debug log written to: {}".format(debug_log_path)
+        stories_ctx.debug_log.append(completion_line)
+        try:
+            with open(debug_log_path, "w", encoding="utf-8") as output_file:
+                output_file.write("\n".join(stories_ctx.debug_log))
+            print(completion_line)
+        except Exception as exc:
+            failure_line = "✗ Failed to write complete MDL import debug log: {}".format(exc)
+            stories_ctx.debug_log.append(failure_line)
+            print(failure_line)
 
     return created_objects

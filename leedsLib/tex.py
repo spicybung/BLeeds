@@ -17,6 +17,7 @@
 
 import os
 import struct
+import zlib
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional, Sequence
 
@@ -47,77 +48,219 @@ def read_cstr(data: bytes, offset: int, length: int) -> str:
         end = len(s)
     return s[:end].decode('ascii', 'replace')
 
+@dataclass
+class Mh2TexEntry:
+    name: str
+    width: int
+    height: int
+    bits_per_pixel: int
+    pitch_or_linear_size: int
+    flags: int
+    mipmap_count: int
+    data_offset: int
+    data_size: int
+    dds_data: bytes
+
+
+def decompress_mh2_tex_container(data: bytes) -> bytes:
+    if data[:4] == b"TCDT":
+        return data
+    if data[:4] != b"Z2HM":
+        raise ValueError("Not a Manhunt 2 TEX container")
+    if len(data) < 9:
+        raise ValueError("Truncated Manhunt 2 Z2HM TEX container")
+    decoded = zlib.decompress(data[8:])
+    if decoded[:4] != b"TCDT":
+        raise ValueError("Z2HM data did not decode to a TCDT texture container")
+    return decoded
+
+
+def is_mh2_tex_data(data: bytes) -> bool:
+    if not data:
+        return False
+    if data[:4] == b"TCDT":
+        return True
+    if data[:4] != b"Z2HM":
+        return False
+    try:
+        return decompress_mh2_tex_container(data)[:4] == b"TCDT"
+    except Exception:
+        return False
+
+
+def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
+    decoded = decompress_mh2_tex_container(data)
+    if len(decoded) < 0x30:
+        raise ValueError("Manhunt 2 TEX header is truncated")
+
+    signature, const_number, file_size, index_table_offset, index_table_offset2, num_index, zero1, zero2, texture_count, first_texture_offset, last_texture_offset, zero3 = struct.unpack_from(
+        "<4s11I", decoded, 0
+    )
+    if signature != b"TCDT":
+        raise ValueError("Unsupported Manhunt 2 TEX signature")
+    if const_number != 1:
+        raise ValueError("Unsupported Manhunt 2 TEX header version")
+    if texture_count > 65536:
+        raise ValueError("Unreasonable Manhunt 2 TEX texture count")
+
+    entries: List[Mh2TexEntry] = []
+    current_offset = int(first_texture_offset)
+    visited = set()
+
+    for texture_index in range(int(texture_count)):
+        if current_offset in visited:
+            break
+        visited.add(current_offset)
+        if current_offset < 0 or current_offset + 0x70 > len(decoded):
+            raise ValueError("Manhunt 2 TEX entry offset is outside the decoded file")
+
+        next_offset = read_u32(decoded, current_offset + 0x00)
+        name = read_cstr(decoded, current_offset + 0x08, 0x20).strip()
+        width = read_u32(decoded, current_offset + 0x48)
+        height = read_u32(decoded, current_offset + 0x4C)
+        bits_per_pixel = read_u32(decoded, current_offset + 0x50)
+        pitch_or_linear_size = read_u32(decoded, current_offset + 0x54)
+        flags = struct.unpack_from("<H", decoded, current_offset + 0x58)[0]
+        mipmap_count = decoded[current_offset + 0x5C]
+        data_offset = read_u32(decoded, current_offset + 0x60)
+        data_size = read_u32(decoded, current_offset + 0x68)
+
+        if not name:
+            name = "MH2_Texture_{:03d}".format(texture_index)
+        if width <= 0 or height <= 0 or width > 16384 or height > 16384:
+            raise ValueError("Invalid Manhunt 2 TEX dimensions for {!r}".format(name))
+        if data_size <= 0 or data_offset < 0 or data_offset + data_size > len(decoded):
+            raise ValueError("Invalid Manhunt 2 TEX DDS range for {!r}".format(name))
+
+        dds_data = decoded[data_offset:data_offset + data_size]
+        if dds_data[:4] != b"DDS ":
+            raise ValueError("Manhunt 2 TEX entry {!r} does not contain a DDS payload".format(name))
+
+        entries.append(Mh2TexEntry(
+            name=name,
+            width=int(width),
+            height=int(height),
+            bits_per_pixel=int(bits_per_pixel),
+            pitch_or_linear_size=int(pitch_or_linear_size),
+            flags=int(flags),
+            mipmap_count=int(mipmap_count),
+            data_offset=int(data_offset),
+            data_size=int(data_size),
+            dds_data=bytes(dds_data),
+        ))
+
+        if texture_index + 1 >= int(texture_count):
+            break
+        if next_offset == 0 or next_offset == current_offset:
+            break
+        current_offset = int(next_offset)
+
+    if len(entries) != int(texture_count):
+        raise ValueError(
+            "Manhunt 2 TEX declared {} textures but {} entries were readable".format(
+                int(texture_count), len(entries)
+            )
+        )
+    return entries
+
 def unswizzle_psp_4bit(src: bytes, w: int, h: int) -> bytes:
 
     min_width = 32
-    bufw = w if w >= min_width else min_width
-    stride = bufw // 2
-    dest = bytearray(stride * h)
-    nbx = stride // 16
-    nby = (h + 7) // 8
-    src_pos = 0
-    for yb in range(nby):
-        row_base = yb * 8 * stride
-        for xb in range(nbx):
-            block_base = row_base + xb * 16
-            b_off = block_base
-            for n in range(8):
-                dest[b_off:b_off + 16] = src[src_pos:src_pos + 16]
-                src_pos += 16
-                b_off += stride
-    out = bytearray((w // 2) * h)
-    for row in range(h):
-        src_offset = row * stride
-        dst_offset = row * (w // 2)
-        out[dst_offset:dst_offset + (w // 2)] = dest[src_offset:src_offset + (w // 2)]
+    buffer_width = max(int(w), min_width)
+    padded_height = ((int(h) + 7) // 8) * 8
+    stride = buffer_width // 2
+    expected_size = stride * padded_height
+    source = bytes(src[:expected_size]).ljust(expected_size, b"\x00")
+
+    dest = bytearray(expected_size)
+    blocks_x = stride // 16
+    blocks_y = padded_height // 8
+    source_offset = 0
+
+    for block_y in range(blocks_y):
+        row_base = block_y * 8 * stride
+        for block_x in range(blocks_x):
+            block_base = row_base + block_x * 16
+            destination_offset = block_base
+            for block_row in range(8):
+                dest[destination_offset:destination_offset + 16] = source[source_offset:source_offset + 16]
+                source_offset += 16
+                destination_offset += stride
+
+    output_stride = int(w) // 2
+    out = bytearray(output_stride * int(h))
+    for row in range(int(h)):
+        source_row_offset = row * stride
+        destination_row_offset = row * output_stride
+        out[destination_row_offset:destination_row_offset + output_stride] = dest[
+            source_row_offset:source_row_offset + output_stride
+        ]
     return bytes(out)
 
 def unswizzle_psp_8bit(src: bytes, w: int, h: int) -> bytes:
     min_width = 16
-    bufw = w if w >= min_width else min_width
-    stride = bufw
-    dest = bytearray(stride * h)
-    nbx = stride // 16
-    nby = (h + 7) // 8
-    src_pos = 0
-    for yb in range(nby):
-        row_base = yb * 8 * stride
-        for xb in range(nbx):
-            block_base = row_base + xb * 16
-            b_off = block_base
-            for n in range(8):
-                dest[b_off:b_off + 16] = src[src_pos:src_pos + 16]
-                src_pos += 16
-                b_off += stride
-    out = bytearray(w * h)
-    for row in range(h):
-        src_offset = row * stride
-        dst_offset = row * w
-        out[dst_offset:dst_offset + w] = dest[src_offset:src_offset + w]
+    buffer_width = max(int(w), min_width)
+    padded_height = ((int(h) + 7) // 8) * 8
+    stride = buffer_width
+    expected_size = stride * padded_height
+    source = bytes(src[:expected_size]).ljust(expected_size, b"\x00")
+
+    dest = bytearray(expected_size)
+    blocks_x = stride // 16
+    blocks_y = padded_height // 8
+    source_offset = 0
+
+    for block_y in range(blocks_y):
+        row_base = block_y * 8 * stride
+        for block_x in range(blocks_x):
+            block_base = row_base + block_x * 16
+            destination_offset = block_base
+            for block_row in range(8):
+                dest[destination_offset:destination_offset + 16] = source[source_offset:source_offset + 16]
+                source_offset += 16
+                destination_offset += stride
+
+    output_stride = int(w)
+    out = bytearray(output_stride * int(h))
+    for row in range(int(h)):
+        source_row_offset = row * stride
+        destination_row_offset = row * output_stride
+        out[destination_row_offset:destination_row_offset + output_stride] = dest[
+            source_row_offset:source_row_offset + output_stride
+        ]
     return bytes(out)
 
 def unswizzle_psp_32bit(src: bytes, w: int, h: int) -> bytes:
     min_width = 4
-    bufw = w if w >= min_width else min_width
-    stride = bufw * 4
-    dest = bytearray(stride * h)
-    nbx = stride // 16
-    nby = (h + 7) // 8
-    src_pos = 0
-    for yb in range(nby):
-        row_base = yb * 8 * stride
-        for xb in range(nbx):
-            block_base = row_base + xb * 16
-            b_off = block_base
-            for n in range(8):
-                dest[b_off:b_off + 16] = src[src_pos:src_pos + 16]
-                src_pos += 16
-                b_off += stride
-    out = bytearray(w * h * 4)
-    for row in range(h):
-        src_offset = row * stride
-        dst_offset = row * w * 4
-        out[dst_offset:dst_offset + w * 4] = dest[src_offset:src_offset + w * 4]
+    buffer_width = max(int(w), min_width)
+    padded_height = ((int(h) + 7) // 8) * 8
+    stride = buffer_width * 4
+    expected_size = stride * padded_height
+    source = bytes(src[:expected_size]).ljust(expected_size, b"\x00")
+
+    dest = bytearray(expected_size)
+    blocks_x = stride // 16
+    blocks_y = padded_height // 8
+    source_offset = 0
+
+    for block_y in range(blocks_y):
+        row_base = block_y * 8 * stride
+        for block_x in range(blocks_x):
+            block_base = row_base + block_x * 16
+            destination_offset = block_base
+            for block_row in range(8):
+                dest[destination_offset:destination_offset + 16] = source[source_offset:source_offset + 16]
+                source_offset += 16
+                destination_offset += stride
+
+    output_stride = int(w) * 4
+    out = bytearray(output_stride * int(h))
+    for row in range(int(h)):
+        source_row_offset = row * stride
+        destination_row_offset = row * output_stride
+        out[destination_row_offset:destination_row_offset + output_stride] = dest[
+            source_row_offset:source_row_offset + output_stride
+        ]
     return bytes(out)
 
 def expand_nibbles_lo_first(data: bytes) -> np.ndarray:
@@ -200,11 +343,11 @@ class Ps2TexHeader:
 
     @property
     def width_pow2(self) -> int:
-        return (self.flags >> 20) & 0x3F
+        return (self.flags >> 26) & 0x3F
 
     @property
     def height_pow2(self) -> int:
-        return (self.flags >> 26) & 0x3F
+        return (self.flags >> 20) & 0x3F
 
     @property
     def width(self) -> int:
@@ -256,16 +399,16 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
     raster_offset = read_u32(hdr, 8)
     flags = read_u32(hdr, 12)
 
-    w_pow2_std = (flags >> 20) & 0x3F
-    h_pow2_std = (flags >> 26) & 0x3F
+    w_pow2_std = (flags >> 26) & 0x3F
+    h_pow2_std = (flags >> 20) & 0x3F
     bpp_std = (flags >> 14) & 0x3F
     width_std = 1 << w_pow2_std if w_pow2_std < 32 else 0
     height_std = 1 << h_pow2_std if h_pow2_std < 32 else 0
 
     use_alt = False
 
-    h_pow2_alt = flags & 0x3F
-    w_pow2_alt = (flags >> 6) & 0x3F
+    w_pow2_alt = flags & 0x3F
+    h_pow2_alt = (flags >> 6) & 0x3F
     bpp_alt = (flags >> 12) & 0x3F
     alt_unknown = (flags >> 18) & 0x3
     mip_alt = (flags >> 20) & 0xF
@@ -290,8 +433,8 @@ def parse_ps2_header(data: bytes, offset: int) -> Optional[Ps2TexHeader]:
             | ((mip_alt & 0xF) << 8)
             | ((alt_unknown & 0x3) << 12)
             | ((bpp_alt & 0x3F) << 14)
-            | ((w_pow2_alt & 0x3F) << 20)
-            | ((h_pow2_alt & 0x3F) << 26)
+            | ((h_pow2_alt & 0x3F) << 20)
+            | ((w_pow2_alt & 0x3F) << 26)
         )
         flags = canonical_flags
         width_std = width_alt
@@ -342,12 +485,23 @@ def decode_psp_texture(
     if w <= 0 or h <= 0 or offset <= 0:
         return None
     pixel_count = w * h
+    padded_height = ((h + 7) // 8) * 8
+
     if bpp == 4:
-        base_bytes = (pixel_count + 1) // 2
+        if thdr.swizzle_width:
+            base_bytes = (max(w, 32) // 2) * padded_height
+        else:
+            base_bytes = (pixel_count + 1) // 2
     elif bpp == 8:
-        base_bytes = pixel_count
+        if thdr.swizzle_width:
+            base_bytes = max(w, 16) * padded_height
+        else:
+            base_bytes = pixel_count
     elif bpp == 32:
-        base_bytes = pixel_count * 4
+        if thdr.swizzle_width:
+            base_bytes = max(w, 4) * 4 * padded_height
+        else:
+            base_bytes = pixel_count * 4
     else:
         return None
     if offset + base_bytes > len(data):

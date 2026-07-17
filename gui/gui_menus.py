@@ -17,7 +17,7 @@
 
 import bpy
 
-from .. import infer_bleeds_entity_type
+from .. import get_bleeds_type_owner, infer_bleeds_entity_type
 from bpy.props import (
     StringProperty,
     PointerProperty,
@@ -31,7 +31,7 @@ from bpy.types import (
 
 class OBJECT_PT_bleeds_entity_stamp(Panel):
     bl_idname = "OBJECT_PT_bleeds_entity_stamp"
-    bl_label = "BLeeds - Object"
+    bl_label = "BLeeds Asset Classification"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
     bl_context = "object"
@@ -45,20 +45,41 @@ class OBJECT_PT_bleeds_entity_stamp(Panel):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
+
         obj = context.object
         inferred = infer_bleeds_entity_type(obj)
+        owner = get_bleeds_type_owner(obj) or obj
+        stored = str(getattr(owner, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN")
 
-        # New imports carry the persistent enum. Legacy BLeeds objects are still
-        # identified from their existing namespaced properties and shown clearly.
-        stored = str(getattr(obj, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN")
         box = layout.box()
         if stored != "UNKNOWN":
-            box.prop(obj, "bleeds_entity_type", text="Type")
+            box.prop(owner, "bleeds_entity_type", text="Leeds Type")
         else:
-            labels = {"OBJECT": "Object", "COLLISION": "Collision", "2DFX": "2DFX"}
+            labels = {
+                "SIMPLE_MODEL": "SimpleModel",
+                "PED_MODEL": "PedModel",
+                "CUTSCENE_MODEL": "CutsceneModel",
+                "VEHICLE_MODEL": "VehModel",
+                "OBJECT": "World Object",
+                "COLLISION": "Collision",
+                "2DFX": "2DFX",
+            }
             row = box.row()
-            row.label(text="Type")
+            row.label(text="Leeds Type")
             row.label(text=labels.get(inferred, "Unknown"))
+
+        if inferred in {"SIMPLE_MODEL", "PED_MODEL", "CUTSCENE_MODEL", "VEHICLE_MODEL"}:
+            game = str(getattr(owner, "bleeds_model_game", owner.get("bleeds_model_game", "")) or "")
+            platform = str(getattr(owner, "bleeds_mdl_platform", owner.get("bleeds_mdl_platform", "")) or "")
+            source_path = str(getattr(owner, "bleeds_mdl_filepath", owner.get("bleeds_mdl_filepath", "")) or "")
+            if game:
+                box.label(text=f"Model Family: {game}")
+            if platform:
+                box.label(text=f"Platform: {platform}")
+            if source_path:
+                import os
+                box.label(text=f"Source: {os.path.basename(source_path)}")
+            return
 
         if inferred == "OBJECT":
             res_id = obj.get("blds_res_id", obj.get("blds_res_index", obj.get("blds_missing_requested_res_id", None)))
