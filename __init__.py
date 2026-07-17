@@ -551,7 +551,6 @@ _classes = [
     gui.EXPORT_PT_MDL_SemanticAttributes,
     gui.OBJECT_PT_MDL_Manhunt2Properties,
     gui.CW_InstanceProps,
-    gui.OBJECT_PT_bleeds_entity_stamp,
     gui.CW_OT_LoadFromCustom,
     gui.CW_OT_SaveToCustom,
     gui.CW_MT_ExportChoice,

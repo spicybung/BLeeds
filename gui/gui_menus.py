@@ -17,7 +17,6 @@
 
 import bpy
 
-from .. import get_bleeds_type_owner, infer_bleeds_entity_type
 from bpy.props import (
     StringProperty,
     PointerProperty,
@@ -25,105 +24,8 @@ from bpy.props import (
 from bpy.types import (
     PropertyGroup,
     Operator,
-    Panel,
     Menu,
 )
-
-class OBJECT_PT_bleeds_entity_stamp(Panel):
-    bl_idname = "OBJECT_PT_bleeds_entity_stamp"
-    bl_label = "BLeeds Asset Classification"
-    bl_space_type = "PROPERTIES"
-    bl_region_type = "WINDOW"
-    bl_context = "object"
-
-    @classmethod
-    def poll(cls, context):
-        obj = getattr(context, "object", None)
-        return obj is not None and infer_bleeds_entity_type(obj) != "UNKNOWN"
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-
-        obj = context.object
-        inferred = infer_bleeds_entity_type(obj)
-        owner = get_bleeds_type_owner(obj) or obj
-        stored = str(getattr(owner, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN")
-
-        box = layout.box()
-        if stored != "UNKNOWN":
-            box.prop(owner, "bleeds_entity_type", text="Leeds Type")
-        else:
-            labels = {
-                "SIMPLE_MODEL": "SimpleModel",
-                "PED_MODEL": "PedModel",
-                "CUTSCENE_MODEL": "CutsceneModel",
-                "VEHICLE_MODEL": "VehModel",
-                "OBJECT": "World Object",
-                "COLLISION": "Collision",
-                "2DFX": "2DFX",
-            }
-            row = box.row()
-            row.label(text="Leeds Type")
-            row.label(text=labels.get(inferred, "Unknown"))
-
-        if inferred in {"SIMPLE_MODEL", "PED_MODEL", "CUTSCENE_MODEL", "VEHICLE_MODEL"}:
-            game = str(getattr(owner, "bleeds_model_game", owner.get("bleeds_model_game", "")) or "")
-            platform = str(getattr(owner, "bleeds_mdl_platform", owner.get("bleeds_mdl_platform", "")) or "")
-            source_path = str(getattr(owner, "bleeds_mdl_filepath", owner.get("bleeds_mdl_filepath", "")) or "")
-            if game:
-                box.label(text=f"Model Family: {game}")
-            if platform:
-                box.label(text=f"Platform: {platform}")
-            if source_path:
-                import os
-                box.label(text=f"Source: {os.path.basename(source_path)}")
-            return
-
-        if inferred == "OBJECT":
-            res_id = obj.get("blds_res_id", obj.get("blds_res_index", obj.get("blds_missing_requested_res_id", None)))
-            row_link_id = obj.get("blds_row_link_id", obj.get("blds_ipl_id", obj.get("blds_img_ipl_id", obj.get("blds_missing_requested_ipl_id", None))))
-            game_model_id = obj.get("blds_game_model_id", None)
-            game_model_name = str(obj.get("blds_game_model_name", ""))
-            if res_id is not None:
-                box.label(text=f"RES ID: {int(res_id)}")
-            if row_link_id is not None:
-                box.label(text=f"ROWLINK ID: {int(row_link_id)}")
-            if game_model_id is not None and int(game_model_id) >= 0:
-                label = f"GAME MODEL ID: {int(game_model_id)}"
-                if game_model_name:
-                    label += f" ({game_model_name})"
-                box.label(text=label)
-                if str(obj.get("blds_identity_source", "")) == "MASTER_AERA_SECONDARY_ID":
-                    area_index = int(obj.get("blds_identity_area_index", -1))
-                    area_resource = int(obj.get("blds_identity_area_resource_index", -1))
-                    if area_index >= 0 and area_resource >= 0:
-                        box.label(text=f"AERA Identity: area {area_index}, resource {area_resource}")
-            source = obj.get("blds_model_source", obj.get("blds_source", obj.get("blds_kind", "")))
-            if source:
-                box.label(text=f"Source: {source}")
-        elif inferred == "COLLISION":
-            shape = str(obj.get("bleeds_col2_shape", ""))
-            if shape:
-                box.label(text=f"Shape: {shape}")
-            if obj.get("bleeds_col2_resource_id") is not None:
-                box.label(text=f"Resource ID: {int(obj.get('bleeds_col2_resource_id', 0))}")
-        elif inferred == "2DFX":
-            effect_names = {0: "Light", 1: "Particle", 2: "Attractor", 3: "Ped Behaviour"}
-            effect_type = int(obj.get("blds_2dfx_effect_type", -1))
-            box.label(text=f"Effect: {effect_names.get(effect_type, 'Unknown')} ({effect_type})")
-            if obj.get("blds_2dfx_visible_res_id") is not None:
-                box.label(text=f"Model RES: {int(obj.get('blds_2dfx_visible_res_id', -1))}")
-            if obj.get("blds_2dfx_game_model_id") is not None:
-                box.label(text=f"GAME MODEL ID: {int(obj.get('blds_2dfx_game_model_id', -1))}")
-            row_link = obj.get("blds_2dfx_row_link_id", obj.get("blds_2dfx_placement_ipl_id", None))
-            if row_link is not None:
-                box.label(text=f"ROWLINK ID: {int(row_link)}")
-            source = str(obj.get("blds_2dfx_source", ""))
-            if source:
-                box.label(text=f"Source: {source}")
-
 
 class CW_InstanceProps(PropertyGroup):
     mdl_name: StringProperty(
