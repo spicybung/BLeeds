@@ -268,6 +268,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
         for filepath in filepaths:
             try:
+                target_collection_name = collection_name or os.path.splitext(os.path.basename(filepath))[0]
                 use_manhunt2_pc_reader = (
                     self.import_game == "MH2"
                     or (self.import_game == "AUTO" and self.isManhunt2PcContainer(filepath))
@@ -284,7 +285,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                     imported_objects = mdl_core.import_mh2(
                         path=filepath,
                         context=context,
-                        collection_name=(collection_name or None),
+                        collection_name=target_collection_name,
                         layout_mode=self.mh2_layout,
                         import_armature=self.mh2_import_armature,
                         import_materials=self.mh2_import_materials,
@@ -329,7 +330,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                     import_game=self.import_game,
                     platform=self.platform,
                     mdl_type=self.mdl_type,
-                    collection_name=collection_name,
+                    collection_name=target_collection_name,
                     create_armature=self.create_armature,
                     link_to_scene=self.link_to_scene,
                     print_debug_log=self.print_debug_log,
@@ -523,4 +524,3 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
         self.report({"INFO"}, f"Exported Stories MDL: {self.filepath}")
         return {"FINISHED"}
-

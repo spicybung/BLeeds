@@ -51,31 +51,75 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "csv_dedup_res_ids")
-        layout.prop(self, "apply_img_transforms")
-        layout.prop(self, "debug_print")
         layout.prop(self, "write_debug_log")
         layout.separator()
         layout.label(text="IMG and GAME.DTZ are auto-detected beside the LVZ.", icon='INFO')
 
     def execute(self, context):
+        self._import_iterator = lvz_img_importer.iter_import_lvz_img_archive(
+            operator=self,
+            context=context,
+            lvz_path=self.filepath,
+            csv_dedup_res_ids=self.csv_dedup_res_ids,
+            apply_img_transforms=True,
+            # Detailed diagnostics belong in the sidecar log. Keeping the
+            # console quiet avoids thousands of lines during a retail map load.
+            debug_print=False,
+            write_debug_log=self.write_debug_log,
+            game_dtz_path="",
+            import_game_dtz_2dfx=True,
+        )
+        self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
+    def _stop_timer(self, context):
         try:
-            return lvz_img_importer.import_lvz_img_archive(
-                operator=self,
-                context=context,
-                lvz_path=self.filepath,
-                csv_dedup_res_ids=self.csv_dedup_res_ids,
-                apply_img_transforms=self.apply_img_transforms,
-                debug_print=self.debug_print,
-                write_debug_log=self.write_debug_log,
-                game_dtz_path="",
-                import_game_dtz_2dfx=True,
-            )
+            if getattr(self, "_timer", None) is not None:
+                context.window_manager.event_timer_remove(self._timer)
+        except Exception:
+            pass
+        self._timer = None
+
+    def modal(self, context, event):
+        if event.type == 'ESC':
+            try:
+                self._import_iterator.close()
+            except Exception:
+                pass
+            self._stop_timer(context)
+            lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import cancelled")
+            self.report({'WARNING'}, "LVZ + IMG import cancelled")
+            return {'CANCELLED'}
+
+        if event.type != 'TIMER':
+            return {'PASS_THROUGH'}
+
+        try:
+            next(self._import_iterator)
+        except StopIteration as finished:
+            self._stop_timer(context)
+            result = finished.value if finished.value is not None else {'FINISHED'}
+            lvz_img_importer.finish_active_import_progress(context, succeeded=('FINISHED' in result))
+            return result
         except Exception as exc:
+            try:
+                self._import_iterator.close()
+            except Exception:
+                pass
+            self._stop_timer(context)
             lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import failed")
             self.report({'ERROR'}, "LVZ + IMG import failed: {}".format(exc))
             return {'CANCELLED'}
-        finally:
-            lvz_img_importer.finish_active_import_progress(context)
+        return {'PASS_THROUGH'}
+
+    def cancel(self, context):
+        try:
+            self._import_iterator.close()
+        except Exception:
+            pass
+        self._stop_timer(context)
+        lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import cancelled")
 
 class EXPORT_SCENE_OT_stories_lvz_img(Operator, ExportHelper):
     bl_idname = "export_scene.leeds_lvz_img"

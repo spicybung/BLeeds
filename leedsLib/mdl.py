@@ -10121,8 +10121,7 @@ class Manhunt2MdlReader:
     def create_import_collection(self):
         import bpy
 
-        collection_suffix = "psp_beta" if self.asset_variant == "PSP_BETA" else "pc_retail"
-        collection_name = self.collection_name or "MH2_{}_{}".format(collection_suffix, self.stem)
+        collection_name = self.collection_name or self.stem
         collection = bpy.data.collections.get(collection_name) or bpy.data.collections.new(collection_name)
         scene_children = getattr(self.context.scene.collection, "children", None)
         if scene_children is not None and collection.name not in {child.name for child in scene_children}:
@@ -11642,28 +11641,7 @@ class Manhunt2MdlReader:
                 return bool(image.get("bleeds_mh2_has_cutout_alpha", False))
         except Exception:
             pass
-
-        has_transparent_pixel = False
-        has_opaque_pixel = False
-        try:
-            pixels = image.pixels
-            for pixel_offset in range(3, len(pixels), 4):
-                alpha = float(pixels[pixel_offset])
-                if alpha < 0.5:
-                    has_transparent_pixel = True
-                else:
-                    has_opaque_pixel = True
-                if has_transparent_pixel and has_opaque_pixel:
-                    break
-        except Exception:
-            return False
-
-        uses_cutout_alpha = bool(has_transparent_pixel and has_opaque_pixel)
-        try:
-            image["bleeds_mh2_has_cutout_alpha"] = uses_cutout_alpha
-        except Exception:
-            pass
-        return uses_cutout_alpha
+        return False
 
     def get_or_create_material(self, material_info):
         import bpy

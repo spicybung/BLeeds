@@ -26,6 +26,7 @@ except Exception:
     np = None
 
 from .. import set_mesh_auto_smooth, stamp_bleeds_entity_type
+from ..data import data_zlib as DATA_ZLIB
 from ..leedsLib import lvz_img as LVZ
 
 _ACTIVE_IMPORT_PROGRESS = None
@@ -65,7 +66,6 @@ class LvzImgImportProgress:
         self.redraw_interval = 0.25
         self.last_report_bucket = -1
         self.started_at = time.perf_counter()
-        self.last_console_time = 0.0
         self.map_current = 0
         self.map_total = 0
         self.model_current = 0
@@ -76,6 +76,7 @@ class LvzImgImportProgress:
         self.initial_mesh_names = set()
         self.initial_material_names = set()
         self.initial_image_names = set()
+        self.initial_light_names = set()
         self.initial_collection_names = set()
 
     def capture_initial_data_blocks(self):
@@ -95,6 +96,10 @@ class LvzImgImportProgress:
             self.initial_image_names = set(bpy.data.images.keys())
         except Exception:
             self.initial_image_names = set()
+        try:
+            self.initial_light_names = set(bpy.data.lights.keys())
+        except Exception:
+            self.initial_light_names = set()
         try:
             self.initial_collection_names = set(bpy.data.collections.keys())
         except Exception:
@@ -126,6 +131,12 @@ class LvzImgImportProgress:
         except Exception:
             pass
         try:
+            for light in list(bpy.data.lights):
+                if light.name not in self.initial_light_names and light.users == 0:
+                    bpy.data.lights.remove(light)
+        except Exception:
+            pass
+        try:
             for collection in list(bpy.data.collections):
                 if collection.name not in self.initial_collection_names:
                     bpy.data.collections.remove(collection)
@@ -148,14 +159,6 @@ class LvzImgImportProgress:
                 self.window_manager.bleeds_lvz_img_progress = 0
                 self.window_manager.bleeds_lvz_img_stage = str(stage)
                 self.window_manager.bleeds_lvz_img_status = "Leeds Stories map import | starting"
-            except Exception:
-                pass
-            try:
-                self.window_manager.popup_menu(
-                    draw_lvz_img_import_progress_popup,
-                    title="LVZ + IMG Import",
-                    icon="TIME",
-                )
             except Exception:
                 pass
         try:
@@ -221,11 +224,6 @@ class LvzImgImportProgress:
                 self.operator.report({'INFO'}, "LVZ + IMG import: {:d}% - {}".format(value, self.stage))
             except Exception:
                 pass
-
-        now = time.perf_counter()
-        if force or now - self.last_console_time >= 1.0:
-            print(status_text, flush=True)
-            self.last_console_time = now
 
     @staticmethod
     def format_duration(seconds):
@@ -296,8 +294,9 @@ class LvzImgImportProgress:
         self.update(value, stage)
 
     def redraw(self):
-        if self.window_manager is None:
-            return
+        # A modal timer returns control to Blender between batches. Tagging the
+        # UI is sufficient; forcing DRAW_WIN_SWAP here produced console spam,
+        # expensive dependency-graph updates, and Windows "Not Responding".
         try:
             for window in self.window_manager.windows:
                 screen = getattr(window, "screen", None)
@@ -305,14 +304,6 @@ class LvzImgImportProgress:
                     continue
                 for area in screen.areas:
                     area.tag_redraw()
-        except Exception:
-            pass
-        try:
-            self.context.view_layer.update()
-        except Exception:
-            pass
-        try:
-            bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
         except Exception:
             pass
 
@@ -399,7 +390,7 @@ IMPORT_DEBUG_MATRIX_SET_LIMIT = 96
 IMPORT_APPLY_PROGRESS_EVERY = 5000
 IMPORT_STAMP_DUPLICATE_IMG_PROPS = False
 IMPORT_HIDE_UNPLACED_BASES_INSTEAD_OF_DELETE = False
-IMPORT_LINK_DUPLICATES_IN_HIDDEN_COLLECTION = True
+IMPORT_LINK_DUPLICATES_IN_HIDDEN_COLLECTION = False
 IMPORT_DEFER_BASE_VISIBILITY_DURING_APPLY = False
 IMPORT_KEEP_UNPLACED_BASES_VISIBLE = False
 IMPORT_VERBOSE_MDL_DEBUG = False
@@ -2064,6 +2055,13 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
         (target_collection or bpy.context.scene.collection).objects.link(obj)
     except Exception:
         bpy.context.scene.collection.objects.link(obj)
+    # Parser/resource objects are templates, not visible placements. Keep each
+    # one hidden until the placement pass has assigned its final matrix.
+    try:
+        obj.hide_viewport = True
+        obj.hide_render = True
+    except Exception:
+        pass
     obj["blds_kind"] = "MDL"
     obj["blds_res_index"] = int(res_index)
     obj["blds_groups"] = len(groups)
@@ -3431,7 +3429,7 @@ def collect_img_mdl_candidates(img_reader: LVZ.read_img) -> List[Dict[str, int]]
         }
     return [candidates_by_cont[key] for key in sorted(candidates_by_cont)]
 
-def build_lvz_resource_mdl_objects(lvz_reader: LVZ.read_lvz, rows: List[Dict], progress_callback=None) -> Dict[int, bpy.types.Object]:
+def iter_build_lvz_resource_mdl_objects(lvz_reader: LVZ.read_lvz, rows: List[Dict], progress_callback=None):
     mdl_rows = [row for row in rows if row.get("kind") == "MDL"]
     built_by_res: Dict[int, bpy.types.Object] = {}
     if not mdl_rows:
@@ -3441,6 +3439,8 @@ def build_lvz_resource_mdl_objects(lvz_reader: LVZ.read_lvz, rows: List[Dict], p
     LVZ.dbg("— LVZ Resource MDLs —")
     total_mdl_rows = len(mdl_rows)
     for mdl_debug_i, row in enumerate(mdl_rows):
+        if mdl_debug_i and mdl_debug_i % 16 == 0:
+            yield None
         if progress_callback is not None and (mdl_debug_i % 8 == 0 or mdl_debug_i + 1 == total_mdl_rows):
             progress_callback(mdl_debug_i + 1, total_mdl_rows)
         res_index = int(row["index"])
@@ -3900,7 +3900,7 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
     return found
 
 
-def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str], placement_details=None, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
+def iter_build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str], placement_details=None, progress_callback=None):
     if not ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
         return {}
     try:
@@ -3938,6 +3938,8 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
             flat_proofs.append((int(res_id), int(variant_index), proof))
     total_proofs = len(flat_proofs)
     for global_index, (res_id, variant_index, proof) in enumerate(flat_proofs):
+        if global_index and global_index % 16 == 0:
+            yield None
         if progress_callback is not None:
             progress_callback(global_index + 1, max(1, total_proofs))
         raw_off = int(proof.get('raw_off', -1))
@@ -3990,7 +3992,7 @@ def build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: byte
     return out
 
 
-def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_sector_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, collapse_by_res_id: bool = False, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
+def iter_build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_sector_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, collapse_by_res_id: bool = False, progress_callback=None):
     parser = LVZ.read_lvz(
         decomp_bytes=img_bytes,
         stem=stem,
@@ -4032,6 +4034,8 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
         preselect_input_rows = len(overlay_rows)
         preselect_total = len(overlay_rows)
         for overlay_index, overlay in enumerate(overlay_rows):
+            if overlay_index and overlay_index % 32 == 0:
+                yield None
             if progress_callback is not None and (
                 overlay_index % 8 == 0 or overlay_index + 1 == preselect_total
             ):
@@ -4107,6 +4111,8 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
 
     total_overlay_rows = len(overlay_rows)
     for overlay_index, overlay in enumerate(overlay_rows):
+        if overlay_index and overlay_index % 16 == 0:
+            yield None
         if progress_callback is not None and (
             overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows
         ):
@@ -4175,7 +4181,7 @@ def build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LV
     return overlay_by_sector_res
 
 
-def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
+def iter_build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, sector_records: List[Dict[str, int]], max_resource_id: int, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None):
     if not sector_records:
         return {}
 
@@ -4212,6 +4218,8 @@ def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.re
 
     total_overlay_rows = len(overlay_rows)
     for overlay_index, overlay in enumerate(overlay_rows):
+        if overlay_index and overlay_index % 16 == 0:
+            yield None
         if progress_callback is not None and (overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows):
             progress_callback(overlay_index + 1, total_overlay_rows)
         row_index = int(overlay.get("row_index", -1))
@@ -4267,7 +4275,7 @@ def build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.re
     )
     return row_overlay_by_res
 
-def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None) -> Dict[Tuple[int, int], bpy.types.Object]:
+def iter_build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, source_lvz_path: str, img_name: Optional[str], needed_row_res_keys=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None):
     parser = LVZ.read_lvz(
         decomp_bytes=img_bytes,
         stem=stem,
@@ -4336,6 +4344,8 @@ def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.
 
     total_overlay_rows = len(overlay_rows)
     for overlay_index, overlay in enumerate(overlay_rows):
+        if overlay_index and overlay_index % 16 == 0:
+            yield None
         if progress_callback is not None and (overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows):
             progress_callback(overlay_index + 1, total_overlay_rows)
         row_index = int(overlay.get("row_index", -1))
@@ -4396,13 +4406,13 @@ def build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.
 
 
 
-def build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
+def iter_build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
                                              lvz_reader: LVZ.read_lvz,
                                              img_reader: LVZ.read_img,
                                              source_lvz_path: str,
                                              img_name: Optional[str],
                                              needed_res_ids=None,
-                                             progress_callback=None) -> List[bpy.types.Object]:
+                                             progress_callback=None):
     """Build exact models from the master AreaInfo[] -> AERA AreaResource[] path."""
     area_records = img_reader.find_area_info_records_from_lvz()
     if not area_records:
@@ -4432,6 +4442,8 @@ def build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
     skipped_non_geometry = 0
     total_rows = len(rows)
     for row_number, row in enumerate(rows):
+        if row_number and row_number % 16 == 0:
+            yield None
         if progress_callback is not None and (row_number % 8 == 0 or row_number + 1 == total_rows):
             try:
                 progress_callback(row_number + 1, total_rows)
@@ -4505,7 +4517,7 @@ def build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
     )
     return objects
 
-def build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, extra_container_records: List[Dict[str, int]], source_lvz_path: str, img_name: Optional[str], needed_res_ids=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None) -> List[bpy.types.Object]:
+def iter_build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, extra_container_records: List[Dict[str, int]], source_lvz_path: str, img_name: Optional[str], needed_res_ids=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None):
     if not extra_container_records:
         return []
 
@@ -4532,6 +4544,8 @@ def build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader:
 
     total_overlay_rows = len(overlay_rows)
     for overlay_index, overlay in enumerate(overlay_rows):
+        if overlay_index and overlay_index % 16 == 0:
+            yield None
         if progress_callback is not None and (overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows):
             progress_callback(overlay_index + 1, total_overlay_rows)
         sector_index = int(overlay.get("sector_index", -1))
@@ -4719,10 +4733,10 @@ def blds_prepare_import_collection_tree(lvz_path: str, img_name: Optional[str]):
     """Create one source-named hierarchy for the LVZ+IMG pair.
 
     Example:
-        beach [LVZ+IMG]
-          beach Objects
-          beach Linked Placements
-          beach 2DFX
+        beach
+          Objects
+          Linked Placements
+          2DFX
     """
     global _ACTIVE_IMPORT_ROOT_COLLECTION
     global _ACTIVE_IMPORT_OBJECTS_COLLECTION
@@ -4731,12 +4745,24 @@ def blds_prepare_import_collection_tree(lvz_path: str, img_name: Optional[str]):
 
     blds_remove_legacy_import_collections()
     base = blds_import_pair_base_name(lvz_path, img_name)
-    root_name = f"{base} [LVZ+IMG]"
+    root_name = base
     scene_root = bpy.context.scene.collection
     root = get_or_create_import_collection(root_name, scene_root)
-    objects = get_or_create_import_collection(f"{base} Objects", root)
-    linked = get_or_create_import_collection(f"{base} Linked Placements", root)
-    effects = get_or_create_import_collection(f"{base} 2DFX", root)
+
+    def get_or_create_named_child(display_name: str, kind: str):
+        for child in list(root.children):
+            try:
+                if str(child.get("blds_kind", "")) == kind:
+                    return child
+            except Exception:
+                pass
+        child = bpy.data.collections.new(display_name)
+        root.children.link(child)
+        return child
+
+    objects = get_or_create_named_child("Objects", "LVZ_IMG_OBJECTS_COLLECTION")
+    linked = get_or_create_named_child("Linked Placements", "LVZ_IMG_LINKED_COLLECTION")
+    effects = get_or_create_named_child("2DFX", "LVZ_IMG_2DFX_COLLECTION")
 
     # A fresh import replaces only BLeeds-owned children for this exact pair.
     for collection in (objects, linked, effects):
@@ -5316,7 +5342,7 @@ def blds_write_placement_res_report(lvz_path: str, details, report_rows_by_key: 
     )
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("BLeeds 1.0.21 exact RES / GAME.DTZ entity-pool 2DFX / source collection report\n")
+        f.write("BLeeds 1.1.0 RES / GAME.DTZ entity-pool 2DFX / source collection report\n")
         f.write("=" * 78 + "\n")
         f.write(f"LVZ: {lvz_path}\n")
         f.write(f"Placement rows retained: {len(ordered_rows)}\n")
@@ -5533,7 +5559,7 @@ def blds_write_placement_res_report(lvz_path: str, details, report_rows_by_key: 
     LVZ.dbg(f"[placement-report] rows={len(ordered_rows)} statuses={dict(sorted(status_counts.items()))}")
     return out_path
 
-def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None, ide_res_to_model_id: Optional[Dict[int, int]] = None, ide_res_to_name: Optional[Dict[int, str]] = None, placement_identity_by_key: Optional[Dict[Tuple[int, int, int, int], Dict[str, object]]] = None, progress_callback=None, model_2dfx_by_game_model_id: Optional[Dict[int, List[Dict[str, object]]]] = None, model_2dfx_summary: Optional[Dict[str, object]] = None, model_2dfx_collection=None, create_game_dtz_2dfx_helpers: bool = True) -> Tuple[int, int, int]:
+def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None, ide_res_to_model_id: Optional[Dict[int, int]] = None, ide_res_to_name: Optional[Dict[int, str]] = None, placement_identity_by_key: Optional[Dict[Tuple[int, int, int, int], Dict[str, object]]] = None, progress_callback=None, model_2dfx_by_game_model_id: Optional[Dict[int, List[Dict[str, object]]]] = None, model_2dfx_summary: Optional[Dict[str, object]] = None, model_2dfx_collection=None, create_game_dtz_2dfx_helpers: bool = True):
     if not details:
         return 0, 0, 0
 
@@ -6086,10 +6112,15 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
     apply_log_suppressed = 0
     hidden_duplicate_collection = None
     hidden_duplicate_collection_was_hidden = None
-    try:
-        target_collection = bpy.context.scene.collection
-    except Exception:
-        target_collection = bpy.context.collection
+    target_collection = (
+        globals().get("_ACTIVE_IMPORT_LINKED_COLLECTION")
+        or globals().get("_ACTIVE_IMPORT_OBJECTS_COLLECTION")
+    )
+    if target_collection is None:
+        try:
+            target_collection = bpy.context.scene.collection
+        except Exception:
+            target_collection = bpy.context.collection
     if IMPORT_LINK_DUPLICATES_IN_HIDDEN_COLLECTION:
         try:
             hidden_duplicate_collection = globals().get("_ACTIVE_IMPORT_LINKED_COLLECTION")
@@ -6178,7 +6209,7 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
 
     total_details = len(details)
     for detail_index, detail in enumerate(details):
-        if progress_callback is not None and (detail_index % 128 == 0 or detail_index + 1 == total_details):
+        if progress_callback is not None and (detail_index % 64 == 0 or detail_index + 1 == total_details):
             try:
                 progress_callback(
                     detail_index + 1,
@@ -6189,6 +6220,11 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
                 )
             except TypeError:
                 progress_callback(detail_index + 1, total_details)
+        # Match DemonFF's cooperative import: a bounded batch completes, then
+        # control returns to Blender for redraws and window events. The status
+        # update happens first so the visible map and progress value agree.
+        if detail_index and detail_index % 64 == 0:
+            yield None
         used_ipl_model_fallback = False
         used_force_missing_img_mdl = False
         used_exact_missing_img_mdl = False
@@ -6810,17 +6846,16 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
 
         if instance_index != 0:
             try:
+                obj.hide_viewport = True
+                obj.hide_render = True
+            except Exception:
+                pass
+            try:
                 link_object(obj)
             except Exception:
                 fallback_collection = globals().get("_ACTIVE_IMPORT_LINKED_COLLECTION") or globals().get("_ACTIVE_IMPORT_OBJECTS_COLLECTION") or bpy.context.collection
                 fallback_collection.objects.link(obj)
             linked += 1
-
-        try:
-            obj.hide_viewport = False
-            obj.hide_render = False
-        except Exception:
-            pass
 
         wrld_submodel_origin_rebased_for_row = False
         wrld_submodel_origin_off_x = 0.0
@@ -6951,6 +6986,14 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
             matrix_mode_for_row = "row_matrix_applied"
         try:
             obj["blds_matrix_mode"] = str(matrix_mode_for_row)
+        except Exception:
+            pass
+
+        # Publish only a fully placed object. This prevents origin/identity
+        # flashes and lets the map visibly grow with correct XYZ/rotation/scale.
+        try:
+            obj.hide_viewport = False
+            obj.hide_render = False
         except Exception:
             pass
 
@@ -7794,357 +7837,11 @@ def find_details_missing_primary_resources(built_by_res: Dict[int, bpy.types.Obj
 
 
 
-def blds_safe_u32(data: bytes, off: int, default: int = 0) -> int:
-    try:
-        if off < 0 or off + 4 > len(data):
-            return default
-        return struct.unpack_from("<I", data, off)[0]
-    except Exception:
-        return default
-
-
-def blds_safe_i16(data: bytes, off: int, default: int = -1) -> int:
-    try:
-        if off < 0 or off + 2 > len(data):
-            return default
-        return struct.unpack_from("<h", data, off)[0]
-    except Exception:
-        return default
-
-
-BLDS_2DFX_EFFECT_TYPE_NAMES = {
-    0: "LIGHT",
-    1: "PARTICLE",
-    2: "ATTRACTOR",
-    3: "PED_BEHAVIOUR",
-}
-
-
-def blds_2dfx_effect_type_name(effect_type: int) -> str:
-    return BLDS_2DFX_EFFECT_TYPE_NAMES.get(int(effect_type), "UNKNOWN")
-
-
-def blds_resolve_dtz_offset(data: bytes, raw_offset: int, min_size: int = 1) -> int:
-    """Validate one exact file-relative GAME.DTZ pointer.
-
-    Decompressed GTAG/GATG resource-image pointers are already file-relative
-    offsets.  Do not try neighbouring +/-0x20 interpretations: accepting a
-    shifted pointer can silently associate a different model-info/effect row.
-    """
-    raw_offset = int(raw_offset)
-    min_size = max(1, int(min_size))
-    if raw_offset < 0 or raw_offset + min_size > len(data):
-        return -1
-    return raw_offset
-
-
-def blds_decode_dtz_2dfx_entry(data: bytes, off: int, index: int, table_abs: int) -> Optional[Dict[str, object]]:
-    """Decode one 64-byte Leeds C2dEffect row from the global GAME.DTZ table."""
-    try:
-        if off < 0 or off + 0x40 > len(data):
-            return None
-        raw = bytes(data[off:off + 0x40])
-        x, y, z, pos_w = struct.unpack_from("<4f", raw, 0x00)
-        if not all(math.isfinite(float(value)) and abs(float(value)) < 1000000.0 for value in (x, y, z, pos_w)):
-            return None
-        effect_type = int(raw[0x14])
-        if effect_type < 0 or effect_type > 3:
-            return None
-        entry: Dict[str, object] = {
-            "index": int(index),
-            "global_index": int(index),
-            "entry_off": int(off),
-            "table_abs": int(table_abs),
-            "x": float(x),
-            "y": float(y),
-            "z": float(z),
-            "position_w": float(pos_w),
-            "r": int(raw[0x10]),
-            "g": int(raw[0x11]),
-            "b": int(raw[0x12]),
-            "a": int(raw[0x13]),
-            "effect_type": int(effect_type),
-            "effect_type_name": blds_2dfx_effect_type_name(effect_type),
-            "raw_hex": raw.hex(),
-            "payload_hex": raw[0x18:].hex(),
-        }
-        if effect_type == 0:
-            distance, outer_range, size, inner_range = struct.unpack_from("<4f", raw, 0x18)
-            entry.update({
-                "light_distance": float(distance),
-                "light_outer_range": float(outer_range),
-                "light_size": float(size),
-                "light_inner_range": float(inner_range),
-                "light_flash": int(raw[0x28]),
-                "light_wet": int(raw[0x29]),
-                "light_flare": int(raw[0x2A]),
-                "light_shadow_intensity": int(raw[0x2B]),
-                "light_flags": int(raw[0x2C]),
-                "light_corona_texture_ptr": int(struct.unpack_from("<I", raw, 0x30)[0]),
-                "light_shadow_texture_ptr": int(struct.unpack_from("<I", raw, 0x34)[0]),
-            })
-        elif effect_type == 1:
-            subtype = int(struct.unpack_from("<i", raw, 0x18)[0])
-            dx, dy, dz = struct.unpack_from("<3f", raw, 0x1C)
-            entry.update({
-                "particle_subtype": subtype,
-                "direction_x": float(dx),
-                "direction_y": float(dy),
-                "direction_z": float(dz),
-                "particle_scale": float(struct.unpack_from("<f", raw, 0x28)[0]),
-            })
-        elif effect_type == 2:
-            dx, dy, dz = struct.unpack_from("<3f", raw, 0x18)
-            entry.update({
-                "attractor_direction_x": float(dx),
-                "attractor_direction_y": float(dy),
-                "attractor_direction_z": float(dz),
-                "attractor_subtype": int(raw[0x24]),
-                "attractor_probability": int(raw[0x25]),
-            })
-        elif effect_type == 3:
-            dx, dy, dz = struct.unpack_from("<3f", raw, 0x18)
-            rx, ry, rz = struct.unpack_from("<3f", raw, 0x24)
-            entry.update({
-                "ped_direction_x": float(dx),
-                "ped_direction_y": float(dy),
-                "ped_direction_z": float(dz),
-                "ped_rotation_x": float(rx),
-                "ped_rotation_y": float(ry),
-                "ped_rotation_z": float(rz),
-                "ped_subtype": int(raw[0x30]),
-            })
-        return entry
-    except Exception:
-        return None
-
-
-def blds_parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[int, List[Dict[str, object]]], Dict[str, object]]:
-    """Parse exact model-id to C2dEffect associations from decompressed GAME.DTZ."""
-    summary: Dict[str, object] = {
-        "status": "unparsed",
-        "ide_count": 0,
-        "effect_count": 0,
-        "models_with_effects": 0,
-        "entries_available": 0,
-        "rejected_model_refs": 0,
-        "malformed_effect_rows": 0,
-        "effect_type_counts": {0: 0, 1: 0, 2: 0, 3: 0},
-        "effects_imported": 0,
-        "instances_with_effects": 0,
-        "model_meta_by_id": {},
-    }
-    mapping: Dict[int, List[Dict[str, object]]] = {}
-    if not data or len(data) < 0x5C:
-        summary["status"] = "header_too_small"
-        return mapping, summary
-    signature = bytes(data[:4])
-    if signature not in (b"GATG", b"GTAG"):
-        summary["status"] = "bad_signature"
-        summary["signature_hex"] = signature.hex()
-        return mapping, summary
-
-    ide_count = int(blds_safe_u32(data, 0x38, 0))
-    ide_ptr_raw = int(blds_safe_u32(data, 0x3C, 0))
-    effect_count = int(blds_safe_u32(data, 0x54, 0))
-    effect_ptr_raw = int(blds_safe_u32(data, 0x58, 0))
-    summary.update({
-        "signature": signature.decode("ascii", errors="replace"),
-        "ide_count": ide_count,
-        "ide_pointer_raw": ide_ptr_raw,
-        "effect_count": effect_count,
-        "effect_pointer_raw": effect_ptr_raw,
-    })
-    if ide_count <= 0 or ide_count > 200000:
-        summary["status"] = "ide_count_out_of_range"
-        return mapping, summary
-    if effect_count < 0 or effect_count > 100000:
-        summary["status"] = "effect_count_out_of_range"
-        return mapping, summary
-
-    ide_table = blds_resolve_dtz_offset(data, ide_ptr_raw, ide_count * 4)
-    effect_table = blds_resolve_dtz_offset(data, effect_ptr_raw, max(1, effect_count * 0x40)) if effect_count else -1
-    summary["ide_table_abs"] = ide_table
-    summary["effect_table_abs"] = effect_table
-    if ide_table < 0:
-        summary["status"] = "ide_pointer_out_of_bounds"
-        return mapping, summary
-    if effect_count and effect_table < 0:
-        summary["status"] = "effect_pointer_out_of_bounds"
-        return mapping, summary
-
-    effects: List[Optional[Dict[str, object]]] = []
-    malformed = 0
-    for effect_index in range(effect_count):
-        entry = blds_decode_dtz_2dfx_entry(data, effect_table + effect_index * 0x40, effect_index, effect_table)
-        effects.append(entry)
-        if entry is None:
-            malformed += 1
-    summary["malformed_effect_rows"] = malformed
-    effect_type_counts = {0: 0, 1: 0, 2: 0, 3: 0}
-    for effect in effects:
-        if effect is None:
-            continue
-        effect_type = int(effect.get("effect_type", -1))
-        if effect_type in effect_type_counts:
-            effect_type_counts[effect_type] += 1
-    summary["effect_type_counts"] = effect_type_counts
-
-    wanted = None
-    if wanted_model_ids is not None:
-        wanted = set()
-        for value in wanted_model_ids:
-            try:
-                model_id = int(value)
-            except Exception:
-                continue
-            if 0 <= model_id < ide_count:
-                wanted.add(model_id)
-        model_ids = sorted(wanted)
-    else:
-        model_ids = range(ide_count)
-
-    rejected = 0
-    entry_total = 0
-    model_meta_by_id: Dict[int, Dict[str, object]] = {}
-    for model_id in model_ids:
-        model_ptr_raw = int(blds_safe_u32(data, ide_table + int(model_id) * 4, 0))
-        if model_ptr_raw == 0:
-            continue
-        model_info = blds_resolve_dtz_offset(data, model_ptr_raw, 0x1A)
-        if model_info < 0:
-            rejected += 1
-            continue
-        try:
-            model_hash = int(blds_safe_u32(data, model_info + 0x08, 0))
-            model_type = int(data[model_info + 0x10])
-            num_effects = int(data[model_info + 0x11])
-            effect_index = int(blds_safe_i16(data, model_info + 0x18, -1))
-            model_meta_by_id[int(model_id)] = {
-                "model_id": int(model_id),
-                "model_hash": int(model_hash),
-                "model_hash_hex": f"0x{int(model_hash):08X}",
-                "model_pointer_raw": int(model_ptr_raw),
-                "model_info_abs": int(model_info),
-                "model_type": int(model_type),
-                "num_effects": int(num_effects),
-                "effect_index": int(effect_index),
-                "raw_0x20": bytes(data[model_info:model_info + 0x20]).hex(),
-            }
-        except Exception:
-            rejected += 1
-            continue
-        if num_effects <= 0 or effect_index < 0:
-            continue
-        if effect_index + num_effects > effect_count:
-            rejected += 1
-            continue
-        model_entries: List[Dict[str, object]] = []
-        for global_index in range(effect_index, effect_index + num_effects):
-            entry = effects[global_index] if 0 <= global_index < len(effects) else None
-            if entry is None:
-                continue
-            copied = dict(entry)
-            copied["model_id"] = int(model_id)
-            copied["model_hash"] = int(model_hash)
-            copied["model_hash_hex"] = f"0x{int(model_hash):08X}"
-            copied["model_type"] = int(model_type)
-            copied["model_info_abs"] = int(model_info)
-            copied["model_effect_index"] = int(global_index - effect_index)
-            model_entries.append(copied)
-        if model_entries:
-            mapping[int(model_id)] = model_entries
-            entry_total += len(model_entries)
-
-    summary["models_with_effects"] = len(mapping)
-    summary["entries_available"] = entry_total
-    summary["model_meta_by_id"] = model_meta_by_id
-    summary["rejected_model_refs"] = rejected
-    effect_entities, entity_pool_stats = blds_parse_game_dtz_entity_pools(data, mapping, ide_count)
-    summary["effect_entities"] = effect_entities
-    summary["entity_pool_stats"] = entity_pool_stats
-    summary["entity_instances_with_effects"] = len(effect_entities)
-    summary["entity_effect_rows"] = sum(int(entity.get("effect_count", 0)) for entity in effect_entities)
-    summary["status"] = "ok"
-    return mapping, summary
-
-
-
-def blds_parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[str, object]]], ide_count: int):
-    """Read allocated CEntity rows from ResourceImage pools.
-
-    ResourceImage owns building/treadable/dummy pools at file offsets 0x24,
-    0x28 and 0x2C after the 0x20 relocatable-image header.  CEntity.modelIndex
-    is the authoritative CBaseModelInfo index for an actual world instance.
-    """
-    pools = (("BUILDING", 0x24), ("TREADABLE", 0x28), ("DUMMY", 0x2C))
-    entities = []
-    pool_stats = {}
-    for pool_name, header_off in pools:
-        pool_ptr = int(blds_safe_u32(data, header_off, 0))
-        pool_abs = blds_resolve_dtz_offset(data, pool_ptr, 0x20)
-        stats = {"pool_pointer": pool_ptr, "size": 0, "allocated": 0, "with_effects": 0, "effect_rows": 0}
-        pool_stats[pool_name] = stats
-        if pool_abs < 0:
-            continue
-        try:
-            items_ptr, flags_ptr = struct.unpack_from("<II", data, pool_abs)
-            size = int(struct.unpack_from("<i", data, pool_abs + 0x08)[0])
-        except Exception:
-            continue
-        stats["size"] = size
-        if size < 0 or size > 200000:
-            continue
-        items_abs = blds_resolve_dtz_offset(data, int(items_ptr), max(1, size * 0x60))
-        flags_abs = blds_resolve_dtz_offset(data, int(flags_ptr), max(1, size))
-        if items_abs < 0 or flags_abs < 0:
-            continue
-        for entity_index in range(size):
-            try:
-                pool_flag = int(data[flags_abs + entity_index])
-                if pool_flag & 0x80:
-                    continue
-                stats["allocated"] += 1
-                entity_off = items_abs + entity_index * 0x60
-                model_id = int(struct.unpack_from("<h", data, entity_off + 0x56)[0])
-                model_id2 = int(struct.unpack_from("<h", data, entity_off + 0x58)[0])
-                if model_id < 0 or model_id >= int(ide_count):
-                    continue
-                entries = model_effects.get(model_id, [])
-                if not entries:
-                    continue
-                values = struct.unpack_from("<16f", data, entity_off)
-                # RslMatrix layout is right/up/at/pos with one flag dword after
-                # each XYZ vector. Ignore those W slots because they may contain
-                # flags or NaN bit patterns rather than floats.
-                right = (float(values[0]), float(values[1]), float(values[2]))
-                up = (float(values[4]), float(values[5]), float(values[6]))
-                at = (float(values[8]), float(values[9]), float(values[10]))
-                pos = (float(values[12]), float(values[13]), float(values[14]))
-                finite = all(math.isfinite(value) for value in right + up + at + pos)
-                if not finite:
-                    continue
-                stats["with_effects"] += 1
-                stats["effect_rows"] += len(entries)
-                entities.append({
-                    "pool_name": pool_name,
-                    "pool_index": int(entity_index),
-                    "pool_flag": int(pool_flag),
-                    "entity_abs": int(entity_off),
-                    "model_id": int(model_id),
-                    "model_id2": int(model_id2),
-                    "level": int(data[entity_off + 0x5A]),
-                    "area": int(data[entity_off + 0x5B]),
-                    "right": right,
-                    "up": up,
-                    "at": at,
-                    "position": pos,
-                    "effect_count": len(entries),
-                })
-            except Exception:
-                continue
-    return entities, pool_stats
-
+# Canonical GAME.DTZ binary logic lives in data/data_zlib.py. These aliases
+# keep the Blender-facing helper names stable without duplicating the parser.
+blds_2dfx_effect_type_name = DATA_ZLIB.game_dtz_2dfx_effect_type_name
+blds_decode_dtz_2dfx_entry = DATA_ZLIB.decode_game_dtz_2dfx_entry
+blds_parse_game_dtz_2dfx_bytes = DATA_ZLIB.parse_game_dtz_2dfx_bytes
 
 def blds_entity_matrix(entity: Dict[str, object]) -> Matrix:
     right = entity.get("right", (1.0, 0.0, 0.0))
@@ -8322,6 +8019,7 @@ def blds_import_game_entity_2dfx_helpers(collection, import_stem: str, model_eff
             entity_pool_index=int(entity.get("pool_index", -1)),
             entity_sector_xy=sector_xy,
             parent_to_placed=True,
+            source_game=str(game_hint).upper(),
         )
         if count:
             made += count
@@ -8358,121 +8056,13 @@ def blds_import_game_entity_2dfx_helpers(collection, import_stem: str, model_eff
     return made
 
 def blds_find_game_dtz(lvz_path: str, explicit_path: str = "") -> str:
-    candidates: List[Path] = []
-    if explicit_path:
-        try:
-            resolved = bpy.path.abspath(explicit_path)
-        except Exception:
-            resolved = explicit_path
-        candidates.append(Path(resolved))
-    try:
-        parent = Path(lvz_path).resolve().parent
-    except Exception:
-        parent = Path(lvz_path).parent
-    try:
-        children = [child for child in parent.iterdir() if child.is_file()]
-        for child in children:
-            if child.name.lower() == "game.dtz":
-                candidates.append(child)
-        # Browser/download copy suffixes are accepted silently; no extra file
-        # selector is exposed.  Exact GAME.DTZ remains first priority.
-        for child in children:
-            if child.suffix.lower() != ".dtz":
-                continue
-            if normalized_copy_stem(child.stem).lower() == "game":
-                candidates.append(child)
-    except Exception:
-        pass
-    seen = set()
-    for candidate in candidates:
-        try:
-            key = str(candidate.resolve()).lower()
-        except Exception:
-            key = str(candidate).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        try:
-            if candidate.is_file():
-                return str(candidate)
-        except Exception:
-            continue
-    return ""
+    return DATA_ZLIB.find_game_dtz(lvz_path, explicit_path)
 
 
-def blds_parse_game_dtz_2dfx(lvz_path: str, explicit_path: str = "", wanted_model_ids=None) -> Tuple[Dict[int, List[Dict[str, object]]], Dict[str, object]]:
-    source_path = blds_find_game_dtz(lvz_path, explicit_path)
-    if not source_path:
-        return {}, {
-            "status": "not_found",
-            "source_path": "",
-            "compressed": False,
-            "ide_count": 0,
-            "effect_count": 0,
-            "models_with_effects": 0,
-            "entries_available": 0,
-            "rejected_model_refs": 0,
-            "malformed_effect_rows": 0,
-            "effect_type_counts": {0: 0, 1: 0, 2: 0, 3: 0},
-            "effects_imported": 0,
-            "instances_with_effects": 0,
-        }
-    try:
-        raw = Path(source_path).read_bytes()
-        data, was_compressed = LVZ.safe_decompress(raw)
-        mapping, summary = blds_parse_game_dtz_2dfx_bytes(data, wanted_model_ids=wanted_model_ids)
-        summary["source_path"] = str(source_path)
-        summary["compressed"] = bool(was_compressed)
-        summary["input_bytes"] = len(raw)
-        summary["decompressed_bytes"] = len(data)
-        return mapping, summary
-    except Exception as exc:
-        return {}, {
-            "status": "read_failed",
-            "source_path": str(source_path),
-            "error": str(exc),
-            "compressed": False,
-            "ide_count": 0,
-            "effect_count": 0,
-            "models_with_effects": 0,
-            "entries_available": 0,
-            "rejected_model_refs": 0,
-            "malformed_effect_rows": 0,
-            "effect_type_counts": {0: 0, 1: 0, 2: 0, 3: 0},
-            "effects_imported": 0,
-            "instances_with_effects": 0,
-        }
-
-
-def blds_count_lights_pass_rows(img_reader: Optional[LVZ.read_img], img_bytes: Optional[bytes], sector_records: List[Dict[str, int]], extra_container_records: List[Dict[str, int]], max_resource_id: int) -> Dict[str, int]:
-    stats = {"candidate": 0, "valid": 0, "sector_containers": 0, "extra_containers": 0}
-    if img_reader is None or img_bytes is None:
-        return stats
-
-    def consume(records, is_extra=False):
-        for record in records or []:
-            spans = img_reader.extra_container_instance_spans(record) if is_extra else img_reader.sector_instance_spans(record)
-            has_lights = False
-            for _pass_index, pass_name, start, stop, _ptrs in spans:
-                if str(pass_name) != "LIGHTS":
-                    continue
-                has_lights = True
-                off = int(start)
-                while off + 0x50 <= int(stop):
-                    stats["candidate"] += 1
-                    try:
-                        if LVZ.looks_like_img_instance_row(img_bytes, off, max_resource_id=max_resource_id):
-                            stats["valid"] += 1
-                    except Exception:
-                        pass
-                    off += 0x50
-            if has_lights:
-                stats["extra_containers" if is_extra else "sector_containers"] += 1
-
-    consume(sector_records or [], False)
-    consume(extra_container_records or [], True)
-    return stats
-
+def blds_parse_game_dtz_2dfx(lvz_path: str, explicit_path: str = "", wanted_model_ids=None):
+    return DATA_ZLIB.parse_game_dtz_2dfx(
+        lvz_path, explicit_path=explicit_path, wanted_model_ids=wanted_model_ids
+    )
 
 def blds_2dfx_placement_key(game_model_id: int, detail) -> Tuple:
     """Return one runtime-placement key shared by split streamed resources.
@@ -8569,14 +8159,60 @@ def blds_2dfx_entry_native_direction(entry: Dict[str, object]) -> Optional[Vecto
 def blds_clear_model_2dfx_collection(collection):
     if collection is None:
         return
+    def clear_tree(current):
+        try:
+            for child in list(current.children):
+                clear_tree(child)
+                try:
+                    current.children.unlink(child)
+                except Exception:
+                    pass
+                try:
+                    bpy.data.collections.remove(child)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            for obj in list(current.objects):
+                try:
+                    light_data = obj.data if getattr(obj, "type", "") == "LIGHT" else None
+                    bpy.data.objects.remove(obj, do_unlink=True)
+                    if light_data is not None and light_data.users == 0:
+                        bpy.data.lights.remove(light_data)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    clear_tree(collection)
+
+
+def blds_2dfx_type_collection(collection, effect_type: int):
+    """Return a stable, readable child collection for one GAME.DTZ effect type."""
+    if collection is None:
+        return None
+    names = {
+        0: "Lights",
+        1: "Particles",
+        2: "Attractors",
+        3: "Ped Behaviours",
+    }
+    name = names.get(int(effect_type), "Unknown Effects")
     try:
-        for obj in list(collection.objects):
+        for child in collection.children:
             try:
-                bpy.data.objects.remove(obj, do_unlink=True)
+                if str(child.get("blds_kind", "")) == "LVZ_IMG_2DFX_TYPE_COLLECTION" and str(child.get("blds_2dfx_type_name", "")) == name:
+                    return child
             except Exception:
                 pass
     except Exception:
         pass
+    child = bpy.data.collections.new(name)
+    child["blds_kind"] = "LVZ_IMG_2DFX_TYPE_COLLECTION"
+    child["blds_2dfx_type"] = int(effect_type)
+    child["blds_2dfx_type_name"] = name
+    collection.children.link(child)
+    return child
 
 
 def blds_attach_model_2dfx_metadata(obj, visible_res_id: int, game_model_id: int, placement_ipl_id: int, entries: List[Dict[str, object]], summary: Optional[Dict[str, object]] = None, mapping_basis: str = "MASTER_AERA_SECONDARY_ID", transform_mode: str = "GAME_DTZ_NATIVE_MODEL_SPACE_SCALE_STRIPPED_BASIS"):
@@ -8601,7 +8237,7 @@ def blds_attach_model_2dfx_metadata(obj, visible_res_id: int, game_model_id: int
         pass
 
 
-def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: str, visible_res_id: int, game_model_id: int, placement_ipl_id: int, entries: List[Dict[str, object]], sector_index: int, row_index: int, pass_name: str, instance_index: int, placement_matrix: Matrix, split_res_ids=None, source_path: str = "", native_entity_matrix: bool = False, mapping_basis: str = "MASTER_AERA_SECONDARY_ID", entity_pool_name: str = "", entity_pool_index: int = -1, entity_sector_xy=None, parent_to_placed: bool = False) -> int:
+def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: str, visible_res_id: int, game_model_id: int, placement_ipl_id: int, entries: List[Dict[str, object]], sector_index: int, row_index: int, pass_name: str, instance_index: int, placement_matrix: Matrix, split_res_ids=None, source_path: str = "", native_entity_matrix: bool = False, mapping_basis: str = "MASTER_AERA_SECONDARY_ID", entity_pool_name: str = "", entity_pool_index: int = -1, entity_sector_xy=None, parent_to_placed: bool = False, source_game: str = "") -> int:
     """Create one plain BLeeds helper set for one runtime model placement.
 
     ``C2dEffect.position`` is native model-space data.  The streamed geometry
@@ -8646,13 +8282,63 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
                 owner_token = f"{import_stem}{int(visible_res_id)}"
             else:
                 owner_token = f"{import_stem}_{str(entity_pool_name or 'ENTITY').lower()}{int(entity_pool_index):04d}"
-            helper = bpy.data.objects.new(
-                f"{owner_token}_2DFX_g{int(game_model_id)}_"
-                f"r{int(placement_ipl_id)}_{int(instance_index):03d}_{global_index:04d}",
-                None,
-            )
-            helper.empty_display_type = 'SPHERE' if effect_type == 0 else 'ARROWS'
-            helper.empty_display_size = 0.25
+            readable_type = blds_2dfx_effect_type_name(effect_type).replace("_", " ").title()
+            helper_name = f"2DFX {readable_type} {global_index:04d} - {owner_token}"
+            source_rgba = tuple(max(0, min(255, int(entry.get(channel, 0)))) for channel in ("r", "g", "b", "a"))
+            if effect_type == 0:
+                light_data = bpy.data.lights.new(name=helper_name, type='POINT')
+                helper = bpy.data.objects.new(helper_name, light_data)
+                source_rgb = tuple(channel / 255.0 for channel in source_rgba[:3])
+                light_data.color = source_rgb
+                # GAME.DTZ alpha is the only per-entry intensity channel. Map
+                # it deterministically instead of assigning one generic light.
+                light_data.energy = (source_rgba[3] / 255.0) * 1000.0
+                light_size = max(0.0, abs(float(entry.get("light_size", 0.0))))
+                light_distance = max(
+                    0.01,
+                    abs(float(entry.get("light_distance", 0.0))),
+                    abs(float(entry.get("light_outer_range", 0.0))),
+                )
+                try:
+                    light_data.shadow_soft_size = light_size
+                except Exception:
+                    pass
+                try:
+                    light_data.use_custom_distance = True
+                    light_data.cutoff_distance = light_distance
+                except Exception:
+                    pass
+                try:
+                    light_data.use_shadow = bool(int(entry.get("light_shadow_intensity", 0)) > 0)
+                except Exception:
+                    pass
+                try:
+                    light_data["blds_2dfx_source"] = "GAME.DTZ"
+                    light_data["blds_2dfx_global_index"] = int(global_index)
+                    light_data["blds_2dfx_source_rgba"] = list(source_rgba)
+                    light_data["blds_2dfx_light_distance"] = float(entry.get("light_distance", 0.0))
+                    light_data["blds_2dfx_light_outer_range"] = float(entry.get("light_outer_range", 0.0))
+                    light_data["blds_2dfx_light_size"] = float(entry.get("light_size", 0.0))
+                    light_data["blds_2dfx_light_inner_range"] = float(entry.get("light_inner_range", 0.0))
+                except Exception:
+                    pass
+            else:
+                helper = bpy.data.objects.new(helper_name, None)
+                helper.empty_display_type = 'ARROWS'
+                helper.empty_display_size = 0.45
+            try:
+                helper.show_in_front = True
+            except Exception:
+                pass
+            try:
+                helper.color = (
+                    source_rgba[0] / 255.0,
+                    source_rgba[1] / 255.0,
+                    source_rgba[2] / 255.0,
+                    source_rgba[3] / 255.0 if source_rgba[3] else 1.0,
+                )
+            except Exception:
+                pass
             # Keep display helpers unscaled. Light spheres need only a world
             # position; directional effect arrows receive their own direction
             # rotation below. All source basis data is retained as metadata.
@@ -8664,6 +8350,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             helper["blds_kind"] = "LEEDS_2DFX"
             helper["blds_2dfx_source"] = "GAME.DTZ"
             helper["blds_2dfx_source_path"] = str(source_path or "")
+            helper["blds_2dfx_game"] = str(source_game or "Stories").upper()
             helper["blds_2dfx_parent_object"] = str(getattr(placed_obj, "name", "")) if placed_obj is not None else ""
             helper["blds_2dfx_attached_to_object"] = bool(placed_obj is not None)
             helper["blds_2dfx_visible_res_id"] = int(visible_res_id)
@@ -8677,7 +8364,8 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             helper["blds_2dfx_entity_pool_name"] = str(entity_pool_name or "")
             helper["blds_2dfx_entity_pool_index"] = int(entity_pool_index)
             try:
-                helper["blds_2dfx_collection_name"] = str(collection.name)
+                target_collection = blds_2dfx_type_collection(collection, effect_type) or collection
+                helper["blds_2dfx_collection_name"] = str(target_collection.name)
                 root_collection = globals().get("_ACTIVE_IMPORT_ROOT_COLLECTION")
                 helper["blds_import_root_collection"] = str(root_collection.name) if root_collection is not None else ""
             except Exception:
@@ -8737,7 +8425,8 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
                     except Exception:
                         pass
             stamp_bleeds_entity_type(helper, "2DFX")
-            collection.objects.link(helper)
+            target_collection = blds_2dfx_type_collection(collection, effect_type) or collection
+            target_collection.objects.link(helper)
             if parent_to_placed and placed_obj is not None:
                 try:
                     world_matrix = helper.matrix_world.copy()
@@ -8753,7 +8442,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             )
     return made
 
-def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: bool = True, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True):
+def iter_import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: bool = True, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True):
     # LVZ+IMG imports are long and can crash/cancel near the end while debugging.
     # Always leave a live log beside the LVZ so the last useful lines are not lost.
     write_debug_log = True
@@ -8813,9 +8502,10 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     lvz_bytes_in = Path(lvz_path).read_bytes()
     decomp, was_cmp = LVZ.safe_decompress(lvz_bytes_in)
     progress.update(4, "Decoding LVZ container")
+    yield None
 
     LVZ.dbg("===== LVZ + IMG Import =====")
-    LVZ.dbg("Patch: LVZ_IMG_GAME_ENTITY_2DFX_COLLECTIONS_V121")
+    LVZ.dbg("BLeeds 1.1.0: readable GAME.DTZ entity 2DFX collections and properties")
     old_global_undo = None
     try:
         global _ACTIVE_IMPORT_UNDO_STATE
@@ -8865,6 +8555,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     )
 
     progress.update(6, "Parsing LVZ headers")
+    yield None
     try:
         master = lvz.parse_master_header()
         groups_hdr, res_count, _ = lvz.parse_slave_groups_and_rescount()
@@ -8877,6 +8568,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         return {'CANCELLED'}
 
     progress.update(9, "Reading companion IMG")
+    yield None
     img_bytes, img_name = None, None
     try:
         img_bytes, img_name = read_img_next_to_lvz(lvz_path)
@@ -8928,6 +8620,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     LVZ.dbg("")
 
     progress.update(13, "Reading LVZ resource table")
+    yield None
     rows = lvz.walk_master_resource_table(master.res_table_addr, res_count)
     platform_from_resources, resource_dialects = detect_platform_from_resource_dialects(lvz, rows, platform)
     if platform_from_resources != platform or resource_dialects:
@@ -8942,12 +8635,14 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     # from replacing a real same-sector, master, linked, or AREA model.
 
     progress.update(18, "Decoding LVZ textures")
+    yield None
     lvz.decode_textures(
         rows,
         progress_callback=lambda index, total: progress.update_range(18, 22, index, total, "Decoding LVZ textures"),
     )
 
     progress.update(22, "Reading IMG placement tables")
+    yield None
     transforms_by_res: Dict[int, Matrix] = {}
     details = []
     sector_records = []
@@ -9096,6 +8791,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     )
 
     progress.update(27, "Reading model 2DFX metadata")
+    yield None
     model_2dfx_by_game_model_id, two_dfx_summary = blds_parse_game_dtz_2dfx(
         lvz_path,
         explicit_path=game_dtz_path,
@@ -9182,12 +8878,13 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     LVZ.dbg("[progress] building LVZ resource MDLs")
     if LVZ.DEBUG is not None:
         LVZ.DEBUG.flush()
-    built_by_res = build_lvz_resource_mdl_objects(
+    built_by_res = yield from iter_build_lvz_resource_mdl_objects(
         lvz,
         rows,
         progress_callback=lambda index, total: progress.update_range(28, 40, index, total, "Building LVZ model resources"),
     )
     LVZ.dbg(f"LVZ models built: {len(built_by_res)}")
+    yield None
     stamp_source_paths(built_by_res, lvz_path, img_name)
 
     built_by_cont: Dict[int, bpy.types.Object] = {}
@@ -9209,7 +8906,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         LVZ.dbg("[progress] building same-sector IMG resource MDLs")
         if LVZ.DEBUG is not None:
             LVZ.DEBUG.flush()
-        overlay_by_sector_res = build_sector_overlay_mdl_objects(
+        overlay_by_sector_res = yield from iter_build_sector_overlay_mdl_objects(
             stem,
             img_bytes,
             lvz,
@@ -9227,6 +8924,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         )
         log_overlay_resource_stats(img, "sector")
         LVZ.dbg(f"IMG models built for static map blocks: {len(overlay_by_sector_res)}")
+        yield None
 
         missing_after_primary = find_details_missing_primary_resources(built_by_res, details, overlay_by_sector_res)
         needed_deep_row_res_keys = {
@@ -9250,6 +8948,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         #   s16 RES, s16 secondaryId, u32 chunk-relative payload pointer.
         # Parse this authoritative path before any broad/global recovery.
         progress.update(60, "Building exact AERA resource models")
+        yield None
         LVZ.dbg("[progress] building exact models from master AreaInfo/AERA resources")
         if LVZ.DEBUG is not None:
             LVZ.DEBUG.flush()
@@ -9263,7 +8962,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             int(detail[0]) for detail in details
             if detail and int(detail[0]) >= 0
         }
-        area_direct_objects = build_official_area_resource_mdl_objects(
+        area_direct_objects = yield from iter_build_official_area_resource_mdl_objects(
             stem,
             img_bytes,
             lvz,
@@ -9291,10 +8990,11 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             # best global exact-res candidate per missing resource id before falling back
             # to the more dangerous legacy ROWLINK-as-model interpretation.
             progress.update(62, "Building global exact-resource models")
+            yield None
             LVZ.dbg("[progress] building exact IMG resource models from other map blocks")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
-            global_exact_overlay_by_sector_res = build_sector_overlay_mdl_objects(
+            global_exact_overlay_by_sector_res = yield from iter_build_sector_overlay_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9335,7 +9035,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             LVZ.dbg("[progress] building legacy ROWLINK fallback MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
-            ipl_overlay_by_sector_res = build_sector_overlay_mdl_objects(
+            ipl_overlay_by_sector_res = yield from iter_build_sector_overlay_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9359,10 +9059,11 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
 
         if ENABLE_NESTED_CHILD_FALLBACK_MDLS:
             progress.update(67, "Building nested exact-resource models")
+            yield None
             LVZ.dbg("[progress] building exact models from child resource records")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
-            nested_overlay_by_res = build_nested_child_mdl_objects(
+            nested_overlay_by_res = yield from iter_build_nested_child_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9378,7 +9079,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         elif needed_deep_row_res_keys or needed_deep_res_ids:
             LVZ.dbg(f"[cleanup] nested-child exact RES recovery had no build request; row-keys={len(needed_deep_row_res_keys)} res={len(needed_deep_res_ids)}")
         if needed_ipl_row_res_keys and ENABLE_INTERNAL_IPL_MODEL_FALLBACK_MDLS:
-            ipl_nested_overlay_by_res = build_nested_child_mdl_objects(
+            ipl_nested_overlay_by_res = yield from iter_build_nested_child_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9398,10 +9099,11 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             log_overlay_resource_stats(img, "ipl-nested")
         if ENABLE_ROW_SHARED_FALLBACK_MDLS:
             progress.update(71, "Building row-shared exact-resource models")
+            yield None
             LVZ.dbg("[progress] building exact models from shared resource records")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
-            row_overlay_by_res = build_row_shared_mdl_objects(
+            row_overlay_by_res = yield from iter_build_row_shared_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9419,7 +9121,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         elif needed_deep_row_res_keys or needed_deep_res_ids:
             LVZ.dbg(f"[cleanup] row-shared exact RES recovery had no build request; row-keys={len(needed_deep_row_res_keys)} res={len(needed_deep_res_ids)}")
         if needed_ipl_row_res_keys and ENABLE_INTERNAL_IPL_MODEL_FALLBACK_MDLS:
-            ipl_row_overlay_by_res = build_row_shared_mdl_objects(
+            ipl_row_overlay_by_res = yield from iter_build_row_shared_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9440,10 +9142,11 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                     pass
             log_overlay_resource_stats(img, "ipl-row")
         progress.update(75, "Building AREA direct-resource models")
+        yield None
         LVZ.dbg("[progress] building exact models from linked AREA records")
         if LVZ.DEBUG is not None:
             LVZ.DEBUG.flush()
-        legacy_area_direct_objects = build_extra_area_direct_mdl_objects(
+        legacy_area_direct_objects = yield from iter_build_extra_area_direct_mdl_objects(
             stem,
             img_bytes,
             lvz,
@@ -9464,7 +9167,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             LVZ.dbg("[progress] building IPL AREA/direct fallback MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
-            ipl_area_direct_objects = build_extra_area_direct_mdl_objects(
+            ipl_area_direct_objects = yield from iter_build_extra_area_direct_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9641,10 +9344,11 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
         raw_scan_res_ids = {int(detail[0]) for detail in raw_scan_details if int(detail[0]) >= 0}
         if raw_scan_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
             progress.update(79, "Checking remaining IMG model data")
+            yield None
             LVZ.dbg(f"[progress] checking raw IMG model data for {len(raw_scan_res_ids)} exact resource IDs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
-            continued_img_overlay_by_sector_res = build_empty_resource_continues_in_img_mdl_objects(
+            continued_img_overlay_by_sector_res = yield from iter_build_empty_resource_continues_in_img_mdl_objects(
                 stem,
                 img_bytes,
                 lvz,
@@ -9724,7 +9428,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                     "Placing IMG instances",
                 )
 
-            applied, linked_instances, removed_unplaced = apply_img_instance_transforms(
+            applied, linked_instances, removed_unplaced = yield from iter_apply_img_instance_transforms(
                 built_by_res,
                 details,
                 overlay_by_sector_res,
@@ -9899,3 +9603,17 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
     operator.report({'INFO'}, f"Imported LVZ+IMG: {len(details)} map placements, {linked_instances} linked copies, {len(built_by_res)} LVZ models, {len(overlay_by_sector_res)} IMG models, {int(two_dfx_summary.get('effects_imported', 0))} model 2DFX helpers, {removed_unplaced} unused model bases cleaned up ({platform}).")
     progress.finish(succeeded=True, message="Import complete")
     return {'FINISHED'}
+
+
+def import_lvz_img_archive(*args, **kwargs):
+    """Compatibility wrapper for non-modal callers.
+
+    Blender's UI operator uses ``iter_import_lvz_img_archive`` directly so it
+    can yield between phases and placement batches.
+    """
+    iterator = iter_import_lvz_img_archive(*args, **kwargs)
+    while True:
+        try:
+            next(iterator)
+        except StopIteration as finished:
+            return finished.value if finished.value is not None else {'FINISHED'}

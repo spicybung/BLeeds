@@ -578,6 +578,22 @@ def calculate_object_local_bounding_sphere(obj) -> Optional[Tuple[float, float, 
         radius = max(radius, math.sqrt(dx * dx + dy * dy + dz * dz))
     return (cx, cy, cz, radius)
 
+def is_game_dtz_2dfx_object(obj) -> bool:
+    """True for GAME.DTZ-owned helpers that must never be written to LVZ/IMG."""
+    if obj is None:
+        return False
+    try:
+        if str(obj.get("blds_kind", "")).upper().strip() == "LEEDS_2DFX":
+            return True
+        if str(obj.get("blds_entity_type", "")).upper().strip() == "2DFX":
+            return True
+        if str(obj.get("blds_2dfx_source", "")).upper().strip() == "GAME.DTZ":
+            return True
+        return obj.get("blds_2dfx_effect_type") is not None
+    except Exception:
+        return False
+
+
 def collect_lvz_img_export_objects(context, selected_only: bool) -> List[bpy.types.Object]:
     if selected_only:
         candidates = list(getattr(context, "selected_objects", []) or [])
@@ -587,10 +603,24 @@ def collect_lvz_img_export_objects(context, selected_only: bool) -> List[bpy.typ
     for obj in candidates:
         if obj is None:
             continue
-        if "blds_res_index" not in obj:
+        if is_game_dtz_2dfx_object(obj):
+            continue
+        # Export only real placed IMG rows. Parser templates also carry a
+        # resource index, but have no placement identity and must never rewrite
+        # the first matching row at their identity transform.
+        is_placed = bool(obj.get("blds_visible_placement_instance", False))
+        has_exact_row = "blds_img_cont" in obj and "blds_img_rel_off" in obj
+        if not is_placed and not has_exact_row:
+            continue
+        if "blds_res_id" not in obj and "blds_res_index" not in obj:
             continue
         objects.append(obj)
-    objects.sort(key=lambda item: (int(item.get("blds_res_index", -1)), item.name))
+    objects.sort(key=lambda item: (
+        int(item.get("blds_img_cont", -1)),
+        int(item.get("blds_img_rel_off", -1)),
+        int(item.get("blds_res_id", item.get("blds_res_index", -1))),
+        item.name,
+    ))
     return objects
 
 def build_first_img_detail_by_res(details) -> Dict[int, Tuple]:
@@ -1061,7 +1091,7 @@ def write_lvz_img_scene_archive(
 ) -> Dict[str, object]:
     objects = collect_lvz_img_export_objects(context, selected_only)
     if not objects:
-        raise ValueError("No LVZ/IMG imported objects were found. Expected objects with blds_res_index.")
+        raise ValueError("No placed LVZ/IMG objects were found. Parser templates and 2DFX helpers are not exportable IMG rows.")
 
     if not source_lvz_path:
         source_lvz_path = find_source_path_from_objects(objects, "blds_source_lvz_path")
@@ -1128,8 +1158,15 @@ def write_lvz_img_scene_archive(
 
     changed_rows = []
     skipped_objects = []
+    written_row_offsets = set()
+    bounds_by_mesh = {}
     for obj in objects:
-        res_id = int(obj.get("blds_res_index", -1))
+        # Defense in depth: even a caller-supplied or incorrectly stamped
+        # GAME.DTZ helper cannot reach the LVZ texture or IMG placement writer.
+        if is_game_dtz_2dfx_object(obj):
+            skipped_objects.append((obj.name, -1, "GAME.DTZ 2DFX is not stored in LVZ/IMG"))
+            continue
+        res_id = int(obj.get("blds_res_id", obj.get("blds_res_index", -1)))
         target_details: List[Tuple] = []
         has_exact = "blds_img_cont" in obj and "blds_img_rel_off" in obj
         if has_exact:
@@ -1150,6 +1187,9 @@ def write_lvz_img_scene_archive(
         for detail in target_details:
             detail_res_id, cont, rel_off = int(detail[0]), int(detail[1]), int(detail[2])
             row_off = cont + rel_off
+            if row_off in written_row_offsets:
+                skipped_objects.append((obj.name, res_id, f"IMG row 0x{row_off:X} was already updated by its exact placed object"))
+                continue
             if row_off < 0 or row_off + 0x50 > len(img_bytes_out):
                 skipped_objects.append((obj.name, res_id, f"IMG row out of range at 0x{row_off:X}"))
                 continue
@@ -1165,7 +1205,13 @@ def write_lvz_img_scene_archive(
                 write_matrix_16_floats_row_major(img_bytes_out, row_off + 0x10, obj.matrix_world)
             bounds = None
             if update_bounds:
-                bounds = calculate_object_local_bounding_sphere(obj)
+                try:
+                    mesh_key = int(obj.data.as_pointer())
+                except Exception:
+                    mesh_key = id(getattr(obj, "data", None))
+                if mesh_key not in bounds_by_mesh:
+                    bounds_by_mesh[mesh_key] = calculate_object_local_bounding_sphere(obj)
+                bounds = bounds_by_mesh.get(mesh_key)
                 if bounds is not None:
                     struct.pack_into("<HHHH", img_bytes_out, row_off + 0x04,
                                      float_to_half_u16(bounds[0]),
@@ -1180,6 +1226,7 @@ def write_lvz_img_scene_archive(
                 "row_off": row_off,
                 "bounds": bounds,
             })
+            written_row_offsets.add(row_off)
 
     output_lvz.parent.mkdir(parents=True, exist_ok=True)
     if update_textures:

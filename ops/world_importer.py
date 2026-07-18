@@ -28,8 +28,13 @@ from ..leedsLib import bsp, world
 def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
 
     img = bpy.data.images.new(name=name, width=w, height=h, alpha=True, float_buffer=False)
-    flat = (rgba.astype(np.float32) / 255.0).reshape(-1, 4)
-    img.pixels = flat.flatten().tolist()
+    flat = np.ascontiguousarray(rgba.reshape(-1, 4), dtype=np.float32)
+    flat *= (1.0 / 255.0)
+    try:
+        img.pixels.foreach_set(flat.reshape(-1))
+    except Exception:
+        img.pixels = flat.reshape(-1).tolist()
+    img.update()
     img.alpha_mode = 'STRAIGHT'
     img.pack()
     return img

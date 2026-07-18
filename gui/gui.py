@@ -23,6 +23,6 @@ from .col2_ot import *
 from .col2_menus import *
 from .tex_ot import *
 from .lvz_img_ot import *
+from .two_dfx_menus import *
 from .world_ot import *
 from .worldblock_ot import *
-

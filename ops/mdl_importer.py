@@ -3846,14 +3846,16 @@ def import_stories_mdl(
             except Exception:
                 pass
 
-    if collection_name and collection_name in bpy.data.collections:
-        collection = bpy.data.collections[collection_name]
+    base_name = os.path.splitext(os.path.basename(filepath))[0]
+    target_collection_name = collection_name or base_name
+
+    if target_collection_name in bpy.data.collections:
+        collection = bpy.data.collections[target_collection_name]
     else:
-        collection = bpy.data.collections.new(collection_name or "Stories_MDL")
+        collection = bpy.data.collections.new(target_collection_name)
         if link_to_scene:
             context.scene.collection.children.link(collection)
 
-    base_name = os.path.splitext(os.path.basename(filepath))[0]
     root_name = f"{base_name}_ROOT"
     root_obj = bpy.data.objects.new(root_name, None)
     root_obj.empty_display_type = "PLAIN_AXES"

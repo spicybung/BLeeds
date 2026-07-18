@@ -60,6 +60,7 @@ class Mh2TexEntry:
     mipmap_count: int
     data_offset: int
     data_size: int
+    uses_cutout_alpha: bool
     dds_data: bytes
 
 
@@ -87,6 +88,23 @@ def is_mh2_tex_data(data: bytes) -> bool:
         return decompress_mh2_tex_container(data)[:4] == b"TCDT"
     except Exception:
         return False
+
+
+def dxt1_uses_cutout_alpha(dds_data: bytes) -> bool:
+    if len(dds_data) < 0x80 or dds_data[:4] != b"DDS ":
+        return False
+    if dds_data[0x54:0x58] != b"DXT1":
+        return False
+
+    payload = memoryview(dds_data)[0x80:]
+    for block_offset in range(0, len(payload) - 7, 8):
+        color0, color1, indices = struct.unpack_from("<HHI", payload, block_offset)
+        if color0 > color1:
+            continue
+        for pixel_index in range(16):
+            if ((indices >> (pixel_index * 2)) & 0x03) == 0x03:
+                return True
+    return False
 
 
 def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
@@ -169,6 +187,7 @@ def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
             mipmap_count=int(mipmap_count),
             data_offset=int(data_offset),
             data_size=int(data_size),
+            uses_cutout_alpha=dxt1_uses_cutout_alpha(dds_data),
             dds_data=bytes(dds_data),
         ))
 

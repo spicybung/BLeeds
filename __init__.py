@@ -550,6 +550,8 @@ _classes = [
     gui.EXPORT_OT_MDL_StampSemanticAttributes,
     gui.EXPORT_PT_MDL_SemanticAttributes,
     gui.OBJECT_PT_MDL_Manhunt2Properties,
+    gui.OBJECT_PT_BLeeds_2DFX,
+    gui.DATA_PT_BLeeds_2DFX_Light,
     gui.CW_InstanceProps,
     gui.CW_OT_LoadFromCustom,
     gui.CW_OT_SaveToCustom,

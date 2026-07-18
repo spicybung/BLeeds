@@ -636,6 +636,8 @@ def load_mh2_dds_image(entry, input_path: str, prefix: str = "") -> Optional[bpy
             image["bleeds_mh2_tex_bits_per_pixel"] = int(entry.bits_per_pixel)
             image["bleeds_mh2_tex_mipmap_count"] = int(entry.mipmap_count)
             image["bleeds_mh2_tex_dds_size"] = int(entry.data_size)
+            image["bleeds_mh2_has_cutout_alpha"] = bool(entry.uses_cutout_alpha)
+            image["bleeds_texture_has_meaningful_alpha"] = bool(entry.uses_cutout_alpha)
         except Exception:
             pass
         return image
@@ -818,9 +820,11 @@ def decode_chk_to_blender_images(
             continue
         h, w, _ = rgba.shape
 
-        rgba_flat = rgba.reshape((-1, 4)).astype(np.float32) / 255.0
-
-        pixels = rgba_flat.flatten().tolist()
+        rgba_flat = np.ascontiguousarray(
+            rgba.reshape((-1, 4)),
+            dtype=np.float32,
+        )
+        rgba_flat *= (1.0 / 255.0)
 
         image_name = f"{prefix}{name}"
 
@@ -840,7 +844,14 @@ def decode_chk_to_blender_images(
         except Exception:
             pass
 
-        img.pixels = pixels
+        try:
+            img.pixels.foreach_set(rgba_flat.reshape(-1))
+        except Exception:
+            img.pixels = rgba_flat.reshape(-1).tolist()
+        try:
+            img.update()
+        except Exception:
+            pass
         blender_images.append(img)
     return blender_images
 
