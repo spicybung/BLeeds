@@ -326,7 +326,14 @@ class DebugOut:
         self._fh = None
 
     def log(self, msg: str):
-        msg = _concise_import_log_message(msg)
+        raw_msg = str(msg)
+        # Console debugging is opt-in and must show the real parser trace. The
+        # previous implementation condensed the message before printing, which
+        # made the file-browser "Debug print" choice appear to do nothing.
+        if self.enable_console:
+            print(raw_msg)
+
+        msg = _concise_import_log_message(raw_msg)
         if msg is None:
             return
         once_prefixes = (
@@ -345,8 +352,6 @@ class DebugOut:
             if msg in self._concise_seen:
                 return
             self._concise_seen.add(msg)
-        if self.enable_console:
-            print(msg)
         if self.write_file:
             self._line_count += 1
             if self._fh is not None:

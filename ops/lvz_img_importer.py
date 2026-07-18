@@ -8445,10 +8445,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             )
     return made
 
-def iter_import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: bool = True, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True):
-    # LVZ+IMG imports are long and can crash/cancel near the end while debugging.
-    # Always leave a live log beside the LVZ so the last useful lines are not lost.
-    write_debug_log = True
+def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True):
     if not lvz_path:
         operator.report({'ERROR'}, "No LVZ selected.")
         return {'CANCELLED'}
@@ -8708,7 +8705,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_
             transforms_by_res = img.build_sector_transforms_map_and_log(details, enable_unique_log=False)
 
         if IMPORT_WRITE_DEBUG_CSVS:
-            all_rows = img.write_sector_csvs(lvz_path, details, enable_unique=csv_dedup_res_ids)
+            all_rows = img.write_sector_csvs(lvz_path, details, enable_unique=False)
         else:
             all_rows = [(int(d[1]), int(d[2]), int(d[3]), int(d[4]), int(d[0])) for d in details]
 
@@ -8822,6 +8819,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_
             f"source={two_dfx_summary.get('source_path', '')} error={two_dfx_summary.get('error', '')}"
         )
     else:
+        LVZ.dbg(f"GAME.DTZ detected alongside LVZ: {two_dfx_summary.get('source_path', '')}")
         LVZ.dbg(
             f"[2dfx-model] GAME.DTZ source={two_dfx_summary.get('source_path', '')} "
             f"model_infos={int(two_dfx_summary.get('ide_count', 0))} "

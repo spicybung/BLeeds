@@ -25,20 +25,14 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
 
     filename_ext = ".lvz"
 
-    csv_dedup_res_ids: BoolProperty(
-        name="CSV unique + log detailed blocks",
-        default=True,
-    )
-    apply_img_transforms: BoolProperty(
-        name="Apply IMG transforms to MDL objects",
-        default=True,
-    )
     debug_print: BoolProperty(
-        name="Debug print",
+        name="Print Debug Log",
+        description="Print the full LVZ+IMG import trace in Blender's system console",
         default=False,
     )
     write_debug_log: BoolProperty(
-        name="Write debug log next to LVZ",
+        name="Export Log",
+        description="Write a concise live import log beside the selected LVZ",
         default=True,
     )
 
@@ -50,21 +44,16 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
 
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "csv_dedup_res_ids")
         layout.prop(self, "write_debug_log")
-        layout.separator()
-        layout.label(text="IMG and GAME.DTZ are auto-detected beside the LVZ.", icon='INFO')
+        layout.prop(self, "debug_print")
 
     def execute(self, context):
         self._import_iterator = lvz_img_importer.iter_import_lvz_img_archive(
             operator=self,
             context=context,
             lvz_path=self.filepath,
-            csv_dedup_res_ids=self.csv_dedup_res_ids,
             apply_img_transforms=True,
-            # Detailed diagnostics belong in the sidecar log. Keeping the
-            # console quiet avoids thousands of lines during a retail map load.
-            debug_print=False,
+            debug_print=self.debug_print,
             write_debug_log=self.write_debug_log,
             game_dtz_path="",
             import_game_dtz_2dfx=True,
