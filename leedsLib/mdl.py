@@ -10160,16 +10160,19 @@ class Manhunt2MdlReader:
                     pass
 
         self.root_obj = root
-        try:
-            root.bleeds_is_mdl_root = True
-            root.bleeds_model_game = "MH2"
-            root.bleeds_mdl_platform = platform
-            root.bleeds_mdl_type = mdl_type
-            root.bleeds_mdl_filepath = self.path
-            root.bleeds_export_use_normals = True
-            root.bleeds_export_gouraud_shading = True
-        except Exception:
-            pass
+        for property_name, property_value in (
+            ("bleeds_is_mdl_root", True),
+            ("bleeds_model_game", "MH2"),
+            ("bleeds_mdl_platform", platform),
+            ("bleeds_mdl_type", mdl_type),
+            ("bleeds_mdl_filepath", self.path),
+            ("bleeds_export_use_normals", True),
+            ("bleeds_export_gouraud_shading", True),
+        ):
+            try:
+                setattr(root, property_name, property_value)
+            except Exception as exc:
+                self.log("MH2 root property {!r} could not be written through RNA: {}".format(property_name, exc))
         root["bleeds_is_mdl_root"] = True
         root["bleeds_model_game"] = "MH2"
         root["bleeds_mdl_platform"] = platform
@@ -10178,6 +10181,7 @@ class Manhunt2MdlReader:
         root["bleeds_export_use_normals"] = True
         root["bleeds_export_gouraud_shading"] = True
         root["bleeds_mh2_platform"] = platform
+        root["bleeds_mh2_model_class"] = mdl_type
         root["bleeds_mh2_asset_variant"] = self.asset_variant
         root["bleeds_mh2_entry_layout"] = self.entry_layout_name
         root["bleeds_mh2_bone_record_layout"] = self.bone_record_layout.get("name", "")
@@ -11594,7 +11598,7 @@ class Manhunt2MdlReader:
             base_color_input.default_value = diffuse_color
         alpha_input = shader_node.inputs.get("Alpha")
         if alpha_input is not None:
-            alpha_input.default_value = diffuse_color[3]
+            alpha_input.default_value = 1.0
         roughness_input = shader_node.inputs.get("Roughness")
         if roughness_input is not None:
             roughness_input.default_value = 0.5
@@ -11615,14 +11619,51 @@ class Manhunt2MdlReader:
                 for link in list(base_color_input.links):
                     links.remove(link)
                 links.new(color_output, base_color_input)
-            if alpha_input is not None and alpha_output is not None:
+            use_texture_alpha = self.image_uses_cutout_alpha(image)
+            if use_texture_alpha and alpha_input is not None and alpha_output is not None:
                 for link in list(alpha_input.links):
                     links.remove(link)
                 links.new(alpha_output, alpha_input)
             try:
-                material.blend_method = "HASHED"
+                material.blend_method = "HASHED" if use_texture_alpha else "OPAQUE"
             except Exception:
                 pass
+            try:
+                material.shadow_method = "HASHED" if use_texture_alpha else "OPAQUE"
+            except Exception:
+                pass
+            material["bleeds_mh2_texture_uses_alpha"] = bool(use_texture_alpha)
+
+    def image_uses_cutout_alpha(self, image):
+        if image is None:
+            return False
+        try:
+            if "bleeds_mh2_has_cutout_alpha" in image:
+                return bool(image.get("bleeds_mh2_has_cutout_alpha", False))
+        except Exception:
+            pass
+
+        has_transparent_pixel = False
+        has_opaque_pixel = False
+        try:
+            pixels = image.pixels
+            for pixel_offset in range(3, len(pixels), 4):
+                alpha = float(pixels[pixel_offset])
+                if alpha < 0.5:
+                    has_transparent_pixel = True
+                else:
+                    has_opaque_pixel = True
+                if has_transparent_pixel and has_opaque_pixel:
+                    break
+        except Exception:
+            return False
+
+        uses_cutout_alpha = bool(has_transparent_pixel and has_opaque_pixel)
+        try:
+            image["bleeds_mh2_has_cutout_alpha"] = uses_cutout_alpha
+        except Exception:
+            pass
+        return uses_cutout_alpha
 
     def get_or_create_material(self, material_info):
         import bpy
@@ -11652,6 +11693,18 @@ class Manhunt2MdlReader:
                 material = bpy.data.materials.new(scoped_name)
 
         image = self.load_texture_image(texture_name)
+        if image is not None:
+            self.log(
+                "    MH2 material {:02d} {!r} -> TEX descriptor {!r} at 0x{:08X}, DDS at 0x{:08X}".format(
+                    material_index,
+                    texture_name,
+                    str(image.get("bleeds_texture_name", image.name)),
+                    int(image.get("bleeds_mh2_tex_descriptor_offset", 0)),
+                    int(image.get("bleeds_mh2_tex_data_offset", 0)),
+                )
+            )
+        elif self.import_textures:
+            self.log("    MH2 material {:02d} {!r} -> no exact TEX name match".format(material_index, texture_name))
         self.configure_material_nodes(material, material_info, image)
         material["bleeds_model_game"] = "MH2"
         material["bleeds_mh2_material_index"] = material_index

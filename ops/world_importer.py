@@ -16,6 +16,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import bpy
+import math
 import numpy as np
 import re
 from pathlib import Path
@@ -325,8 +326,8 @@ def _create_bsp_material(
     record: bsp.BSPMaterialRecord,
     image: Optional[bpy.types.Image],
 ) -> bpy.types.Material:
-    source_name = record.name.strip() or f"Material_{record.index:03d}"
-    material = bpy.data.materials.new(f"{stem}_{source_name}")
+    source_name = record.name.strip() or f"Untextured Material {record.index + 1:02d}"
+    material = bpy.data.materials.new(f"{source_name} [{stem}]")
     material.use_nodes = True
     _set_material_base_color(material, record.color_rgba)
     material["blds_kind"] = "PSP_BSP_MATERIAL"
@@ -350,12 +351,20 @@ def _create_bsp_material(
         texture.image = image
         texture.label = record.name or image.name
         links.new(texture.outputs["Color"], principled.inputs["Base Color"])
-        if "Alpha" in texture.outputs and "Alpha" in principled.inputs:
+        uses_alpha = _image_uses_cutout_alpha(image)
+        if uses_alpha and "Alpha" in texture.outputs and "Alpha" in principled.inputs:
             links.new(texture.outputs["Alpha"], principled.inputs["Alpha"])
             try:
-                material.blend_method = "BLEND"
+                material.blend_method = "HASHED"
             except Exception:
                 pass
+        else:
+            try:
+                principled.inputs["Alpha"].default_value = 1.0
+                material.blend_method = "OPAQUE"
+            except Exception:
+                pass
+        material["blds_bsp_uses_texture_alpha"] = bool(uses_alpha)
         if not principled.outputs["BSDF"].is_linked:
             links.new(principled.outputs["BSDF"], output.inputs["Surface"])
     except Exception:
@@ -363,11 +372,40 @@ def _create_bsp_material(
     return material
 
 
+def _image_uses_cutout_alpha(image: bpy.types.Image) -> bool:
+    if image is None:
+        return False
+    try:
+        if "blds_has_cutout_alpha" in image:
+            return bool(image.get("blds_has_cutout_alpha", False))
+    except Exception:
+        pass
+    transparent = False
+    opaque = False
+    try:
+        pixels = image.pixels
+        for offset in range(3, len(pixels), 4):
+            if float(pixels[offset]) < 0.5:
+                transparent = True
+            else:
+                opaque = True
+            if transparent and opaque:
+                break
+    except Exception:
+        return False
+    result = bool(transparent and opaque)
+    try:
+        image["blds_has_cutout_alpha"] = result
+    except Exception:
+        pass
+    return result
+
+
 def _decode_bsp_txd(txd_path: Optional[Path], stem: str, lines: List[str]):
     images_by_name: Dict[str, bpy.types.Image] = {}
     images_by_index: Dict[int, bpy.types.Image] = {}
     if txd_path is None:
-        lines.append("[bsp-txd] no matching PSP TXD found beside the BSP")
+        lines.append("[bsp-txd] no matching TCDT texture dictionary found beside the BSP")
         return images_by_name, images_by_index
 
     try:
@@ -436,18 +474,42 @@ def _build_bsp_mesh_object(
     if not faces:
         return None, 0
 
-    object_name = f"{stem}_BSP_{block_index:03d}_{block.file_offset:08X}"
+    from collections import Counter
+
+    material_face_counts = Counter(
+        int(index) for index in face_materials
+        if 0 <= int(index) < len(materials)
+    )
+    dominant_material_index = material_face_counts.most_common(1)[0][0] if material_face_counts else 0
+    dominant_material_name = "Untextured"
+    if 0 <= dominant_material_index < len(materials):
+        try:
+            dominant_material_name = str(
+                materials[dominant_material_index].get(
+                    "blds_bsp_material_name",
+                    materials[dominant_material_index].name,
+                ) or "Untextured"
+            ).strip()
+        except Exception:
+            dominant_material_name = str(materials[dominant_material_index].name)
+    dominant_material_name = dominant_material_name or "Untextured"
+    object_name = f"{stem} Part {block_index + 1:03d} - {dominant_material_name}"
     mesh = bpy.data.meshes.new(object_name)
     mesh.from_pydata([vertex.position for vertex in block.vertices], [], faces)
     mesh.update()
 
-    for material in materials:
-        mesh.materials.append(material)
+    used_material_indices = sorted(material_face_counts)
+    if not used_material_indices and materials:
+        used_material_indices = [0]
+    local_material_indices = {}
+    for source_index in used_material_indices:
+        local_material_indices[int(source_index)] = len(mesh.materials)
+        mesh.materials.append(materials[int(source_index)])
     for polygon_index, polygon in enumerate(mesh.polygons):
         source_index = face_materials[polygon_index] if polygon_index < len(face_materials) else 0
-        polygon.material_index = int(source_index) if 0 <= int(source_index) < len(materials) else 0
+        polygon.material_index = int(local_material_indices.get(int(source_index), 0))
         try:
-            polygon.use_smooth = False
+            polygon.use_smooth = True
         except Exception:
             pass
 
@@ -458,7 +520,11 @@ def _build_bsp_mesh_object(
     except Exception:
         pass
     _assign_corner_colors(mesh, block)
-    set_mesh_auto_smooth(mesh, False)
+    set_mesh_auto_smooth(mesh, True)
+    try:
+        mesh.auto_smooth_angle = math.radians(60.0)
+    except Exception:
+        pass
 
     obj = bpy.data.objects.new(object_name, mesh)
     collection.objects.link(obj)
@@ -472,7 +538,26 @@ def _build_bsp_mesh_object(
     obj["blds_bsp_strip_count"] = int(block.strip_count)
     obj["blds_bsp_vertex_count"] = int(block.vertex_count)
     obj["blds_bsp_face_count"] = int(len(faces))
+    obj["blds_bsp_display_name"] = str(object_name)
+    obj["blds_bsp_dominant_material_index"] = int(dominant_material_index)
+    obj["blds_bsp_dominant_material_name"] = str(dominant_material_name)
+    obj["blds_bsp_material_indices"] = [int(index) for index in used_material_indices]
+    obj["blds_bsp_material_names"] = [
+        str(materials[index].get("blds_bsp_material_name", materials[index].name) or materials[index].name)
+        for index in used_material_indices
+    ]
+    obj["blds_bsp_bounds_center"] = [float(value) for value in block.bounds[:3]]
+    obj["blds_bsp_bounds_radius"] = float(block.bounds[3])
+    obj["blds_bsp_decode_summary"] = "{} vertices; {} faces; {} strips; {} used materials".format(
+        int(block.vertex_count), int(len(faces)), int(block.strip_count), int(len(used_material_indices))
+    )
     obj["blds_platform"] = "PSP"
+    try:
+        if 0 <= dominant_material_index < len(materials):
+            color = tuple(materials[dominant_material_index].diffuse_color)
+            obj.color = color
+    except Exception:
+        pass
     if txd_path is not None:
         obj["blds_txd_source"] = str(txd_path)
     return obj, len(faces)
@@ -535,7 +620,7 @@ def import_psp_bsp(
     root["blds_bsp_scene_files"] = "|".join(str(item[0]) for item in parsed_files)
 
     lines: List[str] = []
-    lines.append("===== R* Leeds PSP BSP World Level Import =====")
+    lines.append("===== R* Leeds BSP World Level Import =====")
     lines.append(f"[bsp-set] selected='{selected_path}' scene='{scene_stem}' files={len(parsed_files)}")
     for bsp_path, parsed in parsed_files:
         lines.append(
@@ -559,6 +644,22 @@ def import_psp_bsp(
 
     for bsp_path, parsed in parsed_files:
         file_stem = _source_stem(str(bsp_path))
+        if parsed.geometry:
+            source_collection = bpy.data.collections.new(f"{file_stem} - Render Geometry")
+            objects_collection.children.link(source_collection)
+        else:
+            source_collection = bpy.data.collections.new(f"{file_stem} - Collision Data")
+            collision_collection.children.link(source_collection)
+        source_collection["blds_kind"] = "BSP_RENDER_SOURCE" if parsed.geometry else "BSP_COLLISION_SOURCE"
+        source_collection["blds_bsp_source"] = str(bsp_path)
+        source_collection["blds_bsp_material_count"] = int(len(parsed.materials))
+        source_collection["blds_bsp_render_block_count"] = int(len(parsed.geometry))
+        source_collection["blds_bsp_collision_only"] = bool(parsed.collision_only)
+        source_collection["blds_bsp_readable_summary"] = (
+            "{} render parts; {} materials".format(len(parsed.geometry), len(parsed.materials))
+            if parsed.geometry else
+            "Collision-side BSP; no render geometry blocks"
+        )
         materials: List[bpy.types.Material] = []
         for record in parsed.materials:
             normalized = bsp.normalize_asset_name(record.name)
@@ -583,7 +684,7 @@ def import_psp_bsp(
                     block_index,
                     block,
                     materials,
-                    objects_collection,
+                    source_collection,
                     txd_path,
                 )
                 if obj is None:
@@ -604,7 +705,7 @@ def import_psp_bsp(
         elif not parsed.geometry:
             collision_sources += 1
             lines.append(
-                f"[bsp-collision] source='{bsp_path.name}' contains no PSP render blocks; "
+                f"[bsp-collision] source='{bsp_path.name}' contains no render blocks; "
                 "kept as a collision source for scene-set decoding, with no fake placeholder object"
             )
 

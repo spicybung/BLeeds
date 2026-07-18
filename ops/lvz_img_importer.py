@@ -47,6 +47,9 @@ def draw_lvz_img_import_progress_popup(menu, context):
     stage_text = str(getattr(window_manager, "bleeds_lvz_img_stage", "") or "")
     if stage_text:
         column.label(text=stage_text)
+    status_text = str(getattr(window_manager, "bleeds_lvz_img_status", "") or "")
+    if status_text and status_text != stage_text:
+        column.label(text=status_text)
 
 
 class LvzImgImportProgress:
@@ -61,6 +64,14 @@ class LvzImgImportProgress:
         self.last_redraw_time = 0.0
         self.redraw_interval = 0.25
         self.last_report_bucket = -1
+        self.started_at = time.perf_counter()
+        self.last_console_time = 0.0
+        self.map_current = 0
+        self.map_total = 0
+        self.model_current = 0
+        self.model_total = 0
+        self.cached_current = 0
+        self.cached_total = 0
         self.initial_object_names = set()
         self.initial_mesh_names = set()
         self.initial_material_names = set()
@@ -126,6 +137,7 @@ class LvzImgImportProgress:
         _ACTIVE_IMPORT_PROGRESS = self
         self.started = True
         self.finished = False
+        self.started_at = time.perf_counter()
         self.capture_initial_data_blocks()
         if self.window_manager is not None:
             try:
@@ -135,6 +147,7 @@ class LvzImgImportProgress:
             try:
                 self.window_manager.bleeds_lvz_img_progress = 0
                 self.window_manager.bleeds_lvz_img_stage = str(stage)
+                self.window_manager.bleeds_lvz_img_status = "Leeds Stories map import | starting"
             except Exception:
                 pass
             try:
@@ -180,11 +193,18 @@ class LvzImgImportProgress:
             except Exception:
                 pass
 
-        status_text = "BLeeds LVZ + IMG | {:d}%".format(value)
-        if self.stage:
-            status_text += " | " + self.stage
+        status_text = self.build_status_text(value)
+        try:
+            self.window_manager.bleeds_lvz_img_status = status_text
+        except Exception:
+            pass
         try:
             self.context.workspace.status_text_set(status_text)
+        except Exception:
+            pass
+        try:
+            if self.context.area is not None:
+                self.context.area.header_text_set(status_text)
         except Exception:
             pass
 
@@ -201,6 +221,69 @@ class LvzImgImportProgress:
                 self.operator.report({'INFO'}, "LVZ + IMG import: {:d}% - {}".format(value, self.stage))
             except Exception:
                 pass
+
+        now = time.perf_counter()
+        if force or now - self.last_console_time >= 1.0:
+            print(status_text, flush=True)
+            self.last_console_time = now
+
+    @staticmethod
+    def format_duration(seconds):
+        seconds = max(0, int(math.ceil(float(seconds))))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return "{}:{:02d}:{:02d}".format(hours, minutes, seconds)
+        return "{:02d}:{:02d}".format(minutes, seconds)
+
+    def configure_map_plan(self, total_placements, total_models, total_cached):
+        self.map_total = max(0, int(total_placements))
+        self.model_total = max(0, int(total_models))
+        self.cached_total = max(0, int(total_cached))
+        self.map_current = 0
+        self.model_current = 0
+        self.cached_current = 0
+
+    def update_map(self, current, total, placed, models, cached, detail="Placing IMG instances"):
+        self.map_total = max(0, int(total))
+        self.map_current = max(0, min(self.map_total, int(current)))
+        self.model_current = max(0, min(self.model_total, int(models)))
+        self.cached_current = max(0, min(self.cached_total, int(cached)))
+        self.update_range(80, 98, self.map_current, max(1, self.map_total), detail)
+
+    def build_status_text(self, value):
+        elapsed = max(0.0, time.perf_counter() - self.started_at)
+        elapsed_text = self.format_duration(elapsed)
+        if self.map_total > 0 and self.map_current > 0:
+            remaining = max(0, self.map_total - self.map_current)
+            eta_seconds = (elapsed / float(self.map_current)) * float(remaining)
+            eta_text = self.format_duration(eta_seconds)
+        else:
+            eta_text = "--:--"
+
+        if self.map_total > 0:
+            percent = (float(self.map_current) / float(self.map_total)) * 100.0
+            text = (
+                "Leeds Stories map import {}/{} ({:.1f}%) | models {}/{} | "
+                "cached {}/{} | elapsed {} | ETA {}"
+            ).format(
+                self.map_current,
+                self.map_total,
+                percent,
+                self.model_current,
+                self.model_total,
+                self.cached_current,
+                self.cached_total,
+                elapsed_text,
+                eta_text,
+            )
+        else:
+            text = "Leeds Stories map import | {}% | elapsed {} | ETA {}".format(
+                int(value), elapsed_text, eta_text
+            )
+        if self.stage:
+            text += " | " + self.stage
+        return text
 
     def update_range(self, range_start, range_end, index, total, stage):
         try:
@@ -224,6 +307,14 @@ class LvzImgImportProgress:
                     area.tag_redraw()
         except Exception:
             pass
+        try:
+            self.context.view_layer.update()
+        except Exception:
+            pass
+        try:
+            bpy.ops.wm.redraw_timer(type='DRAW_WIN_SWAP', iterations=1)
+        except Exception:
+            pass
 
     def finish(self, succeeded=True, message=None):
         global _ACTIVE_IMPORT_PROGRESS
@@ -239,10 +330,16 @@ class LvzImgImportProgress:
                 self.window_manager.progress_update(final_value)
                 self.window_manager.bleeds_lvz_img_progress = final_value
                 self.window_manager.bleeds_lvz_img_stage = final_stage
+                self.window_manager.bleeds_lvz_img_status = final_stage
             except Exception:
                 pass
         try:
             self.context.workspace.status_text_set(None)
+        except Exception:
+            pass
+        try:
+            if self.context.area is not None:
+                self.context.area.header_text_set(None)
         except Exception:
             pass
         try:
@@ -1204,6 +1301,12 @@ def apply_stories_ipl_sidecar_placements(
             pass
         linked += 1
         applied += 1
+
+    if progress_callback is not None:
+        try:
+            progress_callback(total_details, total_details, applied, len(used_object_ids), linked)
+        except TypeError:
+            progress_callback(total_details, total_details)
 
     base_candidates = (
         list(built_by_res.values())
@@ -6075,8 +6178,17 @@ def apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], det
 
     total_details = len(details)
     for detail_index, detail in enumerate(details):
-        if progress_callback is not None and (detail_index % 512 == 0 or detail_index + 1 == total_details):
-            progress_callback(detail_index + 1, total_details)
+        if progress_callback is not None and (detail_index % 128 == 0 or detail_index + 1 == total_details):
+            try:
+                progress_callback(
+                    detail_index + 1,
+                    total_details,
+                    applied,
+                    len(used_object_ids),
+                    linked,
+                )
+            except TypeError:
+                progress_callback(detail_index + 1, total_details)
         used_ipl_model_fallback = False
         used_force_missing_img_mdl = False
         used_exact_missing_img_mdl = False
@@ -8732,6 +8844,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
 
     LVZ.dbg(f"LVZ: {lvz_path}")
     LVZ.dbg(f"[io] LVZ bytes in: {len(lvz_bytes_in)}  decomp: {len(decomp)} ({'compressed' if was_cmp else 'raw'})")
+    LVZ.dbg("Retail LVZ+IMG import: no .DIR used. IMG resources are reconstructed from LVZ chunk headers and exact WRLD/AERA resource tables.")
     # Converter IDE/IPL sidecars are not part of the LVZ/IMG placement path.
     # Keep compatibility maps empty; authoritative GAME_MODEL identity is read
     # from master AreaInfo -> AERA AreaResource.secondaryId below.
@@ -9584,10 +9697,33 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
             LVZ.dbg(f"[apply] Stories IPL sidecar placement pass failed: {exc}")
     elif apply_img_transforms and details:
         try:
+            planned_model_keys = {
+                (int(detail[15]) if len(detail) > 15 else -1, int(detail[0]))
+                for detail in details
+            }
+            planned_model_total = len(planned_model_keys)
+            planned_cached_total = max(0, len(details) - planned_model_total)
+            progress.configure_map_plan(len(details), planned_model_total, planned_cached_total)
             progress.update(80, "Placing IMG instances")
+            LVZ.dbg(
+                "Leeds Stories map import plan: {} placements, {} exact sector/RES models, {} cached placements".format(
+                    len(details), planned_model_total, planned_cached_total
+                )
+            )
             LVZ.dbg("[progress] applying IMG placement transforms / linked duplicates")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
+
+            def update_placement_progress(index, total, placed=0, models=0, cached=0):
+                progress.update_map(
+                    index,
+                    total,
+                    placed,
+                    models,
+                    cached,
+                    "Placing IMG instances",
+                )
+
             applied, linked_instances, removed_unplaced = apply_img_instance_transforms(
                 built_by_res,
                 details,
@@ -9605,7 +9741,7 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
                 ide_res_to_model_id,
                 ide_res_to_name,
                 placement_identity_by_key,
-                progress_callback=lambda index, total: progress.update_range(80, 98, index, total, "Placing IMG instances"),
+                progress_callback=update_placement_progress,
                 model_2dfx_by_game_model_id=model_2dfx_by_game_model_id,
                 model_2dfx_summary=two_dfx_summary,
                 model_2dfx_collection=model_2dfx_collection,
@@ -9642,6 +9778,35 @@ def import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_ids: 
 
     progress.update(99, "Finalizing imported objects", force=True)
     elapsed = time.time() - t0
+    placed_records = list(globals().get("_CURRENT_PLACED_OBJECT_RECORDS", []) or [])
+    resolved_sector_resources = set()
+    for placed_record in placed_records:
+        try:
+            resolved_sector_resources.add((
+                int(placed_record.get("sector_index", -1)),
+                int(placed_record.get("res_id", -1)),
+            ))
+        except Exception:
+            continue
+    parsed_sector_count = len(sector_records)
+    parsed_placement_count = len(details)
+    parsed_real_mesh_count = len(resolved_sector_resources)
+    LVZ.dbg(f"Parsed sectors: {parsed_sector_count}")
+    LVZ.dbg(f"Parsed visible placements: {parsed_placement_count}")
+    LVZ.dbg(f"Parsed real mesh resources: {parsed_real_mesh_count}")
+    LVZ.dbg("Identity fields remain separate: RES=streamed geometry, ROWLINK=placement link, GAME_MODEL=CBaseModelInfo/AERA secondary identity.")
+    if import_root_collection is not None:
+        try:
+            import_root_collection["blds_archive_mode"] = "RETAIL_LVZ_IMG_NO_DIR"
+            import_root_collection["blds_platform"] = str(platform)
+            import_root_collection["blds_parsed_sectors"] = int(parsed_sector_count)
+            import_root_collection["blds_parsed_visible_placements"] = int(parsed_placement_count)
+            import_root_collection["blds_parsed_real_mesh_resources"] = int(parsed_real_mesh_count)
+            import_root_collection["blds_source_lvz_path"] = str(lvz_path)
+            import_root_collection["blds_source_img_path"] = str(img_name or "")
+            import_root_collection["blds_identity_contract"] = "RES_STREAMED_GEOMETRY;ROWLINK_PLACEMENT_LINK;GAME_MODEL_AERA_SECONDARY"
+        except Exception as exc:
+            LVZ.dbg(f"[collections] import summary metadata failed: {exc}")
     LVZ.dbg(f"[summary] LVZ-table MDL resource objects parsed: {len(built_by_res)}")
     LVZ.dbg(f"[summary] IMG sector overlay MDL objects parsed: {len(overlay_by_sector_res)}")
     LVZ.dbg(f"[summary] IMG legacy ROWLINK fallback sector MDLs parsed: {len(ipl_overlay_by_sector_res)}")

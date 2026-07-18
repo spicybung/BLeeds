@@ -51,6 +51,7 @@ def read_cstr(data: bytes, offset: int, length: int) -> str:
 @dataclass
 class Mh2TexEntry:
     name: str
+    descriptor_offset: int
     width: int
     height: int
     bits_per_pixel: int
@@ -104,6 +105,7 @@ def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
         raise ValueError("Unreasonable Manhunt 2 TEX texture count")
 
     entries: List[Mh2TexEntry] = []
+    normalized_names = set()
     current_offset = int(first_texture_offset)
     visited = set()
 
@@ -116,10 +118,10 @@ def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
 
         next_offset = read_u32(decoded, current_offset + 0x00)
         name = read_cstr(decoded, current_offset + 0x08, 0x20).strip()
-        width = read_u32(decoded, current_offset + 0x48)
-        height = read_u32(decoded, current_offset + 0x4C)
+        descriptor_width = read_u32(decoded, current_offset + 0x48)
+        descriptor_height = read_u32(decoded, current_offset + 0x4C)
         bits_per_pixel = read_u32(decoded, current_offset + 0x50)
-        pitch_or_linear_size = read_u32(decoded, current_offset + 0x54)
+        descriptor_pitch_or_linear_size = read_u32(decoded, current_offset + 0x54)
         flags = struct.unpack_from("<H", decoded, current_offset + 0x58)[0]
         mipmap_count = decoded[current_offset + 0x5C]
         data_offset = read_u32(decoded, current_offset + 0x60)
@@ -127,17 +129,38 @@ def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
 
         if not name:
             name = "MH2_Texture_{:03d}".format(texture_index)
-        if width <= 0 or height <= 0 or width > 16384 or height > 16384:
-            raise ValueError("Invalid Manhunt 2 TEX dimensions for {!r}".format(name))
         if data_size <= 0 or data_offset < 0 or data_offset + data_size > len(decoded):
             raise ValueError("Invalid Manhunt 2 TEX DDS range for {!r}".format(name))
 
         dds_data = decoded[data_offset:data_offset + data_size]
         if dds_data[:4] != b"DDS ":
             raise ValueError("Manhunt 2 TEX entry {!r} does not contain a DDS payload".format(name))
+        if len(dds_data) < 0x80 or read_u32(dds_data, 0x04) != 124:
+            raise ValueError("Manhunt 2 TEX entry {!r} has a truncated DDS header".format(name))
+
+        height = read_u32(dds_data, 0x0C)
+        width = read_u32(dds_data, 0x10)
+        pitch_or_linear_size = read_u32(dds_data, 0x14)
+        dds_mipmap_count = read_u32(dds_data, 0x1C)
+        if width <= 0 or height <= 0 or width > 16384 or height > 16384:
+            raise ValueError("Invalid Manhunt 2 TEX DDS dimensions for {!r}".format(name))
+        if descriptor_width and descriptor_width != width:
+            descriptor_width = width
+        if descriptor_height and descriptor_height != height:
+            descriptor_height = height
+        if descriptor_pitch_or_linear_size and descriptor_pitch_or_linear_size != pitch_or_linear_size:
+            descriptor_pitch_or_linear_size = pitch_or_linear_size
+        if dds_mipmap_count:
+            mipmap_count = int(dds_mipmap_count)
+
+        normalized_name = os.path.splitext(os.path.basename(name.replace("\\", "/")))[0].casefold()
+        if normalized_name in normalized_names:
+            raise ValueError("Manhunt 2 TEX contains duplicate texture name {!r}".format(name))
+        normalized_names.add(normalized_name)
 
         entries.append(Mh2TexEntry(
             name=name,
+            descriptor_offset=int(current_offset),
             width=int(width),
             height=int(height),
             bits_per_pixel=int(bits_per_pixel),
@@ -153,6 +176,8 @@ def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
             break
         if next_offset == 0 or next_offset == current_offset:
             break
+        if next_offset < 0x30 or next_offset + 0x70 > len(decoded):
+            raise ValueError("Manhunt 2 TEX descriptor chain points outside the decoded file")
         current_offset = int(next_offset)
 
     if len(entries) != int(texture_count):

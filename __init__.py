@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
 
@@ -576,12 +576,18 @@ def register_lvz_img_progress_properties():
             description="Current LVZ + IMG import stage",
             default="",
         )
+    if not hasattr(bpy.types.WindowManager, "bleeds_lvz_img_status"):
+        bpy.types.WindowManager.bleeds_lvz_img_status = StringProperty(
+            name="Leeds Stories Map Import Status",
+            description="Detailed live status for the active Leeds Stories map import",
+            default="",
+        )
 
 
 
 def unregister_lvz_img_progress_properties():
     for property_name in (
-        "bleeds_lvz_img_progress", "bleeds_lvz_img_stage",
+        "bleeds_lvz_img_progress", "bleeds_lvz_img_stage", "bleeds_lvz_img_status",
     ):
         if hasattr(bpy.types.WindowManager, property_name):
             delattr(bpy.types.WindowManager, property_name)

@@ -37,7 +37,7 @@ from ..leedsLib.tex import (
 )
 
 def normalize_leeds_texture_name(name: str) -> str:
-    value = str(name or "").strip().lower()
+    value = str(name or "").strip().replace("\\", "/").split("/")[-1].casefold()
     if value.endswith(".png") or value.endswith(".tga") or value.endswith(".dds") or value.endswith(".bmp"):
         value = os.path.splitext(value)[0]
     if value.endswith(".001") or value.endswith(".002") or value.endswith(".003") or value.endswith(".004"):
@@ -631,6 +631,8 @@ def load_mh2_dds_image(entry, input_path: str, prefix: str = "") -> Optional[bpy
             image["bleeds_texture_platform"] = "mh2_pc"
             image["bleeds_mh2_tex_width"] = int(entry.width)
             image["bleeds_mh2_tex_height"] = int(entry.height)
+            image["bleeds_mh2_tex_descriptor_offset"] = int(entry.descriptor_offset)
+            image["bleeds_mh2_tex_data_offset"] = int(entry.data_offset)
             image["bleeds_mh2_tex_bits_per_pixel"] = int(entry.bits_per_pixel)
             image["bleeds_mh2_tex_mipmap_count"] = int(entry.mipmap_count)
             image["bleeds_mh2_tex_dds_size"] = int(entry.data_size)

@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
 
@@ -30,7 +30,6 @@ from . import tex as leeds_tex
 # •
 # - Mod resources/cool stuff:
 # •
-
 
 Z2HM_MAGIC = b"Z2HM"
 DLRW_MAGIC = b"DLRW"

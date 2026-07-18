@@ -53,15 +53,25 @@ def get_mdl_root_game(root: Optional[bpy.types.Object]) -> str:
     if root is None:
         return ""
     try:
+        if str(root.get("bleeds_mh2_asset_variant", "") or "").strip():
+            return "MH2"
+        if str(root.get("bleeds_mh2_platform", "") or "").strip():
+            return "MH2"
+    except Exception:
+        pass
+    try:
+        value = str(root.get("bleeds_model_game", "") or "").upper().strip()
+        if value:
+            return value
+    except Exception:
+        pass
+    try:
         value = getattr(root, "bleeds_model_game", "")
         if value:
             return str(value).upper().strip()
     except Exception:
         pass
-    try:
-        return str(root.get("bleeds_model_game", "") or "").upper().strip()
-    except Exception:
-        return ""
+    return ""
 
 
 def gather_mdl_mesh_children(root: Optional[bpy.types.Object]):
@@ -508,14 +518,15 @@ class OBJECT_PT_MDL_Manhunt2Properties(bpy.types.Panel):
         model_box.label(text="Model")
         model_col = model_box.column(align=True)
         model_col.label(text="Root: {}".format(root.name))
-        if hasattr(root, "bleeds_mdl_type"):
-            model_col.prop(root, "bleeds_mdl_type", text="MDL Type")
-        else:
-            model_col.label(text="MDL Type: {}".format(root.get("bleeds_mdl_type", "Unknown")))
-        if hasattr(root, "bleeds_mdl_platform"):
-            model_col.prop(root, "bleeds_mdl_platform", text="Platform")
-        else:
-            model_col.label(text="Platform: {}".format(root.get("bleeds_mdl_platform", "Unknown")))
+        model_col.label(text="Game: Manhunt 2")
+        detected_type = str(root.get("bleeds_mh2_model_class", "") or "").upper().strip()
+        if not detected_type:
+            detected_type = "PED" if int(root.get("bleeds_mh2_bone_count", 0)) > 0 else "SIM"
+        detected_platform = str(root.get("bleeds_mh2_platform", "") or "").upper().strip()
+        if not detected_platform:
+            detected_platform = "PSP" if str(root.get("bleeds_mh2_asset_variant", "")).upper() == "PSP_BETA" else "PC"
+        model_col.label(text="MDL Type: {}".format("PedModel" if detected_type == "PED" else "SimpleModel"))
+        model_col.label(text="Platform: {}".format(detected_platform))
         source_path = str(getattr(root, "bleeds_mdl_filepath", root.get("bleeds_mdl_filepath", "")) or "")
         if source_path:
             model_col.label(text="Source: {}".format(os.path.basename(source_path)))
