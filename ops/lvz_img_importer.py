@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import bpy
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 try:
     import numpy as np
@@ -36,6 +36,12 @@ _ACTIVE_IMPORT_OBJECTS_COLLECTION = None
 _ACTIVE_IMPORT_LINKED_COLLECTION = None
 _ACTIVE_IMPORT_2DFX_COLLECTION = None
 _CURRENT_PLACED_OBJECT_RECORDS = []
+
+# External converter IPL sidecars are deliberately deprecated. Placement is
+# read from the LVZ/IMG tables themselves; keep these explicit defaults only
+# so the old diagnostic helpers remain safe if called by an older scene.
+USE_STORIES_IPL_SIDECAR_FOR_PLACEMENT = False
+STORIES_IPL_SIDECAR_NAME_OVERRIDE = ""
 
 
 def draw_lvz_img_import_progress_popup(menu, context):
@@ -1283,7 +1289,7 @@ def apply_stories_ipl_sidecar_placements(
             try:
                 bpy.context.collection.objects.link(obj)
             except Exception:
-                link_object(obj)
+                bpy.context.scene.collection.objects.link(obj)
         try:
             obj.matrix_world = matrix_from_stories_ipl_row(row)
             obj.hide_viewport = False
@@ -1292,12 +1298,6 @@ def apply_stories_ipl_sidecar_placements(
             pass
         linked += 1
         applied += 1
-
-    if progress_callback is not None:
-        try:
-            progress_callback(total_details, total_details, applied, len(used_object_ids), linked)
-        except TypeError:
-            progress_callback(total_details, total_details)
 
     base_candidates = (
         list(built_by_res.values())
@@ -6241,6 +6241,10 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         sector_index = int(detail[15]) if len(detail) > 15 else -1
         pass_name = str(detail[14]) if len(detail) > 14 else "UNKNOWN"
         row_index = int(detail[19]) if len(detail) > 19 else -1
+        # Decode the final world transform before any model-recovery branch
+        # needs it. This also guarantees that a recovered object is published
+        # with its correct XYZ/rotation/scale in the same placement batch.
+        matrix = matrix_from_img_detail(detail)
         placement_report_row = placement_report_rows.get(blds_placement_report_key(detail))
         resolver_audit_row(detail, "row-start")
         if SKIP_LIGHTS_PASS_IPL_MESH_PLACEMENTS and is_light_placement_pass(pass_name):
@@ -6731,7 +6735,6 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
 
         base_id = id(base_obj)
         instance_index = object_use_count.get(base_id, 0)
-        matrix = matrix_from_img_detail(detail)
         if ENABLE_VISIBLE_PLACEMENT_DEDUPLICATION:
             try:
                 # V44: dedupe/overlap filtering must apply to every visible
@@ -8867,9 +8870,19 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, csv_dedup_res_
                 )
         else:
             LVZ.dbg("[2dfx-model] Beach3528 has no visible placement row in this LVZ/IMG import")
-    lights_stats = blds_count_lights_pass_rows(
-        img, img_bytes, sector_records, extra_container_records, int(res_count)
+    # LIGHTS rows were already decoded by enumerate_sector_details() above.
+    # Reuse those authoritative results instead of rescanning the IMG through
+    # the removed legacy blds_count_lights_pass_rows() diagnostic helper.
+    # Besides avoiding a second pass over a large IMG, this keeps the log tied
+    # to the exact rows that the importer will actually place.
+    lights_kept = sum(
+        1 for detail in (details or [])
+        if len(detail) > 14 and str(detail[14]).upper() == "LIGHTS"
     )
+    lights_stats = {
+        "candidate": int(lights_kept),
+        "valid": int(lights_kept),
+    }
     LVZ.dbg(
         f"[2dfx-model] LIGHTS remains a mesh pass: candidate_rows={lights_stats.get('candidate', 0)} "
         f"valid_rows={lights_stats.get('valid', 0)}"
