@@ -463,10 +463,18 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
             ("bleeds_mdl_corner_source_export_vertex_index", "CORNER"),
             ("bleeds_mdl_corner_source_strip_index", "CORNER"),
             ("bleeds_mdl_corner_source_strip_vertex_index", "CORNER"),
+            ("bleeds_mdl_corner_skin_raw0", "CORNER"),
+            ("bleeds_mdl_corner_skin_raw1", "CORNER"),
+            ("bleeds_mdl_corner_skin_raw2", "CORNER"),
+            ("bleeds_mdl_corner_skin_raw3", "CORNER"),
             ("bleeds_mdl_point_source_emit_index", "POINT"),
             ("bleeds_mdl_point_source_export_vertex_index", "POINT"),
             ("bleeds_mdl_point_source_strip_index", "POINT"),
             ("bleeds_mdl_point_source_strip_vertex_index", "POINT"),
+            ("bleeds_mdl_point_skin_raw0", "POINT"),
+            ("bleeds_mdl_point_skin_raw1", "POINT"),
+            ("bleeds_mdl_point_skin_raw2", "POINT"),
+            ("bleeds_mdl_point_skin_raw3", "POINT"),
         ]
         attr_col = attr_box.column(align=True)
         for attr_name, domain in attr_specs:

@@ -152,15 +152,85 @@ def findPoseBoneForAnimBone(
         if pose_bone is not None:
             return pose_bone, f"{resolved_reason} -> name fallback"
 
-    if use_table_index_fallback and bone.table_index in by_table_index:
+    # A direct/hashed PED identity must never silently fall through to raw pose
+    # list position. Blender bone order is not the Leeds HAnim identity space.
+    # Table-index fallback is reserved for tracks that truly have no semantic
+    # identity and for armatures carrying an explicit hierarchy-node table.
+    has_semantic_identity = (
+        bone.direct_bone_id is not None
+        or resolved_direct_id is not None
+        or int(getattr(bone, "bone_key", 0) or 0) != 0
+        or int(getattr(bone, "hash16", 0) or 0) != 0
+    )
+
+    if use_table_index_fallback and not has_semantic_identity and bone.table_index in by_table_index:
         return by_table_index[bone.table_index], "table-index property"
 
-    if use_table_index_fallback:
+    if use_table_index_fallback and not has_semantic_identity:
         names = [pose_bone.name for pose_bone in armature_object.pose.bones]
         if 0 <= bone.table_index < len(names):
             return armature_object.pose.bones.get(names[bone.table_index]), "raw pose-bone index fallback"
 
     return None, "unmapped"
+
+def armatureHasImportedMdlRestData(armature_object) -> bool:
+    if armature_object is None or getattr(armature_object, "type", None) != "ARMATURE":
+        return False
+
+    for owner in (armature_object, getattr(armature_object, "data", None)):
+        if owner is None:
+            continue
+        try:
+            if "bleeds_mdl_frame_ptrs" in owner or "bleeds_mdl_hierarchy_node_names" in owner:
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def armatureDeformsMesh(armature_object, mesh_object) -> bool:
+    if armature_object is None or mesh_object is None:
+        return False
+    if getattr(mesh_object, "type", None) != "MESH":
+        return False
+
+    try:
+        for modifier in mesh_object.modifiers:
+            if getattr(modifier, "type", None) != "ARMATURE":
+                continue
+            if getattr(modifier, "object", None) is armature_object:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def scoreArmatureCandidate(armature_object, active_object=None) -> int:
+    if armature_object is None or getattr(armature_object, "type", None) != "ARMATURE":
+        return -1
+
+    score = 0
+    if armature_object is active_object:
+        score += 1000
+    if armatureHasImportedMdlRestData(armature_object):
+        score += 400
+
+    if active_object is not None and getattr(active_object, "type", None) == "MESH":
+        if armatureDeformsMesh(armature_object, active_object):
+            score += 800
+        if getattr(active_object, "parent", None) is armature_object:
+            score += 200
+
+    try:
+        for child in armature_object.children_recursive:
+            if armatureDeformsMesh(armature_object, child):
+                score += 20
+                break
+    except Exception:
+        pass
+
+    return score
+
 
 def findSelectedArmature(context):
     if bpy is None:
@@ -170,35 +240,57 @@ def findSelectedArmature(context):
     if active is not None and getattr(active, "type", None) == "ARMATURE":
         return active
 
-    if active is not None:
-        parent = getattr(active, "parent", None)
-        while parent is not None:
-            if getattr(parent, "type", None) == "ARMATURE":
-                return parent
-            parent = getattr(parent, "parent", None)
+    candidates = []
+    seen_ids = set()
 
+    def add_candidate(candidate):
+        if candidate is None or getattr(candidate, "type", None) != "ARMATURE":
+            return
+        candidate_id = id(candidate)
+        if candidate_id in seen_ids:
+            return
+        seen_ids.add(candidate_id)
+        candidates.append(candidate)
+
+    if active is not None:
+        # The Armature modifier is the authoritative deform relationship. Prefer
+        # it over object parenting because imported MDL roots can contain more
+        # than one armature or helper hierarchy.
         try:
             for modifier in active.modifiers:
-                if getattr(modifier, "type", None) == "ARMATURE" and getattr(modifier, "object", None) is not None:
-                    return modifier.object
+                if getattr(modifier, "type", None) == "ARMATURE":
+                    add_candidate(getattr(modifier, "object", None))
         except Exception:
             pass
 
+        parent = getattr(active, "parent", None)
+        while parent is not None:
+            add_candidate(parent)
+            parent = getattr(parent, "parent", None)
+
         try:
             for child in active.children_recursive:
-                if getattr(child, "type", None) == "ARMATURE":
-                    return child
+                add_candidate(child)
         except Exception:
             pass
 
     try:
         for obj in context.selected_objects:
-            if getattr(obj, "type", None) == "ARMATURE":
-                return obj
+            add_candidate(obj)
     except Exception:
         pass
 
-    return None
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda candidate: (
+            scoreArmatureCandidate(candidate, active),
+            str(getattr(candidate, "name", "")),
+        ),
+        reverse=True,
+    )
+    return candidates[0]
 
 def sanitizeActionName(name: str, path: str) -> str:
     base = str(name).strip() or Path(path).stem
@@ -503,9 +595,23 @@ def getImportedMdlRestGlobalMatrix(armature_object, pose_bone):
     if matrix is not None:
         return matrix, source
 
-    default_matrix = defaultVcsPedGlobalMatrixForBoneName(getattr(pose_bone, 'name', ''))
-    if default_matrix is not None:
-        return default_matrix, 'default VCS PS2 PED runtime frame matrix'
+    # Do not inject a canned VCS skeleton basis into arbitrary/custom/LCS rigs.
+    # The fallback remains available only as an explicit diagnostic opt-in.
+    allow_default_vcs_basis = False
+    for owner in (armature_object, getattr(armature_object, "data", None)):
+        if owner is None:
+            continue
+        try:
+            if "bleeds_anim_allow_default_vcs_runtime_basis" in owner:
+                allow_default_vcs_basis = bool(owner["bleeds_anim_allow_default_vcs_runtime_basis"])
+                if allow_default_vcs_basis:
+                    break
+        except Exception:
+            pass
+    if allow_default_vcs_basis:
+        default_matrix = defaultVcsPedGlobalMatrixForBoneName(getattr(pose_bone, 'name', ''))
+        if default_matrix is not None:
+            return default_matrix, 'explicit default VCS PS2 PED runtime frame matrix fallback'
 
     return None, "none"
 
@@ -602,26 +708,47 @@ def getImportedMdlRestLocalMatrix(armature_object, pose_bone):
 def getImportedBlenderRestLocalMatrix(armature_object, pose_bone):
     if Matrix is None or armature_object is None or pose_bone is None:
         return None, "none"
+
     data_bone = armature_object.data.bones.get(pose_bone.name)
+    live_rest = getBlenderRestLocalMatrix(armature_object, pose_bone)
+
+    stored_matrix = None
+    stored_source = "none"
     for owner in (pose_bone, data_bone):
         matrix, source = getMatrixCustomProperty(owner, BLENDER_LOCAL_MATRIX_PROPERTY_NAMES)
         if matrix is not None:
-            return matrix, source
+            stored_matrix = matrix
+            stored_source = source
+            break
 
-    matrix, source = getNamedMatrixFromArmatureFrameArrays(
-        armature_object,
-        pose_bone,
-        (
-            "bleeds_blender_frame_import_local_matrices",
-            "bleeds_blender_frame_local_matrices",
-        ),
-    )
-    if matrix is not None:
-        return matrix, source
+    if stored_matrix is None:
+        matrix, source = getNamedMatrixFromArmatureFrameArrays(
+            armature_object,
+            pose_bone,
+            (
+                "bleeds_blender_frame_import_local_matrices",
+                "bleeds_blender_frame_local_matrices",
+            ),
+        )
+        if matrix is not None:
+            stored_matrix = matrix
+            stored_source = source
 
-    blender_rest = getBlenderRestLocalMatrix(armature_object, pose_bone)
-    if blender_rest is not None:
-        return blender_rest, "live Blender bone.matrix_local"
+    # The stored Blender matrix describes the rest pose at import time. If the
+    # artist edited the armature in Edit Mode after importing, matrix_local is
+    # now the correct target rest basis for animation retargeting. Reusing the
+    # stale import-time target basis makes otherwise-valid Leeds absolute-local
+    # animation deltas contort the edited rig.
+    if live_rest is not None and stored_matrix is not None:
+        diff = matrixRestDifferenceScore(live_rest, stored_matrix)
+        if diff > 1.0e-4:
+            return live_rest, f"live edited Blender rest; replaced stale {stored_source} diff={diff:.6f}"
+        return stored_matrix, stored_source
+
+    if live_rest is not None:
+        return live_rest, "live Blender bone.matrix_local"
+    if stored_matrix is not None:
+        return stored_matrix, stored_source
     return Matrix.Identity(4), "identity fallback"
 
 def rotationOnlyMatrix(matrix_value):
@@ -671,6 +798,81 @@ def normalizeAnimQuaternion(rotation_xyzw: Tuple[float, float, float, float]):
         qy * inv_magnitude,
         qz * inv_magnitude,
     ))
+
+def makePoseQuaternionContinuous(pose_bone, previous_quaternion=None):
+    if Quaternion is None or pose_bone is None:
+        return previous_quaternion
+    try:
+        current = pose_bone.rotation_quaternion.copy()
+    except Exception:
+        return previous_quaternion
+
+    try:
+        current.normalize()
+    except Exception:
+        pass
+
+    if previous_quaternion is not None:
+        try:
+            dot = (
+                float(current.w) * float(previous_quaternion.w)
+                + float(current.x) * float(previous_quaternion.x)
+                + float(current.y) * float(previous_quaternion.y)
+                + float(current.z) * float(previous_quaternion.z)
+            )
+            if dot < 0.0:
+                current = Quaternion((-float(current.w), -float(current.x), -float(current.y), -float(current.z)))
+        except Exception:
+            pass
+
+    try:
+        pose_bone.rotation_quaternion = current
+    except Exception:
+        pass
+    try:
+        return current.copy()
+    except Exception:
+        return current
+
+
+def finalizeImportedAnimActionCurves(action, start_frame: float, end_frame: float) -> int:
+    if action is None:
+        return 0
+    changed = 0
+    lo = min(float(start_frame), float(end_frame)) - 1.0e-5
+    hi = max(float(start_frame), float(end_frame)) + 1.0e-5
+    try:
+        fcurves = list(action.fcurves)
+    except Exception:
+        return 0
+
+    for fcurve in fcurves:
+        try:
+            points = list(fcurve.keyframe_points)
+        except Exception:
+            continue
+        for keyframe in points:
+            try:
+                frame_value = float(keyframe.co[0])
+            except Exception:
+                continue
+            if frame_value < lo or frame_value > hi:
+                continue
+            try:
+                # Leeds skeletal keys are sampled/interpolated by the game;
+                # Blender's default Bezier handles can overshoot quaternion
+                # components and visibly contort an otherwise-correct rig.
+                keyframe.interpolation = 'LINEAR'
+                changed += 1
+            except Exception:
+                pass
+    try:
+        action["bleeds_anim_interpolation"] = "LINEAR"
+        action["bleeds_anim_linear_key_count"] = int(changed)
+    except Exception:
+        pass
+    return int(changed)
+
 
 def safeMatrixInverted(matrix_value):
     if Matrix is None:
@@ -773,6 +975,7 @@ def applyAnimEntryAsAbsolutePose(
     solver_log: List[str] = []
     root_locked_count = 0
     rest_source_counts: Dict[str, int] = {}
+    previous_quaternion_by_bone: Dict[str, object] = {}
 
     for time_value in timeline:
         target_global_by_name: Dict[str, object] = {}
@@ -847,6 +1050,10 @@ def applyAnimEntryAsAbsolutePose(
             if is_root_bone and not bool(apply_root_motion):
                 root_locked_count += 1
             if local_applied_by_name.get(bone_name, False):
+                if apply_rotation and anim_bone.has_rotation:
+                    previous_quaternion_by_bone[bone_name] = makePoseQuaternionContinuous(
+                        pose_bone, previous_quaternion_by_bone.get(bone_name)
+                    )
 
                 pose_bone.keyframe_insert(data_path="location", frame=frame_number)
                 pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
@@ -996,6 +1203,106 @@ def applyPoseFrameRestDelta(
         return 1, f"MDL absolute-local rest delta source {mdl_rest_source} -> Blender basis {blender_rest_source}; root translation locked, root rotation applied"
     return 1, f"MDL absolute-local rest delta source {mdl_rest_source} -> Blender basis {blender_rest_source}"
 
+def applyPoseFrameAnimReferenceDelta(
+    armature_object,
+    pose_bone,
+    anim_frame: AnimFrame,
+    reference_frame: AnimFrame,
+    bone: BoneAnim,
+    *,
+    apply_rotation: bool,
+    apply_translation: bool,
+    translation_scale: float,
+    apply_root_motion: bool,
+):
+    if Matrix is None or Quaternion is None:
+        return 0, "no mathutils Matrix/Quaternion"
+
+    resolved_direct_id, _reason = resolvePedAnimBoneId(bone)
+    is_root_bone = int(resolved_direct_id if resolved_direct_id is not None else -1) == 0
+    root_translation_locked = is_root_bone and not bool(apply_root_motion)
+
+    blender_rest_local, blender_rest_source = getImportedBlenderRestLocalMatrix(armature_object, pose_bone)
+    if blender_rest_local is None:
+        blender_rest_local = getBlenderRestLocalMatrix(armature_object, pose_bone) or Matrix.Identity(4)
+        blender_rest_source = "live Blender bone.matrix_local fallback"
+
+    basis = Matrix.Identity(4)
+    changed_basis = False
+
+    if apply_rotation and bone.has_rotation:
+        reference_rotation = normalizeAnimQuaternion(reference_frame.rotation_xyzw)
+        current_rotation = normalizeAnimQuaternion(anim_frame.rotation_xyzw)
+        if reference_rotation is None:
+            reference_rotation = Quaternion((1.0, 0.0, 0.0, 0.0))
+        if current_rotation is None:
+            current_rotation = Quaternion((1.0, 0.0, 0.0, 0.0))
+
+        # Leeds weapon/layer clips use current * inverse(reference).
+        # The opposite order rotates around the wrong local axes.
+        source_delta = current_rotation @ reference_rotation.inverted()
+        source_delta_matrix = source_delta.to_matrix().to_4x4()
+
+        # The first ANIM key is the reference pose, not the source axis basis.
+        # Rebase through the actual imported MDL rest-local basis.
+        mdl_rest_local, _mdl_rest_source = getImportedMdlRestLocalMatrix(armature_object, pose_bone)
+        if mdl_rest_local is None:
+            mdl_rest_local = getBlenderRestLocalMatrix(armature_object, pose_bone) or Matrix.Identity(4)
+
+        basis = convertMdlLocalDeltaToBlenderBasis(
+            mdl_rest_local,
+            blender_rest_local,
+            source_delta_matrix,
+        )
+        changed_basis = True
+
+    if apply_translation and bone.has_translation and not root_translation_locked:
+        tx = (float(anim_frame.translation_xyz[0]) - float(reference_frame.translation_xyz[0])) * float(translation_scale)
+        ty = (float(anim_frame.translation_xyz[1]) - float(reference_frame.translation_xyz[1])) * float(translation_scale)
+        tz = (float(anim_frame.translation_xyz[2]) - float(reference_frame.translation_xyz[2])) * float(translation_scale)
+        try:
+            basis.translation = Vector((tx, ty, tz))
+        except Exception:
+            pass
+        changed_basis = True
+
+    if not changed_basis:
+        return 0, f"ANIM first-key delta -> Blender basis {blender_rest_source}"
+
+    try:
+        pose_bone.matrix_basis = basis
+    except Exception:
+        loc, rot, sca = basis.decompose()
+        pose_bone.location = loc
+        pose_bone.rotation_mode = "QUATERNION"
+        pose_bone.rotation_quaternion = rot
+        pose_bone.scale = sca
+
+    if root_translation_locked:
+        return 1, f"ANIM first-key delta -> Blender basis {blender_rest_source}; root translation locked"
+    return 1, f"ANIM first-key delta -> Blender basis {blender_rest_source}"
+
+def resetArmaturePoseToRest(armature_object) -> int:
+    reset_count = 0
+    if armature_object is None:
+        return reset_count
+    for pose_bone in armature_object.pose.bones:
+        try:
+            pose_bone.rotation_mode = "QUATERNION"
+            pose_bone.matrix_basis = Matrix.Identity(4)
+            reset_count += 1
+            continue
+        except Exception:
+            pass
+        try:
+            pose_bone.location = (0.0, 0.0, 0.0)
+            pose_bone.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+            pose_bone.scale = (1.0, 1.0, 1.0)
+            reset_count += 1
+        except Exception:
+            pass
+    return reset_count
+
 def applyPoseFramePlrRestRotationDelta(
     armature_object,
     pose_bone,
@@ -1074,32 +1381,446 @@ def applyPoseFramePlrRestRotationDelta(
 
     return keyed
 
-def shouldAutoUseSafePedWeaponAnimMode(armature_object, entry: AnimEntry, requested_mode: str) -> bool:
-
-    return False
-
-def shouldLogPedWeaponAbsoluteLocalMode(armature_object, entry: AnimEntry, requested_mode: str) -> bool:
-    mode = str(requested_mode or "").upper().strip()
-    if mode not in {"MDL_REST_DELTA", "DEFAULT", ""}:
-        return False
+def isPedWeaponAnimationEntry(entry: AnimEntry) -> bool:
     try:
-        name = str(getattr(entry, "name", "") or "").upper()
+        name = str(getattr(entry, "name", "") or "").upper().strip()
     except Exception:
         name = ""
-    if not name.startswith(("WEAPON_", "COLT45_", "PYTHON_", "SHOTGUN_", "RIFLE_", "UZI_", "TEC9_", "AK47_", "M4_")):
+
+    if not name.startswith((
+        "WEAPON_",
+        "COLT45_",
+        "PYTHON_",
+        "SHOTGUN_",
+        "RIFLE_",
+        "UZI_",
+        "TEC9_",
+        "AK47_",
+        "M4_",
+    )):
         return False
+
+    direct_ids = set()
     try:
-        direct_ids = set()
         for bone in list(getattr(entry, "bones", []) or []):
             resolved_id, _reason = resolvePedAnimBoneId(bone)
             if resolved_id is not None:
                 direct_ids.add(int(resolved_id))
-        required = {0, 1, 2, 3, 4, 5}
-        if not required.issubset(direct_ids):
-            return False
     except Exception:
         return False
-    return True
+
+    return {0, 1, 2, 3, 4, 5}.issubset(direct_ids)
+
+def isNativeLeedsMdlArmature(armature_object) -> bool:
+    if armature_object is None or getattr(armature_object, "type", None) != "ARMATURE":
+        return False
+
+    owners = (armature_object, getattr(armature_object, "data", None))
+    has_frame_arrays = False
+    for owner in owners:
+        if owner is None:
+            continue
+        try:
+            if "bleeds_mdl_frame_ptrs" in owner or "bleeds_mdl_hierarchy_node_names" in owner:
+                has_frame_arrays = True
+                break
+        except Exception:
+            pass
+
+    if not has_frame_arrays:
+        return False
+
+    imported_rest_bones = 0
+    direct_id_bones = 0
+    try:
+        for bone in armature_object.data.bones:
+            try:
+                if "bleeds_mdl_import_local_matrix" in bone or "bleeds_mdl_import_global_matrix" in bone:
+                    imported_rest_bones += 1
+            except Exception:
+                pass
+            try:
+                if getArmatureBoneDirectAnimId(bone) >= 0:
+                    direct_id_bones += 1
+            except Exception:
+                pass
+    except Exception:
+        return False
+
+    return imported_rest_bones >= 6 and direct_id_bones >= 6
+
+def findImportedMdlRootForArmature(armature_object):
+    current = armature_object
+    while current is not None:
+        for property_name in (
+            "bleeds_mdl_source_filepath",
+            "bleeds_mdl_filepath",
+            "bleeds_mdl_atomic_frame_ptr",
+            "bleeds_mdl_hierarchy_node_names",
+        ):
+            try:
+                if property_name in current:
+                    if current is not armature_object or property_name in {"bleeds_mdl_source_filepath", "bleeds_mdl_filepath"}:
+                        return current
+            except Exception:
+                pass
+        current = getattr(current, "parent", None)
+    return getattr(armature_object, "parent", None)
+
+
+def collectImportedMdlMeshesForArmature(armature_object, context=None) -> List[object]:
+    if armature_object is None:
+        return []
+
+    meshes: List[object] = []
+    seen_ids = set()
+
+    def add_mesh(obj):
+        if obj is None or getattr(obj, "type", None) != "MESH":
+            return
+        obj_id = id(obj)
+        if obj_id in seen_ids:
+            return
+        seen_ids.add(obj_id)
+        meshes.append(obj)
+
+    try:
+        for child in armature_object.children_recursive:
+            add_mesh(child)
+    except Exception:
+        pass
+
+    root_object = findImportedMdlRootForArmature(armature_object)
+    if root_object is not None:
+        try:
+            for child in root_object.children_recursive:
+                if getattr(child, "type", None) != "MESH":
+                    continue
+                is_stories_mesh = False
+                try:
+                    mdl_type = str(child.get("bleeds_mdl_type", "") or "").upper().strip()
+                    skin_binding = str(child.get("bleeds_mdl_skin_binding", "") or "").upper().strip()
+                    is_stories_mesh = mdl_type in {"PED", "CUT"} or skin_binding == "PED_SKIN_STREAM_ARMATURE"
+                except Exception:
+                    pass
+                if is_stories_mesh or armatureDeformsMesh(armature_object, child):
+                    add_mesh(child)
+        except Exception:
+            pass
+
+    if context is not None:
+        try:
+            for obj in context.selected_objects:
+                if getattr(obj, "type", None) == "MESH" and armatureDeformsMesh(armature_object, obj):
+                    add_mesh(obj)
+        except Exception:
+            pass
+
+    return meshes
+
+
+def normalizeBindingBoneName(name: str) -> str:
+    normalized = normalizeAnimBoneName(str(name or ""))
+    return "".join(ch for ch in normalized if ch.isalnum())
+
+
+def repairImportedMdlMeshBinding(mesh_object, armature_object) -> Tuple[bool, str]:
+    if mesh_object is None or getattr(mesh_object, "type", None) != "MESH":
+        return False, "not a mesh"
+    if armature_object is None or getattr(armature_object, "type", None) != "ARMATURE":
+        return False, "not an armature"
+
+    changed = False
+    armature_modifiers = []
+    try:
+        armature_modifiers = [modifier for modifier in mesh_object.modifiers if getattr(modifier, "type", None) == "ARMATURE"]
+    except Exception:
+        armature_modifiers = []
+
+    armature_modifier = None
+    for modifier in armature_modifiers:
+        if getattr(modifier, "object", None) is armature_object:
+            armature_modifier = modifier
+            break
+
+    if armature_modifier is None:
+        for modifier in armature_modifiers:
+            try:
+                mesh_object.modifiers.remove(modifier)
+                changed = True
+            except Exception:
+                pass
+        armature_modifier = mesh_object.modifiers.new(name="Armature", type="ARMATURE")
+        armature_modifier.object = armature_object
+        changed = True
+    else:
+        for modifier in armature_modifiers:
+            if modifier is armature_modifier:
+                continue
+            try:
+                mesh_object.modifiers.remove(modifier)
+                changed = True
+            except Exception:
+                pass
+
+    for attribute_name, attribute_value in (
+        ("use_vertex_groups", True),
+        ("use_bone_envelopes", False),
+        ("show_viewport", True),
+        ("show_render", True),
+    ):
+        try:
+            if getattr(armature_modifier, attribute_name) != attribute_value:
+                setattr(armature_modifier, attribute_name, attribute_value)
+                changed = True
+        except Exception:
+            pass
+
+    try:
+        bone_names = {str(bone.name) for bone in armature_object.data.bones}
+    except Exception:
+        bone_names = set()
+
+    normalized_to_bone = {}
+    for bone_name in bone_names:
+        normalized = normalizeBindingBoneName(bone_name)
+        if normalized and normalized not in normalized_to_bone:
+            normalized_to_bone[normalized] = bone_name
+
+    renamed_groups = 0
+    unmatched_groups = []
+    try:
+        for vertex_group in mesh_object.vertex_groups:
+            group_name = str(vertex_group.name)
+            if group_name in bone_names:
+                continue
+            matching_name = normalized_to_bone.get(normalizeBindingBoneName(group_name))
+            if matching_name:
+                vertex_group.name = matching_name
+                renamed_groups += 1
+                changed = True
+            else:
+                unmatched_groups.append(group_name)
+    except Exception:
+        pass
+
+    try:
+        saved_world = mesh_object.matrix_world.copy()
+        if getattr(mesh_object, "parent", None) is not armature_object or getattr(mesh_object, "parent_type", "") != "OBJECT":
+            mesh_object.parent = armature_object
+            mesh_object.parent_type = "OBJECT"
+            mesh_object.parent_bone = ""
+            mesh_object.matrix_parent_inverse = armature_object.matrix_world.inverted_safe()
+            mesh_object.matrix_world = saved_world
+            changed = True
+    except Exception:
+        pass
+
+    weighted_vertices = 0
+    matching_influences = 0
+    total_influences = 0
+    try:
+        group_name_by_index = {group.index: str(group.name) for group in mesh_object.vertex_groups}
+        for vertex in mesh_object.data.vertices:
+            vertex_has_weight = False
+            for membership in vertex.groups:
+                weight = float(getattr(membership, "weight", 0.0))
+                if weight <= 1.0e-8:
+                    continue
+                total_influences += 1
+                group_name = group_name_by_index.get(int(membership.group), "")
+                if group_name in bone_names:
+                    matching_influences += 1
+                    vertex_has_weight = True
+            if vertex_has_weight:
+                weighted_vertices += 1
+    except Exception:
+        pass
+
+    valid = bool(armature_modifier is not None and getattr(armature_modifier, "object", None) is armature_object)
+    valid = valid and weighted_vertices > 0 and matching_influences > 0
+
+    try:
+        mesh_object["bleeds_armature_parent_relationship"] = "OBJECT_CHILD_OF_ARMATURE"
+        mesh_object["bleeds_armature_name"] = str(armature_object.name)
+        mesh_object["bleeds_mdl_skin_binding"] = "PED_SKIN_STREAM_ARMATURE"
+        mesh_object["bleeds_mdl_binding_repair_valid"] = bool(valid)
+        mesh_object["bleeds_mdl_binding_repair_weighted_vertices"] = int(weighted_vertices)
+        mesh_object["bleeds_mdl_binding_repair_matching_influences"] = int(matching_influences)
+        mesh_object["bleeds_mdl_binding_repair_total_influences"] = int(total_influences)
+        mesh_object["bleeds_mdl_binding_repair_renamed_groups"] = int(renamed_groups)
+        mesh_object["bleeds_mdl_binding_repair_unmatched_groups"] = list(unmatched_groups[:64])
+    except Exception:
+        pass
+
+    status = (
+        f"mesh={getattr(mesh_object, 'name', '<unnamed>')!r} "
+        f"valid={valid} weighted_vertices={weighted_vertices} "
+        f"matching_influences={matching_influences}/{total_influences} "
+        f"renamed_groups={renamed_groups} parent={getattr(getattr(mesh_object, 'parent', None), 'name', None)!r}"
+    )
+    return valid, status
+
+
+def repairImportedMdlMeshBindingsForArmature(armature_object, context=None) -> Tuple[List[object], List[str]]:
+    meshes = collectImportedMdlMeshesForArmature(armature_object, context)
+    lines: List[str] = []
+    valid_meshes: List[object] = []
+
+    for mesh_object in meshes:
+        valid, status = repairImportedMdlMeshBinding(mesh_object, armature_object)
+        lines.append("BIND " + status)
+        if valid:
+            valid_meshes.append(mesh_object)
+
+    if not meshes:
+        lines.append(
+            "BIND WARNING: no imported PED/CUT mesh parts were found for the target armature; "
+            "the action can animate bones without deforming the visible MDL."
+        )
+    elif not valid_meshes:
+        lines.append(
+            "BIND ERROR: imported mesh parts were found, but none have usable vertex-group influences matching this armature."
+        )
+
+    return valid_meshes, lines
+
+
+def captureEvaluatedMeshWorldPositions(mesh_object, depsgraph) -> List[Tuple[float, float, float]]:
+    evaluated_object = mesh_object.evaluated_get(depsgraph)
+    evaluated_mesh = getattr(evaluated_object, "data", None)
+    if evaluated_mesh is None:
+        return []
+
+    matrix_world = evaluated_object.matrix_world
+    positions: List[Tuple[float, float, float]] = []
+    for vertex in evaluated_mesh.vertices:
+        world = matrix_world @ vertex.co
+        positions.append((float(world.x), float(world.y), float(world.z)))
+    return positions
+
+
+def measureImportedMdlAnimationMotion(
+    armature_object,
+    mesh_objects: Sequence[object],
+    *,
+    start_frame: float,
+    end_frame: float,
+) -> Tuple[bool, float, List[str]]:
+    if bpy is None or not mesh_objects:
+        return False, 0.0, ["DEFORM CHECK: no Blender mesh objects available"]
+
+    scene = bpy.context.scene
+    previous_frame = float(scene.frame_current)
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+
+    sample_frames = [float(start_frame)]
+    action = None
+    try:
+        action = armature_object.animation_data.action if armature_object.animation_data is not None else None
+    except Exception:
+        action = None
+
+    if action is not None:
+        key_frames = set()
+        try:
+            for fcurve in action.fcurves:
+                for keyframe in fcurve.keyframe_points:
+                    frame_value = float(keyframe.co[0])
+                    if frame_value >= float(start_frame) - 1.0e-5 and frame_value <= float(end_frame) + 1.0e-5:
+                        key_frames.add(frame_value)
+        except Exception:
+            key_frames = set()
+        if key_frames:
+            sample_frames.extend(sorted(key_frames))
+
+    if len(sample_frames) <= 1:
+        sample_frames.extend([
+            float(start_frame) + (float(end_frame) - float(start_frame)) * 0.5,
+            float(end_frame),
+        ])
+
+    unique_frames = []
+    for frame in sample_frames:
+        if not any(abs(frame - existing) <= 1.0e-5 for existing in unique_frames):
+            unique_frames.append(frame)
+
+    try:
+        scene.frame_set(int(math.floor(unique_frames[0])), subframe=float(unique_frames[0] - math.floor(unique_frames[0])))
+    except TypeError:
+        scene.frame_set(int(round(unique_frames[0])))
+    depsgraph.update()
+
+    reference_positions = {}
+    for mesh_object in mesh_objects:
+        try:
+            reference_positions[id(mesh_object)] = captureEvaluatedMeshWorldPositions(mesh_object, depsgraph)
+        except Exception:
+            reference_positions[id(mesh_object)] = []
+
+    max_displacement = 0.0
+    moving_mesh_names = set()
+    checked_vertex_count = 0
+
+    for frame in unique_frames[1:]:
+        try:
+            scene.frame_set(int(math.floor(frame)), subframe=float(frame - math.floor(frame)))
+        except TypeError:
+            scene.frame_set(int(round(frame)))
+        depsgraph.update()
+
+        for mesh_object in mesh_objects:
+            reference = reference_positions.get(id(mesh_object), [])
+            if not reference:
+                continue
+            try:
+                current = captureEvaluatedMeshWorldPositions(mesh_object, depsgraph)
+            except Exception:
+                continue
+            count = min(len(reference), len(current))
+            checked_vertex_count += count
+            for index in range(count):
+                rx, ry, rz = reference[index]
+                cx, cy, cz = current[index]
+                dx = cx - rx
+                dy = cy - ry
+                dz = cz - rz
+                displacement = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if displacement > max_displacement:
+                    max_displacement = displacement
+                if displacement > 1.0e-6:
+                    moving_mesh_names.add(str(getattr(mesh_object, "name", "<unnamed>")))
+
+    try:
+        scene.frame_set(int(math.floor(previous_frame)), subframe=float(previous_frame - math.floor(previous_frame)))
+    except TypeError:
+        scene.frame_set(int(round(previous_frame)))
+    depsgraph.update()
+
+    moved = max_displacement > 1.0e-6
+    lines = [
+        "DEFORM CHECK: "
+        f"moved={moved} max_world_vertex_displacement={max_displacement:.9f} "
+        f"checked_vertices={checked_vertex_count} sampled_frames={unique_frames} "
+        f"moving_meshes={sorted(moving_mesh_names)}"
+    ]
+    return moved, max_displacement, lines
+
+
+def shouldAutoUseSafePedWeaponAnimMode(armature_object, entry: AnimEntry, requested_mode: str) -> bool:
+    mode = str(requested_mode or "").upper().strip()
+    if mode not in {"MDL_REST_DELTA", "DEFAULT", ""}:
+        return False
+    if not isPedWeaponAnimationEntry(entry):
+        return False
+
+    # A BLeeds-imported Leeds MDL already carries the source MDL local/rest basis.
+    # Its ANIM tracks must be interpreted as absolute Leeds local poses relative to
+    # that imported rest basis. First-key normalization is only the cross-rig path.
+    return not isNativeLeedsMdlArmature(armature_object)
+
+def shouldLogPedWeaponAbsoluteLocalMode(armature_object, entry: AnimEntry, requested_mode: str) -> bool:
+    return False
 
 def applyAnimEntryToArmature(
     armature_object,
@@ -1122,6 +1843,11 @@ def applyAnimEntryToArmature(
     if armature_object is None or getattr(armature_object, "type", None) != "ARMATURE":
         raise RuntimeError("Select an armature, an imported MDL mesh part, or the imported MDL root before importing ANIM")
 
+    bound_mdl_meshes, binding_lines = repairImportedMdlMeshBindingsForArmature(
+        armature_object,
+        bpy.context,
+    )
+
     previous_active = bpy.context.view_layer.objects.active
     previous_mode = None
     try:
@@ -1142,6 +1868,8 @@ def applyAnimEntryToArmature(
     except Exception:
         pass
 
+    reset_pose_bones = resetArmaturePoseToRest(armature_object)
+
     armature_object.animation_data_create()
     if clear_existing_action or armature_object.animation_data.action is None:
         action = bpy.data.actions.new(sanitizeActionName(entry.name, source_path))
@@ -1158,6 +1886,8 @@ def applyAnimEntryToArmature(
     mapped_count = 0
     keyed_count = 0
     log_lines: List[str] = []
+    log_lines.extend(binding_lines)
+    log_lines.append(f"POSE RESET before ANIM apply: {reset_pose_bones} pose bones reset to rest matrix_basis")
     mapped_items: List[Tuple[BoneAnim, object, str]] = []
 
     for bone in entry.bones:
@@ -1183,9 +1913,24 @@ def applyAnimEntryToArmature(
         )
 
     mode = str(pose_space_mode).upper()
-    if shouldLogPedWeaponAbsoluteLocalMode(armature_object, entry, mode):
-        log_lines.append("AUTO pose mode: weapon PED animation uses MDL_ABSOLUTE_POSE / recursive absolute MDL-local solver; PLR raw-delta is not forced")
-        mode = "MDL_ABSOLUTE_POSE"
+    native_leeds_mdl = isNativeLeedsMdlArmature(armature_object)
+    if shouldAutoUseSafePedWeaponAnimMode(armature_object, entry, mode):
+        mode = "ANIM_FIRST_KEY_DELTA"
+        log_lines.append(
+            "AUTO pose mode: non-native/cross-rig weapon PED animation uses ANIM_FIRST_KEY_DELTA. "
+            "Native Leeds MDLs keep MDL_REST_DELTA and use their imported source rest matrices."
+        )
+    elif native_leeds_mdl and mode in {"DEFAULT", ""}:
+        mode = "MDL_REST_DELTA"
+        log_lines.append(
+            "AUTO pose mode: native Leeds MDL uses MDL_REST_DELTA from imported source local/global rest matrices."
+        )
+
+    try:
+        action["bleeds_anim_pose_space_mode"] = str(mode)
+        action["bleeds_anim_native_leeds_mdl_target"] = bool(native_leeds_mdl)
+    except Exception:
+        pass
     if mode in ("MDL_ABSOLUTE_POSE", "ABSOLUTE_POSE", "ABSOLUTE_MDL_POSE"):
         keyed_count, solver_lines = applyAnimEntryAsAbsolutePose(
             armature_object,
@@ -1202,10 +1947,32 @@ def applyAnimEntryToArmature(
     else:
         for bone, pose_bone, _reason in mapped_items:
             rest_source_for_log = None
+            previous_quaternion = None
             for anim_frame in bone.frames:
                 frame_number = float(start_frame) + float(anim_frame.absolute_time) * float(fps)
 
-                if mode == "RAW_BASIS":
+                if mode in ("ANIM_FIRST_KEY_DELTA", "FIRST_KEY_DELTA", "LEEDS_REFERENCE_DELTA"):
+                    reference_frame = bone.frames[0] if bone.frames else anim_frame
+                    keyed_here, rest_source = applyPoseFrameAnimReferenceDelta(
+                        armature_object,
+                        pose_bone,
+                        anim_frame,
+                        reference_frame,
+                        bone,
+                        apply_rotation=apply_rotation,
+                        apply_translation=apply_translation,
+                        translation_scale=translation_scale,
+                        apply_root_motion=apply_root_motion,
+                    )
+                    rest_source_for_log = rest_source_for_log or rest_source
+                    if keyed_here:
+                        if apply_rotation and bone.has_rotation:
+                            previous_quaternion = makePoseQuaternionContinuous(pose_bone, previous_quaternion)
+                        pose_bone.keyframe_insert(data_path="location", frame=frame_number)
+                        pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
+                        pose_bone.keyframe_insert(data_path="scale", frame=frame_number)
+                        keyed_count += 1
+                elif mode == "RAW_BASIS":
                     keyed_here = applyPoseFrameRawBasis(
                         pose_bone,
                         anim_frame,
@@ -1215,6 +1982,7 @@ def applyAnimEntryToArmature(
                         translation_scale=translation_scale,
                     )
                     if apply_rotation and bone.has_rotation:
+                        previous_quaternion = makePoseQuaternionContinuous(pose_bone, previous_quaternion)
                         pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
                     if apply_translation and bone.has_translation:
                         pose_bone.keyframe_insert(data_path="location", frame=frame_number)
@@ -1232,6 +2000,8 @@ def applyAnimEntryToArmature(
                     )
                     rest_source_for_log = rest_source_for_log or rest_source
                     if keyed_here:
+                        if apply_rotation and bone.has_rotation:
+                            previous_quaternion = makePoseQuaternionContinuous(pose_bone, previous_quaternion)
                         pose_bone.keyframe_insert(data_path="location", frame=frame_number)
                         pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
                         pose_bone.keyframe_insert(data_path="scale", frame=frame_number)
@@ -1251,6 +2021,7 @@ def applyAnimEntryToArmature(
                         if apply_translation and bone.has_translation:
                             pose_bone.keyframe_insert(data_path="location", frame=frame_number)
                         if apply_rotation and bone.has_rotation:
+                            previous_quaternion = makePoseQuaternionContinuous(pose_bone, previous_quaternion)
                             pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
                         pose_bone.keyframe_insert(data_path="scale", frame=frame_number)
                         keyed_count += keyed_here
@@ -1268,6 +2039,8 @@ def applyAnimEntryToArmature(
                     )
                     rest_source_for_log = rest_source_for_log or rest_source
                     if keyed_here:
+                        if apply_rotation and bone.has_rotation:
+                            previous_quaternion = makePoseQuaternionContinuous(pose_bone, previous_quaternion)
                         pose_bone.keyframe_insert(data_path="location", frame=frame_number)
                         pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
                         pose_bone.keyframe_insert(data_path="scale", frame=frame_number)
@@ -1281,10 +2054,54 @@ def applyAnimEntryToArmature(
     scene.frame_start = min(int(scene.frame_start), int(start_frame))
     scene.frame_end = max(int(scene.frame_end), int(math.ceil(end_frame)) + 1)
 
+    linear_key_count = finalizeImportedAnimActionCurves(action, float(start_frame), float(end_frame))
+    if linear_key_count:
+        log_lines.append(f"Interpolation: set {linear_key_count} imported keyframe points to LINEAR.")
+
     if action is not None:
         action["bleeds_anim_mapped_bones"] = int(mapped_count)
         action["bleeds_anim_keyed_channels"] = int(keyed_count)
         action["bleeds_anim_unmapped_bones"] = int(len(entry.bones) - mapped_count)
+
+    try:
+        bpy.ops.object.mode_set(mode="OBJECT")
+    except Exception:
+        pass
+
+    moved_mesh, max_mesh_displacement, deformation_lines = measureImportedMdlAnimationMotion(
+        armature_object,
+        bound_mdl_meshes,
+        start_frame=float(start_frame),
+        end_frame=float(end_frame),
+    )
+    log_lines.extend(deformation_lines)
+
+    if bound_mdl_meshes and not moved_mesh and mapped_count > 0 and keyed_count > 0:
+        rebound_meshes, rebound_lines = repairImportedMdlMeshBindingsForArmature(
+            armature_object,
+            bpy.context,
+        )
+        log_lines.append("DEFORM CHECK: first evaluation did not move the MDL; reasserted modifier/parent binding and retested.")
+        log_lines.extend(rebound_lines)
+        moved_mesh, max_mesh_displacement, retry_lines = measureImportedMdlAnimationMotion(
+            armature_object,
+            rebound_meshes,
+            start_frame=float(start_frame),
+            end_frame=float(end_frame),
+        )
+        bound_mdl_meshes = rebound_meshes
+        log_lines.extend(retry_lines)
+
+    try:
+        if action is not None:
+            action["bleeds_anim_bound_mdl_mesh_count"] = int(len(bound_mdl_meshes))
+            action["bleeds_anim_deforms_bound_mdl_mesh"] = bool(moved_mesh)
+            action["bleeds_anim_max_mesh_displacement"] = float(max_mesh_displacement)
+        armature_object["bleeds_anim_bound_mdl_mesh_count"] = int(len(bound_mdl_meshes))
+        armature_object["bleeds_anim_deforms_bound_mdl_mesh"] = bool(moved_mesh)
+        armature_object["bleeds_anim_max_mesh_displacement"] = float(max_mesh_displacement)
+    except Exception:
+        pass
 
     try:
         bpy.ops.object.mode_set(mode="OBJECT")

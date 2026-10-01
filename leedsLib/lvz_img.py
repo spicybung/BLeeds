@@ -1635,12 +1635,12 @@ class read_lvz:
         n = len(lvz) if max_end is None else min(len(lvz), max(0, int(max_end)))
         if list_end < addr or list_end > n:
             return False
-        stream_guess = list_end
-        while stream_guess < n and lvz[stream_guess] == 0xAA and stream_guess - addr < 0x1000:
-            stream_guess += 1
-        stream_guess = align_up4(stream_guess)
+        stream_start = list_end
+        while stream_start < n and lvz[stream_start] == 0xAA and stream_start - addr < 0x1000:
+            stream_start += 1
+        stream_start = align_up4(stream_start)
         unpack_bytes = struct.pack("<I", self.UNPACK)
-        return lvz.find(unpack_bytes, max(addr, stream_guess - 0x10), min(n, stream_guess + 0x100)) >= 0
+        return lvz.find(unpack_bytes, max(addr, stream_start - 0x10), min(n, stream_start + 0x100)) >= 0
 
     def expected_ps2_material_size16(self, count: int, row_len: int) -> int:
         try:
@@ -2054,9 +2054,9 @@ class read_lvz:
                 end = min(end, base)
             row["res_end"] = end
             if addr > 0 and end > addr:
-                row["res_size_guess"] = end - addr
+                row["res_size_estimate"] = end - addr
             else:
-                row["res_size_guess"] = 0
+                row["res_size_estimate"] = 0
         return rows
 
     @staticmethod
@@ -2837,14 +2837,14 @@ class read_lvz:
             off += row_len
 
         aa_tail, new_off = self._scan_aa_tail(list_end)
-        next_guess = align_up4(new_off)
+        next_offset = align_up4(new_off)
         return MDLMaterialList(
             count=count,
             size_bytes=size_bytes,
             materials=materials,
             bytes_read=list_end - base,
             aa_tail=aa_tail,
-            next_off=next_guess,
+            next_off=next_offset,
             format_tag=format_tag,
             row_len=row_len,
         )
@@ -4112,7 +4112,7 @@ class read_img:
 
         Every accepted row must still come from the master AreaInfo table, a
         validated AERA chunk, and an in-bounds chunk-relative payload pointer.
-        Conflicting secondary IDs are omitted rather than guessed.
+        Conflicting secondary IDs are omitted rather than synthesized.
         """
         img = self.img_bytes
         if area_records is None:

@@ -30,6 +30,7 @@ from ..leedsLib.tex import (
     parse_container,
     parse_psp_header,
     parse_ps2_header,
+    validate_ps2_stories_runtime_container,
     decode_psp_texture,
     decode_ps2_texture,
     is_mh2_tex_data,
@@ -46,7 +47,123 @@ def normalize_leeds_texture_name(name: str) -> str:
             value = stem
     return value
 
+
+def leeds_texture_name_candidates(name: str) -> List[str]:
+    """Return normalized texture-name candidates including known Stories aliases."""
+    normalized = normalize_leeds_texture_name(name)
+    if not normalized:
+        return []
+    result = [normalized]
+    aliases = {
+        "shoes": ("sneaker", "sneakers", "shoe"),
+        "shoe": ("sneaker", "sneakers", "shoes"),
+        "sneaker": ("shoes", "shoe", "sneakers"),
+        "sneakers": ("shoes", "shoe", "sneaker"),
+    }
+    for alias in aliases.get(normalized, ()):
+        if alias not in result:
+            result.append(alias)
+    return result
+
 LEEDS_TEXTURE_SIDECAR_EXTENSIONS: Tuple[str, ...] = (".xtx", ".chk", ".tex")
+
+
+def describe_texture_container_format(input_path: str, data: bytes) -> str:
+    extension = os.path.splitext(str(input_path or ""))[1].casefold()
+    if is_mh2_tex_data(data):
+        return "MH2_TEX"
+    if extension == ".xtx":
+        return "LEEDS_XTX"
+    if extension == ".chk":
+        return "LEEDS_CHK"
+    if extension == ".tex":
+        return "LEEDS_TEX"
+    return "LEEDS_TEXTURE_CONTAINER"
+
+
+def score_texture_header_candidate(header: object, data_size: int) -> int:
+    if header is None:
+        return -1000
+    try:
+        width = int(header.width)
+        height = int(header.height)
+        bpp = int(header.bpp)
+        raster_offset = int(header.raster_offset)
+    except Exception:
+        return -1000
+
+    score = 0
+    if 4 <= width <= 4096 and 4 <= height <= 4096:
+        score += 8
+    else:
+        score -= 32
+    if width & (width - 1) == 0:
+        score += 2
+    if height & (height - 1) == 0:
+        score += 2
+    if bpp in (4, 8, 16, 32):
+        score += 8
+    else:
+        score -= 24
+    if 0 < raster_offset < int(data_size):
+        score += 10
+    else:
+        score -= 40
+    if isinstance(header, PspTexHeader):
+        if bpp in (4, 8, 32):
+            score += 3
+        if int(header.mipmap_count if hasattr(header, "mipmap_count") else header.mip_count) <= 12:
+            score += 1
+    elif isinstance(header, Ps2TexHeader):
+        if bpp in (4, 8, 16, 32):
+            score += 3
+        if int(header.mip_count) <= 12:
+            score += 1
+    return score
+
+
+def choose_texture_container_platform(
+    candidates: Iterable[Tuple[str, int, Optional[PspTexHeader], Optional[Ps2TexHeader]]],
+    data_size: int,
+    requested_platform: str,
+) -> str:
+    requested = str(requested_platform or "auto").strip().lower()
+    if requested in {"psp", "ps2"}:
+        return requested
+
+    psp_score = 0
+    ps2_score = 0
+    psp_valid = 0
+    ps2_valid = 0
+    for _name, _tex_off, psp_header, ps2_header in candidates:
+        score = score_texture_header_candidate(psp_header, data_size)
+        if score > 0:
+            psp_valid += 1
+            psp_score += score
+        score = score_texture_header_candidate(ps2_header, data_size)
+        if score > 0:
+            ps2_valid += 1
+            ps2_score += score
+
+    if psp_valid != ps2_valid:
+        return "psp" if psp_valid > ps2_valid else "ps2"
+    if psp_score != ps2_score:
+        return "psp" if psp_score > ps2_score else "ps2"
+    return "ps2"
+
+
+def find_existing_texture_image(source_path: str, texture_name: str) -> Optional[bpy.types.Image]:
+    source_key = os.path.normcase(os.path.abspath(str(source_path or "")))
+    texture_key = normalize_leeds_texture_name(texture_name)
+    for image in bpy.data.images:
+        try:
+            existing_source = os.path.normcase(os.path.abspath(str(image.get("bleeds_texture_source_path", "") or "")))
+            existing_name = normalize_leeds_texture_name(image.get("bleeds_texture_name", image.name))
+        except Exception:
+            continue
+        if existing_source == source_key and existing_name == texture_key:
+            return image
+    return None
 
 
 def find_last_texture_raster_end(
@@ -534,10 +651,12 @@ def apply_images_to_imported_mdl_materials(
             image = None
             best_name = ""
             for name in candidate_names:
-                lookup_key = normalize_leeds_texture_name(name)
-                if lookup_key in image_lookup:
-                    image = image_lookup[lookup_key]
-                    best_name = name
+                for lookup_key in leeds_texture_name_candidates(name):
+                    if lookup_key in image_lookup:
+                        image = image_lookup[lookup_key]
+                        best_name = name
+                        break
+                if image is not None:
                     break
 
             if image is None:
@@ -679,7 +798,10 @@ def decode_chk_to_blender_images(
 
     if is_mh2_tex_data(data):
         return decode_mh2_tex_to_blender_images(input_path, prefix=prefix)
+    if len(data) < 0x30:
+        raise ValueError("Leeds texture container header is truncated")
 
+    container_format = describe_texture_container_format(input_path, data)
     hdr = {
         'sig': data[0:4].decode('ascii', 'replace'),
         'plat': read_u32(data, 0x04),
@@ -692,143 +814,166 @@ def decode_chk_to_blender_images(
         'first_slot': read_u32(data, 0x28),
         'last_slot': read_u32(data, 0x2C),
     }
-    first_slot = hdr['first_slot']
-    last_slot = hdr['last_slot']
-    visited = set()
 
-    textures: List[Tuple[str, int, object]] = []
+    first_slot = int(hdr['first_slot'])
+    last_slot = int(hdr['last_slot'])
+    if first_slot <= 0:
+        raise ValueError("Leeds texture container has no first texture slot")
+
+    visited = set()
+    raw_entries: List[Tuple[str, int, int, int, Optional[PspTexHeader], Optional[Ps2TexHeader]]] = []
     container_bases: List[int] = []
+    validation_messages: List[str] = []
     base = slot_base_from_slot_ptr(first_slot)
-    last_base = slot_base_from_slot_ptr(last_slot) if last_slot else None
+    expected_previous_slot = 0
 
     while True:
         if base in visited:
+            validation_messages.append(f"container slot cycle detected at 0x{base:X}")
             break
         visited.add(base)
         cinfo = parse_container(data, base)
         if not cinfo:
+            validation_messages.append(f"container slot 0x{base:X} is outside the file or truncated")
             break
-        try:
-            container_bases.append(int(cinfo['base']))
-        except Exception:
-            pass
-        name = cinfo['name']
 
-        if name and all(32 <= ord(ch) < 127 for ch in name):
+        container_bases.append(int(cinfo['base']))
+        name = str(cinfo['name'] or '').strip()
+        tex_off = int(cinfo['tex_off'])
+        next_slot = int(cinfo['next_slot'])
+        prev_slot = int(cinfo['prev_slot'])
 
-            tex_off = cinfo['tex_off']
-            hdr_psp: Optional[PspTexHeader] = None
-            hdr_ps2: Optional[Ps2TexHeader] = None
-            if platform in ('auto', 'psp'):
-                hdr_psp = parse_psp_header(data, tex_off)
-            if platform in ('auto', 'ps2'):
-                hdr_ps2 = parse_ps2_header(data, tex_off)
-            header_obj: Optional[object] = None
-            if platform == 'psp':
-                header_obj = hdr_psp
-            elif platform == 'ps2':
-                header_obj = hdr_ps2
-            else:
+        if expected_previous_slot and prev_slot not in (0, expected_previous_slot):
+            validation_messages.append(
+                f"slot 0x{base:X} prev pointer 0x{prev_slot:X} does not match expected 0x{expected_previous_slot:X}"
+            )
+        if tex_off <= 0 or tex_off + 16 > len(data):
+            validation_messages.append(f"texture entry {name or '<unnamed>'!r} has invalid header offset 0x{tex_off:X}")
+        elif name and all(32 <= ord(ch) < 127 for ch in name):
+            raw_entries.append((
+                name, tex_off, int(cinfo['base']), next_slot,
+                parse_psp_header(data, tex_off),
+                parse_ps2_header(data, tex_off),
+            ))
+        elif not name:
+            validation_messages.append(f"slot 0x{base:X} has an empty texture name")
+        else:
+            validation_messages.append(f"slot 0x{base:X} has a non-ASCII texture name")
 
-                def is_plausible_psp(h: Optional[PspTexHeader]) -> bool:
-                    if not h:
-                        return False
-
-                    if h.bpp not in (4, 8, 32):
-                        return False
-                    if h.width < 4 or h.height < 4:
-                        return False
-                    return True
-
-                def is_plausible_ps2(h: Optional[Ps2TexHeader]) -> bool:
-                    if not h:
-                        return False
-
-                    if h.bpp not in (4, 8, 16, 32):
-                        return False
-                    if h.width < 4 or h.height < 4:
-                        return False
-                    return True
-
-                has_psp = is_plausible_psp(hdr_psp)
-                has_ps2 = is_plausible_ps2(hdr_ps2)
-                if has_psp and not has_ps2:
-                    header_obj = hdr_psp
-                elif has_ps2 and not has_psp:
-                    header_obj = hdr_ps2
-                elif has_psp and has_ps2:
-
-                    size_psp = hdr_psp.width * hdr_psp.height
-                    size_ps2 = hdr_ps2.width * hdr_ps2.height
-                    if size_psp >= size_ps2:
-                        header_obj = hdr_psp
-                    else:
-                        header_obj = hdr_ps2
-                else:
-
-                    header_obj = hdr_psp if hdr_psp else hdr_ps2
-            if header_obj:
-                textures.append((name, cinfo['tex_off'], header_obj))
-
-        next_slot = cinfo['next_slot']
         if next_slot == 0:
             break
         next_base = slot_base_from_slot_ptr(next_slot)
         if next_base == base:
+            validation_messages.append(f"slot 0x{base:X} points to itself")
             break
+        expected_previous_slot = base + 8
         base = next_base
-    if not textures:
+
+    if last_slot:
+        expected_last_base = slot_base_from_slot_ptr(last_slot)
+        if container_bases and int(container_bases[-1]) != int(expected_last_base):
+            validation_messages.append(
+                f"last-slot header resolves to 0x{expected_last_base:X}, but traversal ended at 0x{container_bases[-1]:X}"
+            )
+
+    if not raw_entries:
+        for message in validation_messages:
+            print(f"[xtx-validation] {message}")
         return []
 
-    textures_sorted = []
-    for name, tex_off, header in textures:
-        if isinstance(header, PspTexHeader):
-            roff = header.raster_offset
-        elif isinstance(header, Ps2TexHeader):
-            roff = header.raster_offset
-        else:
+    platform_candidates = [(name, tex_off, psp_header, ps2_header) for name, tex_off, _base, _next, psp_header, ps2_header in raw_entries]
+    detected_platform = choose_texture_container_platform(platform_candidates, len(data), platform)
+
+    runtime_safe = True
+    runtime_messages: List[str] = []
+    if detected_platform == 'ps2':
+        runtime_safe, runtime_messages = validate_ps2_stories_runtime_container(data)
+        for message in runtime_messages:
+            print(f"[xtx-runtime] {message}")
+
+    textures: List[Tuple[str, int, int, object, int]] = []
+    for name, tex_off, entry_base, _next_slot, psp_header, ps2_header in raw_entries:
+        header_obj = psp_header if detected_platform == 'psp' else ps2_header
+        if header_obj is None:
+            fallback = ps2_header if detected_platform == 'psp' else psp_header
+            if fallback is None:
+                validation_messages.append(
+                    f"texture {name!r} at 0x{tex_off:X} has no plausible {detected_platform.upper()} header"
+                )
+                continue
+            validation_messages.append(
+                f"texture {name!r} does not match container platform {detected_platform.upper()}; using alternate header layout"
+            )
+            header_obj = fallback
+        raster_offset = int(header_obj.raster_offset)
+        if raster_offset <= 0 or raster_offset >= len(data):
+            validation_messages.append(f"texture {name!r} has raster offset 0x{raster_offset:X} outside the file")
             continue
-        textures_sorted.append((name, tex_off, header, roff))
-    textures_sorted.sort(key=lambda x: x[3])
-    offsets = [hdr_info[3] for hdr_info in textures_sorted]
+        textures.append((name, tex_off, entry_base, header_obj, raster_offset))
+
+    textures.sort(key=lambda item: int(item[4]))
+    raster_offsets = [int(item[4]) for item in textures]
     block_sizes: List[int] = []
-    for texture_index, start in enumerate(offsets):
+    for texture_index, start in enumerate(raster_offsets):
         structural_end = find_last_texture_raster_end(
             raster_offset=start,
             container_bases=container_bases,
             global_offsets=(hdr['glob1'], hdr['glob2'], hdr['coll_size']),
             data_size=len(data),
         )
-
-        if texture_index + 1 < len(offsets):
-            next_raster_offset = offsets[texture_index + 1]
-            end = min(int(next_raster_offset), int(structural_end))
+        if texture_index + 1 < len(raster_offsets):
+            end = min(int(raster_offsets[texture_index + 1]), int(structural_end))
         else:
             end = int(structural_end)
+        block_size = max(0, int(end) - int(start))
+        if block_size <= 0:
+            validation_messages.append(f"texture raster at 0x{start:X} has a zero-length structural range")
+        block_sizes.append(block_size)
 
-        block_sizes.append(max(0, int(end) - int(start)))
+    for message in validation_messages:
+        print(f"[xtx-validation] {message}")
+
     blender_images: List[bpy.types.Image] = []
-
-    for ((name, tex_off, header, roff), blk_size) in zip(textures_sorted, block_sizes):
+    source_path = os.path.abspath(input_path)
+    for ((name, tex_off, entry_base, header, raster_offset), block_size) in zip(textures, block_sizes):
         if isinstance(header, PspTexHeader):
-            rgba = decode_psp_texture(data, header, blk_size, palette_override=None)
+            rgba = decode_psp_texture(data, header, block_size, palette_override=None)
+            actual_platform = 'psp'
+            swizzled = bool(header.swizzle_width)
+            mip_count = int(header.mip_count)
         elif isinstance(header, Ps2TexHeader):
-            rgba = decode_ps2_texture(data, header, blk_size, palette_override=None)
+            rgba = decode_ps2_texture(data, header, block_size, palette_override=None)
+            actual_platform = 'ps2'
+            swizzled = bool(header.swizzle_mask)
+            mip_count = int(header.mip_count)
         else:
             rgba = None
+            actual_platform = detected_platform
+            swizzled = False
+            mip_count = 0
         if rgba is None:
+            print(f"[xtx-validation] failed to decode texture {name!r} at raster 0x{raster_offset:X}")
             continue
-        h, w, _ = rgba.shape
 
-        rgba_flat = np.ascontiguousarray(
-            rgba.reshape((-1, 4)),
-            dtype=np.float32,
-        )
+        h, w, _ = rgba.shape
+        # Leeds decode returns conventional top-to-bottom raster rows. Blender's
+        # generated Image.pixels buffer is addressed from the bottom row, unlike
+        # loading an ordinary PNG through Blender. Flip rows only at the Blender
+        # upload boundary so XTX/CHK sidecars line up with the same UVs as PNGs.
+        blender_rgba = np.flipud(rgba)
+        rgba_flat = np.ascontiguousarray(blender_rgba.reshape((-1, 4)), dtype=np.float32)
         rgba_flat *= (1.0 / 255.0)
 
         image_name = f"{prefix}{name}"
+        img = find_existing_texture_image(source_path, name)
+        if img is None:
+            img = bpy.data.images.new(name=image_name, width=w, height=h, alpha=True)
+        elif int(img.size[0]) != int(w) or int(img.size[1]) != int(h):
+            try:
+                img.scale(w, h)
+            except Exception:
+                pass
 
-        img = bpy.data.images.new(name=image_name, width=w, height=h, alpha=True)
         alpha_values = rgba[:, :, 3]
         alpha_min = int(alpha_values.min()) if alpha_values.size else 255
         alpha_max = int(alpha_values.max()) if alpha_values.size else 255
@@ -836,11 +981,30 @@ def decode_chk_to_blender_images(
 
         try:
             img["bleeds_texture_name"] = str(name)
-            img["bleeds_texture_source_path"] = str(input_path)
-            img["bleeds_texture_platform"] = str(platform)
+            img["bleeds_texture_source_path"] = source_path
+            img["bleeds_texture_container_format"] = container_format
+            img["bleeds_texture_platform"] = actual_platform
+            img["bleeds_texture_detected_platform"] = detected_platform
+            img["bleeds_texture_runtime_safe"] = bool(runtime_safe)
+            img["bleeds_texture_runtime_warning"] = " | ".join(runtime_messages)
+            img["bleeds_texture_container_signature"] = str(hdr['sig'])
+            img["bleeds_texture_container_platform_tag"] = int(hdr['plat'])
+            img["bleeds_texture_container_flags24"] = int(hdr['flags24'])
+            img["bleeds_texture_container_glob_count"] = int(hdr['glob_count'])
+            img["bleeds_texture_entry_offset"] = int(entry_base)
+            img["bleeds_texture_header_offset"] = int(tex_off)
+            img["bleeds_texture_raster_offset"] = int(raster_offset)
+            img["bleeds_texture_raster_block_size"] = int(block_size)
+            img["bleeds_texture_width"] = int(w)
+            img["bleeds_texture_height"] = int(h)
+            img["bleeds_texture_bpp"] = int(header.bpp)
+            img["bleeds_texture_mipmap_count"] = int(mip_count)
+            img["bleeds_texture_swizzled"] = bool(swizzled)
             img["bleeds_texture_alpha_min"] = alpha_min
             img["bleeds_texture_alpha_max"] = alpha_max
             img["bleeds_texture_has_meaningful_alpha"] = has_meaningful_alpha
+            img["bleeds_texture_blender_row_flip"] = True
+            img["bleeds_texture_format_note"] = "Leeds texture container entry; separate from CModelInfo runtime classes"
         except Exception:
             pass
 

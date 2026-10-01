@@ -92,10 +92,10 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
     )
 
     import_game: EnumProperty(
-        name="Type",
-        description="Leeds game family to import",
+        name="Game",
+        description="Stories title used by the MDL",
         items=(
-            ("AUTO", "Detect from header", "Determine the game family from the MDL container structure"),
+            ("AUTO", "Determine from file", "Determine LCS or VCS from the MDL structure when the file contains a title-specific identifier"),
             ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),
             ("VCS", "VCS", "Grand Theft Auto: Vice City Stories"),
             ("MH2", "MH2", "Manhunt 2"),
@@ -108,7 +108,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         name="Platform",
         description="Platform this Stories MDL was built for",
         items=(
-            ("AUTO", "Detect from header", "Determine PS2 or PSP from the Stories MDL header"),
+            ("AUTO", "Determine from file", "Determine PS2 or PSP from the Stories MDL structure"),
             ("PS2", "PS2", "PlayStation 2 (Liberty City Stories / Vice City Stories)"),
             ("PSP", "PSP", "PlayStation Portable (Liberty City Stories / Vice City Stories)"),
         ),
@@ -118,13 +118,13 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
     mdl_type: EnumProperty(
         name="Model Type",
-        description="Whether this MDL is a ped/actor or a prop",
+        description="Serialized Leeds MDL layout. Runtime model-info class and on-disk layout are separate concepts.",
         items=(
-            ("AUTO", "Detect from structure", "Determine SimpleModel, PedModel, CutsceneModel, or VehicleModel from the MDL structure"),
-            ("SIM", "SimpleModel", "Simple / prop model without bones"),
-            ("PED", "PedModel / Actor", "Pedestrian / actor model with bones"),
-            ("CUT", "CutsceneModel / Actor", "Cutscene / actor model with bones"),
-            ("VEH", "VehModel", "Vehicle model"),
+            ("AUTO", "Determine layout", "Determine the serialized MDL layout from the file structure"),
+            ("SIM", "Atomic / Simple layout", "Atomic-oriented prop/simple serialized MDL layout; commonly consumed by CSimpleModelInfo"),
+            ("PED", "Skinned Clump / Ped layout", "Skinned actor/ped Clump serialization with hierarchy and skin streams; commonly consumed by CPedModelInfo"),
+            ("CUT", "Actor Clump layout", "Actor/cutscene Clump serialization. Cutscene is a usage context, not a runtime model-info class"),
+            ("VEH", "Vehicle Clump layout", "Vehicle-oriented Clump serialization profile; commonly consumed by CVehicleModelInfo"),
         ),
         default="AUTO",
         options={"HIDDEN"},
@@ -268,7 +268,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
         for filepath in filepaths:
             try:
-                target_collection_name = collection_name or os.path.splitext(os.path.basename(filepath))[0]
+                target_collection_name = collection_name or os.path.basename(filepath)
                 use_manhunt2_pc_reader = (
                     self.import_game == "MH2"
                     or (self.import_game == "AUTO" and self.isManhunt2PcContainer(filepath))
@@ -324,7 +324,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                     imported_count += 1
                     continue
 
-                created_objects, detected = mdl_importer.import_stories_mdl_auto(
+                created_objects, detected = mdl_importer.import_stories_mdl_detected(
                     context=context,
                     filepath=filepath,
                     import_game=self.import_game,
@@ -397,6 +397,16 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         maxlen=255,
     )
 
+    platform: EnumProperty(
+        name="Platform",
+        description="Target platform profile for the exported Leeds MDL",
+        items=(
+            ("PS2", "PlayStation 2", "Export a PlayStation 2 Stories MDL"),
+            ("PSP", "PlayStation Portable", "Select the PSP Stories MDL profile"),
+        ),
+        default="PS2",
+    )
+
     export_game: EnumProperty(
         name="3D Models",
         description="Target Leeds 3D model family",
@@ -410,10 +420,10 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
     mdl_type: EnumProperty(
         name="Type",
-        description="Leeds MDL model class to export",
+        description="Leeds MDL serialized layout to export (not the runtime CBaseModelInfo class)",
         items=(
-            ("SIM", "SimpleModel", "Prop or simple Atomic model"),
-            ("PED", "PedModel", "Skinned pedestrian or actor Clump"),
+            ("SIM", "Atomic / Simple layout", "Prop/simple Atomic-oriented MDL serialization"),
+            ("PED", "Skinned Clump / Ped layout", "Skinned pedestrian/actor Clump serialization"),
         ),
         default="SIM",
     )
@@ -452,6 +462,17 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         options={"HIDDEN"},
     )
 
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        col = layout.column(align=True)
+        col.prop(self, "platform")
+        col.prop(self, "export_game")
+        col.prop(self, "mdl_type")
+        col.prop(self, "use_normals")
+
     def invoke(self, context, event):
         from ..ops import mdl_exporter
 
@@ -471,6 +492,15 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     self.export_game = str(root.bleeds_model_game or self.export_game)
                 elif "bleeds_model_game" in root:
                     self.export_game = str(root.get("bleeds_model_game", self.export_game))
+        except Exception:
+            pass
+
+        try:
+            if root is not None:
+                if hasattr(root, "bleeds_mdl_platform"):
+                    self.platform = str(root.bleeds_mdl_platform or self.platform)
+                elif "bleeds_mdl_platform" in root:
+                    self.platform = str(root.get("bleeds_mdl_platform", self.platform))
         except Exception:
             pass
 
@@ -508,6 +538,20 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
             use_normals = bool(use_normals or root_use_normals)
 
         try:
+            root = mdl_exporter.find_mdl_root(context)
+            if root is not None:
+                try:
+                    root.bleeds_mdl_platform = self.platform
+                except Exception:
+                    pass
+                try:
+                    root["bleeds_mdl_platform"] = self.platform
+                except Exception:
+                    pass
+
+            if self.platform == "PSP":
+                raise RuntimeError("PSP MDL serialization is not implemented by the current BLeeds writer; choose PlayStation 2 for MDL export.")
+
             mdl_exporter.export_stories_mdl_ps2(
                 context=context,
                 filepath=self.filepath,

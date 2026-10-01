@@ -15,12 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.1.0"
+__version__ = "1.5.1"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 1, 0),
+    "version": (1, 5, 1),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Rockstar Leeds import/export tools for Blender 2.90 and newer",
@@ -77,12 +77,11 @@ def get_file_export_menu_type():
 
 
 def append_menu_callback(menu_type, draw_function):
-    if menu_type is None or draw_function is None:
-        return
-    try:
-        menu_type.append(draw_function)
-    except Exception:
-        pass
+    if menu_type is None:
+        raise RuntimeError("BLeeds could not find Blender's File menu type")
+    if draw_function is None:
+        raise RuntimeError("BLeeds menu callback is missing")
+    menu_type.append(draw_function)
 
 
 def remove_menu_callback(menu_type, draw_function):
@@ -90,7 +89,7 @@ def remove_menu_callback(menu_type, draw_function):
         return
     try:
         menu_type.remove(draw_function)
-    except Exception:
+    except (RuntimeError, ValueError):
         pass
 
 
@@ -489,7 +488,7 @@ def get_bleeds_type_owner(obj):
     return obj
 
 
-def infer_bleeds_entity_type(obj):
+def determine_bleeds_entity_type(obj):
     if obj is None:
         return "UNKNOWN"
 
@@ -537,7 +536,10 @@ from .gui import gui
 
 _classes = [
     gui.IMPORT_OT_Stories_mdl,
+    gui.IMPORT_OT_BLeeds_DFF,
+    gui.EXPORT_OT_BLeeds_DFF,
     gui.IMPORT_SCENE_OT_leeds_anim,
+    gui.IMPORT_SCENE_OT_bleeds_manhunt_ifp,
     gui.DATA_PT_leeds_anim_bone_id,
     gui.IMPORT_OT_COL2,
     gui.EXPORT_OT_COL2,
@@ -646,13 +648,13 @@ def register_bleeds_mdl_object_props():
 
     if not hasattr(bpy.types.Object, "bleeds_mdl_type"):
         bpy.types.Object.bleeds_mdl_type = EnumProperty(
-            name="MDL Type",
-            description="Leeds MDL model class",
+            name="MDL Layout",
+            description="Serialized Leeds MDL layout; runtime model-info class is tracked separately",
             items=[
-                ("SIM", "SimpleModel", "Prop or simple model"),
-                ("PED", "PedModel", "Pedestrian or skinned actor model"),
-                ("CUT", "CutsceneModel", "Cutscene actor model"),
-                ("VEH", "VehModel", "Vehicle model"),
+                ("SIM", "Atomic / Simple layout", "Prop/simple Atomic-oriented serialization"),
+                ("PED", "Skinned Clump / Ped layout", "Skinned pedestrian/actor Clump serialization"),
+                ("CUT", "Actor Clump layout", "Actor/cutscene Clump serialization; cutscene is usage rather than a runtime model class"),
+                ("VEH", "Vehicle Clump layout", "Vehicle-oriented Clump serialization"),
             ],
             default="SIM",
         )
@@ -723,18 +725,54 @@ def unregister_bleeds_mdl_object_props():
             delattr(bpy.types.Object, prop_name)
 
 def register():
-    register_bleeds_mdl_object_props()
-    register_lvz_img_progress_properties()
+    registered_classes = []
+    import_menu = get_file_import_menu_type()
+    export_menu = get_file_export_menu_type()
+    import_hooked = False
+    export_hooked = False
 
-    for cls in _classes:
-        register_class(cls)
+    try:
+        register_bleeds_mdl_object_props()
+        register_lvz_img_progress_properties()
 
-    bpy.types.Object.cw_instance = bpy.props.PointerProperty(
-        type=gui.CW_InstanceProps
-    )
+        for cls in _classes:
+            register_class(cls)
+            registered_classes.append(cls)
 
-    append_menu_callback(get_file_import_menu_type(), gui.cw_menu_import)
-    append_menu_callback(get_file_export_menu_type(), gui.cw_menu_export)
+        bpy.types.Object.cw_instance = bpy.props.PointerProperty(
+            type=gui.CW_InstanceProps
+        )
+
+        append_menu_callback(import_menu, gui.cw_menu_import)
+        import_hooked = True
+        append_menu_callback(export_menu, gui.cw_menu_export)
+        export_hooked = True
+
+        # Do not claim success unless Blender can resolve the registered menu classes.
+        if not hasattr(bpy.types, gui.TOPBAR_MT_file_import_bleeds.bl_idname):
+            raise RuntimeError("BLeeds import menu class was not registered")
+        if not hasattr(bpy.types, gui.CW_MT_ExportChoice.bl_idname):
+            raise RuntimeError("BLeeds export menu class was not registered")
+
+        print("BLeeds 1.5.1 registered successfully: classes=%d, import_menu=yes, export_menu=yes" % len(registered_classes))
+
+    except Exception as exc:
+        # Roll back partial registration so Blender never gets stuck in a ghost-enabled state.
+        if export_hooked:
+            remove_menu_callback(export_menu, gui.cw_menu_export)
+        if import_hooked:
+            remove_menu_callback(import_menu, gui.cw_menu_import)
+        if hasattr(bpy.types.Object, "cw_instance"):
+            del bpy.types.Object.cw_instance
+        for cls in reversed(registered_classes):
+            try:
+                unregister_class(cls)
+            except Exception:
+                pass
+        unregister_bleeds_mdl_object_props()
+        unregister_lvz_img_progress_properties()
+        print("BLeeds 1.5.1 registration FAILED: %s" % exc)
+        raise
 
 def unregister():
     remove_menu_callback(get_file_import_menu_type(), gui.cw_menu_import)

@@ -401,6 +401,93 @@ class Ps2TexHeader:
     def height(self) -> int:
         return 1 << self.height_pow2 if self.height_pow2 < 32 else 0
 
+def decode_ps2_runtime_flags(flags: int) -> Optional[Tuple[int, int, int, int, int, int]]:
+    width_pow2 = int(flags) & 0x3F
+    height_pow2 = (int(flags) >> 6) & 0x3F
+    bpp = (int(flags) >> 12) & 0x3F
+    unknown_bits = (int(flags) >> 18) & 0x03
+    mip_count = (int(flags) >> 20) & 0x0F
+    swizzle_mask = (int(flags) >> 24) & 0xFF
+    if width_pow2 >= 13 or height_pow2 >= 13 or bpp not in (4, 8, 16, 32):
+        return None
+    width = 1 << width_pow2
+    height = 1 << height_pow2
+    if width <= 0 or height <= 0 or width > 4096 or height > 4096:
+        return None
+    return width, height, bpp, mip_count, swizzle_mask, unknown_bits
+
+
+def validate_ps2_stories_runtime_container(data: bytes) -> Tuple[bool, List[str]]:
+    messages: List[str] = []
+    if len(data) < 0x24 or data[:3] != b"xet":
+        return True, messages
+    if read_u32(data, 0x20) != 0x00008606:
+        return True, messages
+
+    if len(data) < 0x50:
+        return False, ["PS2 Stories XTX is missing the retail 0x50-byte runtime preface"]
+
+    expected_preface = (0x00000001, 0x0012FD70, 0x000003B5, 0x0012FDB8)
+    actual_preface = tuple(read_u32(data, 0x30 + index * 4) for index in range(4))
+    if actual_preface != expected_preface:
+        messages.append(
+            "PS2 Stories XTX runtime preface differs from retail: "
+            + ", ".join(f"0x{value:08X}" for value in actual_preface)
+        )
+
+    first_slot = read_u32(data, 0x28)
+    current_slot = first_slot
+    visited = set()
+    node_offsets: List[int] = []
+    header_offsets: List[int] = []
+    raster_offsets: List[int] = []
+
+    for texture_index in range(4096):
+        if current_slot == 0x28:
+            break
+        if current_slot in visited:
+            messages.append(f"PS2 Stories XTX linked-list cycle at slot 0x{current_slot:X}")
+            break
+        visited.add(current_slot)
+        if current_slot < 8:
+            messages.append(f"PS2 Stories XTX invalid slot pointer 0x{current_slot:X}")
+            break
+        base = current_slot - 8
+        if base < 0x50 or base + 0x50 > len(data):
+            messages.append(f"PS2 Stories XTX node 0x{base:X} is outside the runtime object range")
+            break
+
+        header_offset = read_u32(data, base + 0x00)
+        next_slot = read_u32(data, base + 0x08)
+        if header_offset < 0x50 or header_offset + 16 > len(data):
+            messages.append(f"PS2 Stories XTX texture {texture_index} header 0x{header_offset:X} is invalid")
+            break
+
+        raster_offset = read_u32(data, header_offset + 0x08)
+        raw_flags = read_u32(data, header_offset + 0x0C)
+        runtime_fields = decode_ps2_runtime_flags(raw_flags)
+        if runtime_fields is None:
+            messages.append(
+                f"PS2 Stories XTX texture {texture_index} uses editor-canonical flags 0x{raw_flags:08X}; "
+                "the game expects the serialized Leeds PS2 runtime bit layout"
+            )
+        if raster_offset < 0x50 or raster_offset >= len(data):
+            messages.append(f"PS2 Stories XTX texture {texture_index} raster 0x{raster_offset:X} overlaps/outside the runtime preface")
+
+        node_offsets.append(base)
+        header_offsets.append(header_offset)
+        raster_offsets.append(raster_offset)
+        current_slot = next_slot
+
+    if node_offsets and header_offsets and raster_offsets:
+        if max(raster_offsets) >= min(node_offsets):
+            messages.append("PS2 Stories XTX runtime ordering is not raster data -> linked nodes -> texture headers")
+        if max(node_offsets) >= min(header_offsets):
+            messages.append("PS2 Stories XTX linked nodes overlap or follow the texture-header block")
+
+    return len(messages) == 0, messages
+
+
 def parse_psp_header(data: bytes, offset: int) -> Optional[PspTexHeader]:
 
     if offset <= 0 or offset + 16 > len(data):

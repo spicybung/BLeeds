@@ -82,6 +82,10 @@ class CW_MT_ExportChoice(Menu):
             text="R* Leeds: Model (.mdl)",
         )
         layout.operator(
+            "export_scene.bleeds_dff",
+            text="R* Studios: DFF (.dff)",
+        )
+        layout.operator(
             "export_scene.leeds_lvz_img",
             text="R* Leeds: LeVelZlib IMG Archive (.lvz + .img)",
         )
@@ -100,6 +104,14 @@ class TOPBAR_MT_file_import_bleeds(Menu):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator(
+            "import_scene.bleeds_dff",
+            text="R* Studios: DFF (.dff)",
+        )
+        layout.operator(
+            "import_scene.bleeds_manhunt_ifp",
+            text="R* Studios: IFP (.ifp)",
+        )
         layout.operator(
             "import_scene.bleeds_stories_mdl",
             text="R* Leeds: Model (.mdl)",

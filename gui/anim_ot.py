@@ -13,8 +13,8 @@ from ..ops import anim_importer
 
 class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_anim"
-    bl_label = "Import R* Leeds ANIM"
-    bl_description = "Import animation data from a Rockstar Leeds ANIM file"
+    bl_label = "Import R* Leeds Stories ANIM"
+    bl_description = "Import GTA Stories animation data from a Rockstar Leeds .anim file; Manhunt uses the separate IFP importer"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".anim"
@@ -68,7 +68,12 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
             (
                 "MDL_REST_DELTA",
                 "Blender-Space Rest Delta",
-                "Default for imported BLeeds pedmodels. Treats decoded ANIM rotations as absolute MDL-local bone rotations, converts them to a rest-relative Blender matrix_basis, applies root rotation, and locks root translation unless enabled.",
+                "Default for imported BLeeds pedmodels. Weapon/body clips automatically use their first authored key as the Leeds reference pose; other clips use the imported MDL rest-local conversion.",
+            ),
+            (
+                "ANIM_FIRST_KEY_DELTA",
+                "Leeds First-Key Reference Delta",
+                "Treat each track's first key as its authored Leeds local reference pose and apply subsequent motion as a Blender-rest-relative delta. This is selected automatically for Stories weapon/body PED clips.",
             ),
             (
                 "PLR_REST_ROTATION_DELTA",
@@ -187,6 +192,18 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
 
         entry = anim_file.animations[self.animation_index]
         selected_armature = anim_importer.findSelectedArmature(context)
+        if self.apply_to_selected_armature and selected_armature is not None:
+            try:
+                selected_game = str(selected_armature.get("bleeds_model_game", "") or "").upper().strip()
+            except Exception:
+                selected_game = ""
+            if selected_game in {"MH2", "MANHUNT_2", "MH1", "MANHUNT", "MANHUNT_1"}:
+                self.report(
+                    {"ERROR"},
+                    "Stories .anim is not a Manhunt animation container. Use R* Manhunt: Animation IFP (.ifp) for this armature.",
+                )
+                return {"CANCELLED"}
+
         mapping_lines: List[str] = []
         mapped_count = 0
         keyed_count = 0
@@ -253,7 +270,7 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
         return {"FINISHED"}
 
 class DATA_PT_leeds_anim_bone_id(Panel):
-    bl_label = "BLeeds ANIM Bone Mapping"
+    bl_label = "BLeeds Animation Bone Mapping"
     bl_idname = "DATA_PT_leeds_anim_bone_id"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
@@ -266,11 +283,11 @@ class DATA_PT_leeds_anim_bone_id(Panel):
     def draw(self, context):
         layout = self.layout
         bone = context.bone
-        layout.label(text="ANIM import checks these imported IDs first:")
+        layout.label(text="ANIM / IFP import checks these IDs first:")
         layout.label(text=f"BoneID: {bone.get('BoneID', 'not set')}")
         layout.label(text=f"bleeds_hanim_bone_id: {bone.get('bleeds_hanim_bone_id', 'not set')}")
         layout.label(text=f"bleeds_anim_bone_id: {bone.get('bleeds_anim_bone_id', 'not set')}")
         layout.label(text=f"node_index: {bone.get('node_index', 'not set')}")
         layout.label(text=f"bleeds_mdl_hierarchy_node_index: {bone.get('bleeds_mdl_hierarchy_node_index', 'not set')}")
         layout.separator()
-        layout.label(text="Hash-keyed weapon anims bridge through canonical HAnim IDs.")
+        layout.label(text="Stories uses hash/direct IDs; Manhunt IFP uses MH2 Animation BoneID.")

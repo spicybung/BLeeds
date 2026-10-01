@@ -92,11 +92,11 @@ commonBoneNamesVCS: Tuple[str, ...] = (
 )
 
 kamBoneIDVCS: Tuple[int, ...] = (
-    0, 1, 2, 3, 4, 5,
-    8, 31, 32, 33, 34, 35,
-    21, 22, 23, 24, 25, 41,
-    42, 43, 2000, 51, 52, 53,
-    2001
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+    0x06, 0x1F, 0x20, 0x21, 0x22, 0x23,
+    0x15, 0x16, 0x17, 0x18, 0x19, 0x29,
+    0x2A, 0x2B, 0xFF, 0x33, 0x34, 0x35,
+    0xFF
 )
 
 kamFrameNameVCS: Tuple[str, ...] = (
@@ -108,7 +108,7 @@ kamFrameNameVCS: Tuple[str, ...] = (
 
 kamBoneTypeVCS: Tuple[int, ...] = (
     0, 0, 0, 2, 0, 2,
-    3, 2, 0, 0, 0, 1,
+    1, 2, 0, 0, 0, 1,
     0, 0, 0, 0, 1, 2,
     0, 0, 1, 0, 0, 0,
     1
@@ -117,7 +117,7 @@ kamBoneTypeVCS: Tuple[int, ...] = (
 kamBoneIndexVCS: Tuple[str, ...] = (
     "00", "01", "02", "03", "04", "05", "06", "07",
     "08", "09", "10", "11", "12", "13", "14", "15",
-    "16", "17", "18", "19", "20", "21", "22", "23"
+    "16", "17", "18", "19", "20", "21", "22", "23", "24"
 )
 
 commonBoneParentsVCS: Dict[str, str] = {
@@ -231,7 +231,7 @@ DIRECT_ID_NAME_HINTS: Dict[int, Tuple[str, ...]] = {
     51: ("r_thigh", "right_thigh", "thigh_r", "RightThigh", "Bip01 R Thigh", "bip01 r thigh", "right thigh"),
     52: ("r_calf", "right_calf", "calf_r", "shin_r", "RightCalf", "Bip01 R Calf", "bip01 r calf", "right calf", "right shin"),
     53: ("r_foot", "right_foot", "foot_r", "RightFoot", "Bip01 R Foot", "bip01 r foot", "right foot"),
-    255: ("jaw", "Jaw", "Bip01 Jaw", "bip01 jaw"),
+    8: ("jaw", "Jaw", "Bip01 Jaw", "bip01 jaw"),
 }
 
 def normalizeAnimBoneName(name: str) -> str:

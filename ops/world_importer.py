@@ -74,7 +74,7 @@ def classify_entries(entries: list) -> None:
             e.note = "tex_ref"
         else:
             e.kind = "MDL"
-            e.note = "mdl_or_other"
+            e.note = "embedded_render_resource_candidate"
             e.mdl_info = None
 
 def decode_textures_for_entries(data: bytes, header: world.WorldHeader, entries: list, stem: str) -> None:
@@ -180,9 +180,98 @@ def build_mdl_objects(entries: list, resources: list, stem: str, collection: bpy
             total += 1
     world.dbg(f"[mdl] created {total} objects in collection '{collection.name}'")
 
-def build_mdl_geometry(entries: list, data: bytes, stem: str, collection: bpy.types.Collection = None) -> None:
+def _sanitize_blender_name(value: str) -> str:
+    value = str(value).replace("\\", "_").replace("/", "_").strip()
+    return value or "WorldSector"
+
+
+def _create_wrld_resource_collection(
+    stem: str,
+    entry,
+    parent_collection: bpy.types.Collection,
+) -> bpy.types.Collection:
+    name = f"{_sanitize_blender_name(stem)} Resource {int(entry.table_index):03d} [ID {int(entry.res_id)}]"
+    collection = bpy.data.collections.new(name)
+    parent_collection.children.link(collection)
+    collection["blds_kind"] = "PS2_WRLD_RESOURCE"
+    collection["blds_wrld_resource_index"] = int(entry.table_index)
+    collection["blds_wrld_resource_id"] = int(entry.res_id)
+    collection["blds_wrld_resource_offset"] = int(entry.offset)
+    collection["blds_wrld_resource_length"] = int(entry.length)
+    collection["blds_wrld_resource_record_kind"] = str(entry.kind)
+    collection["blds_wrld_resource_note"] = str(getattr(entry, "note", ""))
+    return collection
+
+
+def _stamp_wrld_resource_object(obj, entry, source_path: str, header, ext) -> None:
+    obj["blds_kind"] = "PS2_WRLD_RENDER_RESOURCE"
+    obj["blds_source"] = str(source_path)
+    obj["blds_platform"] = "PS2"
+    obj["blds_world_level_format"] = "WRLD"
+    obj["blds_wrld_resource_index"] = int(entry.table_index)
+    obj["blds_wrld_resource_id"] = int(entry.res_id)
+    obj["blds_wrld_resource_offset"] = int(entry.offset)
+    obj["blds_wrld_resource_length"] = int(entry.length)
+    obj["blds_wrld_resource_end"] = int(entry.offset + entry.length)
+    obj["blds_wrld_type"] = int(header.wrld_type)
+    obj["blds_wrld_continuation"] = int(header.continuation)
+    obj["blds_wrld_resource_table"] = int(ext.res_table_addr)
+    obj["blds_wrld_resource_count"] = int(ext.res_count)
+    obj["blds_wrld_serialized_layout"] = "WRLD_EMBEDDED_RENDER_RESOURCE"
+    obj["blds_wrld_format_note"] = (
+        "WRLD resource-table entry containing render geometry; this is a serialized world resource, "
+        "not a CModelInfo runtime class and not necessarily a standalone .MDL file."
+    )
+
+
+def _validate_wrld_layout(data: bytes, header, ext, entries: list) -> List[str]:
+    issues: List[str] = []
+    size = len(data)
+    if size < 0x28:
+        issues.append(f"file is only {size} bytes; WRLD header/extended header is truncated")
+        return issues
+    if header.total_size not in (0, size):
+        issues.append(
+            f"header total_size={header.total_size} differs from physical file size={size}; preserving physical bounds"
+        )
+    if not (0 <= ext.res_table_addr < size):
+        issues.append(f"resource table address 0x{ext.res_table_addr:08X} is outside the file")
+    elif ext.res_table_addr + int(ext.res_count) * 8 > size:
+        issues.append(
+            f"resource table claims {ext.res_count} rows but extends past EOF; parser will retain only complete rows"
+        )
+    seen_offsets = {}
+    for entry in entries:
+        if entry.offset < 0 or entry.offset >= size:
+            issues.append(
+                f"resource index {entry.table_index} id={entry.res_id} starts outside file at 0x{entry.offset:08X}"
+            )
+            continue
+        if entry.offset + entry.length > size:
+            issues.append(
+                f"resource index {entry.table_index} id={entry.res_id} overruns EOF"
+            )
+        other = seen_offsets.get(entry.offset)
+        if other is not None:
+            issues.append(
+                f"resource indices {other} and {entry.table_index} share offset 0x{entry.offset:08X}; treated as aliases"
+            )
+        else:
+            seen_offsets[entry.offset] = entry.table_index
+    return issues
+
+
+def build_mdl_geometry(
+    entries: list,
+    data: bytes,
+    stem: str,
+    collection: bpy.types.Collection = None,
+    source_path: str = "",
+    header=None,
+    ext=None,
+) -> None:
     if collection is None:
-        collection = get_or_create_collection(f"WRLD_GEO_{stem}")
+        collection = get_or_create_collection(f"{_sanitize_blender_name(stem)} [WRLD Render Resources]")
 
     mat_map: Dict[int, bpy.types.Material] = {e.res_id: e.material for e in entries if getattr(e, 'material', None) is not None}
     total = 0
@@ -215,7 +304,8 @@ def build_mdl_geometry(entries: list, data: bytes, stem: str, collection: bpy.ty
             "faces": 0,
         }
         if obj is not None:
-            collection.objects.link(obj)
+            resource_collection = _create_wrld_resource_collection(stem, e, collection)
+            resource_collection.objects.link(obj)
             total += 1
             mdl_stat["verts"] = len(obj.data.vertices)
             mdl_stat["faces"] = len(obj.data.polygons)
@@ -224,6 +314,13 @@ def build_mdl_geometry(entries: list, data: bytes, stem: str, collection: bpy.ty
             obj["wrld_mscals"] = int(mscal_count)
             obj["wrld_materials"] = mlist.count
             obj["wrld_tri_strip_groups"] = len(groups)
+            obj["wrld_resource_table_index"] = int(e.table_index)
+            obj["wrld_resource_offset"] = int(e.offset)
+            obj["wrld_resource_length"] = int(e.length)
+            if header is not None and ext is not None:
+                _stamp_wrld_resource_object(obj, e, source_path, header, ext)
+            obj.name = f"{_sanitize_blender_name(stem)} Resource {int(e.table_index):03d} Geometry"
+            obj.data.name = obj.name
         if e.mdl_info is None:
             e.mdl_info = {}
         e.mdl_info.update(mdl_stat)
@@ -740,7 +837,25 @@ def _import_wrld(path: str, decode_textures: bool = True, write_log: bool = True
     ext = world.parse_extended_header(data)
     entries = world.parse_resource_table(data, header, ext)
     classify_entries(entries)
-    stem = Path(path).stem
+    stem = _source_stem(path)
+    validation_issues = _validate_wrld_layout(data, header, ext, entries)
+
+    root, objects_collection, collision_collection = _new_world_level_collections(stem)
+    root["blds_kind"] = "PS2_WRLD_WORLD_LEVEL"
+    root["blds_source"] = str(path)
+    root["blds_platform"] = "PS2"
+    root["blds_world_level_format"] = "WRLD"
+    root["blds_wrld_type"] = int(header.wrld_type)
+    root["blds_wrld_total_size"] = int(header.total_size)
+    root["blds_wrld_resource_table"] = int(ext.res_table_addr)
+    root["blds_wrld_resource_count"] = int(ext.res_count)
+    root["blds_wrld_continuation"] = int(header.continuation)
+    root["blds_wrld_format_note"] = (
+        "WRLD is a streamed world-level container. Resource-table entries are kept as world resources; "
+        "they are not labelled as runtime CModelInfo classes."
+    )
+    objects_collection.name = f"{stem} Render Resources"
+    collision_collection.name = f"{stem} Collision / Auxiliary"
 
     if decode_textures:
         decode_textures_for_entries(data, header, entries, stem)
@@ -749,7 +864,15 @@ def _import_wrld(path: str, decode_textures: bool = True, write_log: bool = True
 
     if build_models:
         try:
-            build_mdl_geometry(entries, data, stem)
+            build_mdl_geometry(
+                entries,
+                data,
+                stem,
+                collection=objects_collection,
+                source_path=path,
+                header=header,
+                ext=ext,
+            )
         except Exception as ex:
             world.dbg(f"[mdl] error while building MDL geometry: {ex}")
 
@@ -764,7 +887,13 @@ def _import_wrld(path: str, decode_textures: bool = True, write_log: bool = True
         f"[wrld] res_table=0x{ext.res_table_addr:08X} rows={ext.res_count} unk={ext.unknown_count}"
     )
     lines.append("[wrld] sky_offsets=" + ", ".join(f"0x{off:08X}" for off in ext.sky_offsets))
-    lines.append(f"[res] parsed {len(entries)} raw entries from table")
+    lines.append(f"[res] parsed {len(entries)} resource-table entries")
+    lines.append(
+        "[format] WRLD resource entries describe serialized world resources; "
+        "MDL-like geometry decoding does not imply a standalone MDL asset or CModelInfo subclass"
+    )
+    for issue in validation_issues:
+        lines.append(f"[wrld-validation] {issue}")
     for e in entries:
         lines.append(
             f"[res] idx={e.table_index:02d} id={e.res_id} off=0x{e.offset:08X} len={e.length} "
@@ -783,7 +912,7 @@ def _import_wrld(path: str, decode_textures: bool = True, write_log: bool = True
             lines.append(detail)
         else:
             lines.append(
-                f"[res] idx={e.table_index:02d} id={e.res_id} MDL "
+                f"[res] idx={e.table_index:02d} id={e.res_id} RENDER_RESOURCE "
                 f"a16={e.a16} b16={e.b16} a32=0x{e.a32:08X} b32=0x{e.b32:08X}"
             )
             info = e.mdl_info or {}

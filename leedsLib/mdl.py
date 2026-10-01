@@ -106,6 +106,15 @@ class StripSkinData:
 class StripMeta:
     base_vertex_index: int
     vertex_count: int
+    dma_vertex_count: int = 0
+    culling_disabled: bool = False
+    source_offset: int = 0
+    vif_destination: int = 0
+    adc_flags: List[bool] = field(default_factory=list)
+    vif_commands: List[Dict[str, int]] = field(default_factory=list)
+    batch_index: int = 0
+    overlap_vertex_count: int = 0
+    continues_previous_strip: bool = False
     skin_indices: List[List[int]] = field(default_factory=list)
     skin_weights: List[List[float]] = field(default_factory=list)
     skin_raw_dwords: List[List[int]] = field(default_factory=list)
@@ -118,6 +127,7 @@ class StoriesPartGeom:
     strips_meta: List[StripMeta] = field(default_factory=list)
     vertex_colors: List[Any] = field(default_factory=list)
     loop_colors: List[Any] = field(default_factory=list)
+    normals: List[Tuple[float, float, float]] = field(default_factory=list)
     material_id: int = 0
     uv_scale: Tuple[float, float] = (1.0, 1.0)
     geom_flags: int = 0
@@ -224,6 +234,10 @@ class StoriesMDLContext:
     filepath: str
     platform: str
     mdl_type: str
+    game: str = "AUTO"
+    serialized_layout: str = "UNKNOWN"
+    runtime_model_info_hint: str = "UNKNOWN"
+    model_usage_hint: str = "UNKNOWN"
     shrink: int = 0
     file_len: int = 0
     local_num_table: int = 0
@@ -237,6 +251,8 @@ class StoriesMDLContext:
     clump_first_atomic_ptr: int = 0
     clump_last_atomic_ptr: int = 0
     inline_clump_header: bool = False
+    prototype_psp_layout: bool = False
+    prototype_psp_geometry_header: int = 0
     section_type: int = 0
     import_type: int = 0
     actor_mdl: bool = False
@@ -273,6 +289,23 @@ def read_i32(f) -> int:
 
 def read_u32(f) -> int:
     return struct.unpack("<I", f.read(4))[0]
+
+def decodeVifNum(raw_num: int) -> int:
+    value = int(raw_num) & 0xFF
+    return 256 if value == 0 else value
+
+def expandPs2Color5To8(value: int) -> int:
+    component = int(value) & 0x1F
+    return (component * 255) // 0x1F
+
+def decodePs2PackedColor1555(value: int) -> Tuple[int, int, int, int]:
+    packed = int(value) & 0xFFFF
+    return (
+        expandPs2Color5To8(packed),
+        expandPs2Color5To8(packed >> 5),
+        expandPs2Color5To8(packed >> 10),
+        255 if (packed & 0x8000) else 0,
+    )
 
 def read_bu32(f) -> int:
     return struct.unpack(">I", f.read(4))[0]
@@ -1303,6 +1336,8 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
             f"\n🔄 Reading geometry dmaOffset {part_index + 1}/{len(part_offsets)} (Offset: 0x{part_addr:X})"
         )
 
+        strip_batch_index = 0
+        part_vif_decoder = Ps2VifStreamDecoder()
         while f.tell() < next_part_addr:
             marker_seek = f.tell()
             ctx.log(f"🔎 Looking for triangle strip marker at offset: 0x{marker_seek:X}")
@@ -1323,51 +1358,30 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     f"✔ 0x6C018000 split flag found at 0x{split_flag_offset:X} -- reading split section header..."
                 )
 
-                zeros1_offset = f.tell()
-                zeros1 = f.read(4)
+                split_zero0 = read_u32(f)
+                split_zero1 = read_u32(f)
+                vert_count1_word = read_u32(f)
+                flags_word = read_u32(f)
+                vert_count1 = int(vert_count1_word & 0xFF)
+                vert_count2 = int(flags_word & 0xFF)
+                vert_count_dma = int(flags_word & 0x7FFF)
+                culling_disabled = bool(flags_word & 0x8000)
+
+                stmask_word = read_u32(f)
+                stmask_value = read_u32(f)
+                strow_word = read_u32(f)
+                strow_values = [read_u32(f), read_u32(f), read_u32(f), read_u32(f)]
+
                 ctx.log(
-                    f"  [0x{zeros1_offset:X}] zeros1: {zeros1.hex()} (should be 00 00 00 00)"
+                    f"  payload: zero0=0x{split_zero0:08X}, zero1=0x{split_zero1:08X}, "
+                    f"count0={vert_count1}, count1={vert_count2}, flags=0x{flags_word:08X}"
                 )
-                zeros2_offset = f.tell()
-                zeros2 = f.read(4)
                 ctx.log(
-                    f"  [0x{zeros2_offset:X}] zeros2: {zeros2.hex()} (should be 00 00 00 00)"
+                    f"  VIF state: STMASK=0x{stmask_word:08X}/0x{stmask_value:08X}, "
+                    f"STROW=0x{strow_word:08X}, rows={strow_values}"
                 )
-
-                vert_count1_offset = f.tell()
-                vert_count1 = read_u8(f)
-                ctx.log(f"  [0x{vert_count1_offset:X}] vert_count1: {vert_count1}")
-                pad3_offset = f.tell()
-                pad3 = f.read(3)
-                ctx.log(
-                    f"  [0x{pad3_offset:X}] pad3: {pad3.hex()} (should be 00 00 00)"
-                )
-
-                vert_count2_offset = f.tell()
-                vert_count2 = read_u8(f)
-                ctx.log(f"  [0x{vert_count2_offset:X}] vert_count2: {vert_count2}")
-
-                flags_offset = f.tell()
-                flags = read_u16(f)
-                vert_count_dma = flags & 0x7FFF
-                culling_disabled = bool(flags & 0x8000)
-                ctx.log(f"  [0x{flags_offset:X}] flags: 0x{flags:04X}")
-                ctx.log(f"     - vert_count_dma (flags & 0x7FFF): {vert_count_dma}")
-                ctx.log(f"     - culling_disabled (flags & 0x8000): {culling_disabled}")
-
-                pad4_offset = f.tell()
-                pad4 = f.read(4)
-                ctx.log(f"  [0x{pad4_offset:X}] pad4: {pad4.hex()}")
-
-                tech1_offset = f.tell()
-                tech1 = f.read(4)
-                ctx.log(
-                    f"  [0x{tech1_offset:X}] tech1: {tech1.hex()} (typically 40404020)"
-                )
-
-                tech2_offset = f.tell()
-                tech2 = f.read(4)
-                ctx.log(f"  [0x{tech2_offset:X}] tech2: {tech2.hex()}")
+                ctx.log(f"     - vert_count_dma: {vert_count_dma}")
+                ctx.log(f"     - culling_disabled: {culling_disabled}")
 
                 f.seek(marker_seek)
 
@@ -1399,6 +1413,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                 ctx.log(
                     f"      Checked tri-strip marker 0x{marker:08X} at 0x{skip_offset:X}"
                 )
+                marker_seek = skip_offset
 
             if (marker & 0x60000000) != 0x60000000:
                 ctx.log(f"✗ No valid strip marker found, breaking out at offset 0x{f.tell():X}")
@@ -1422,6 +1437,9 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
 
             split_segment_start = marker_seek
             is_ped_split_segment = (marker == 0x6C018000)
+            dma_vertex_count = 0
+            culling_disabled = False
+            vif_destination = 0
             if not is_ped_split_segment and (marker & 0x60000000) == 0x60000000:
                 try:
                     _saved_probe = f.tell()
@@ -1452,6 +1470,23 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
             )
 
             vertex_data_offset = f.tell()
+            try:
+                f.seek(vertex_data_offset - 4, 0)
+                position_unpack_word = read_u32(f)
+                if ((position_unpack_word >> 24) & 0x7F) == 0x79:
+                    vif_destination = int(position_unpack_word & 0x3FF)
+                f.seek(vertex_data_offset, 0)
+            except Exception:
+                f.seek(vertex_data_offset, 0)
+            if is_ped_split_segment:
+                try:
+                    f.seek(split_segment_start + 16, 0)
+                    split_count_word = read_u32(f)
+                    dma_vertex_count = int(split_count_word & 0xFF)
+                    culling_disabled = bool(split_count_word & 0x8000)
+                    f.seek(vertex_data_offset, 0)
+                except Exception:
+                    f.seek(vertex_data_offset, 0)
             ctx.log(
                 f"    🧊 Vertex data begins at file offset: 0x{vertex_data_offset:X} ({vertex_data_offset})"
             )
@@ -1503,6 +1538,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     part.faces.append((v0, v1, v2))
 
             ped_segment_parsed = False
+            vif_command_metadata: List[Dict[str, int]] = []
             if is_ped_split_segment:
 
                 try:
@@ -1551,8 +1587,8 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                         f.seek(uv_header_pos + 4, 0)
                         b0, b1, b2, b3 = uv_header[0], uv_header[1], uv_header[2], uv_header[3]
 
-                    cur_strip_tvert_count = int(b2)
-                    if cur_strip_tvert_count <= 0 or cur_strip_tvert_count > 0x80:
+                    cur_strip_tvert_count = decodeVifNum(b2)
+                    if cur_strip_tvert_count > 0x100:
                         ctx.log(
                             f"    ⚠ PED UV count b2={cur_strip_tvert_count} invalid; "
                             f"using curStripVertCount={cur_strip_vert_count}"
@@ -1577,48 +1613,58 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                         f.read(pad)
                         ctx.log(f"    🟦 PED padding after UVs: {pad} bytes")
 
-                    normal_header_pos = f.tell()
-                    normal_header = f.read(4)
-                    if len(normal_header) < 4:
-                        raise EOFError("short read while reading PED normal header")
-                    nb0, nb1, nb2, nb3 = normal_header[0], normal_header[1], normal_header[2], normal_header[3]
-                    if nb3 != 0x6A:
-                        raise ValueError(
-                            f"expected PED normal header 0x6A at 0x{normal_header_pos:X}, got {normal_header.hex()}"
-                        )
-                    normal_count = int(nb2)
-                    if normal_count <= 0 or normal_count > 0x80:
-                        normal_count = int(cur_strip_vert_count)
-                    ctx.log(
-                        f"   >> PED normal header: b1={nb1:02X}, count={normal_count}, "
-                        f"b3={nb3:02X} at 0x{normal_header_pos:X}"
-                    )
-                    norms: List[Tuple[float, float, float]] = []
-                    for i in range(normal_count):
-                        nx = read_i8(f) / 128.0
-                        ny = read_i8(f) / 128.0
-                        nz = read_i8(f) / 128.0
-                        norms.append((nx, ny, nz))
-                    pad = (4 - ((normal_count * 3) % 4)) % 4
-                    if pad:
-                        f.read(pad)
-                    if normal_count:
-                        if not hasattr(part, 'normals'):
-                            part.normals = []
-                        part.normals.extend(norms)
+                    attribute_header_pos = f.tell()
+                    attribute_header = f.read(4)
+                    if len(attribute_header) < 4:
+                        raise EOFError("short read while reading PED vertex attribute header")
 
-                    skin_header_pos = f.tell()
-                    skin_header = f.read(4)
-                    if len(skin_header) < 4:
-                        raise EOFError("short read while reading PED skin header")
+                    if attribute_header[3] == 0x6F:
+                        color_count = decodeVifNum(attribute_header[2])
+                        ctx.log(
+                            f"   >> PED color header: count={color_count} at 0x{attribute_header_pos:X}"
+                        )
+                        colors: List[Tuple[int, int, int, int]] = []
+                        for _ in range(color_count):
+                            colors.append(decodePs2PackedColor1555(read_u16(f)))
+                        color_pad = (4 - ((color_count * 2) % 4)) % 4
+                        if color_pad:
+                            f.read(color_pad)
+                        part.vertex_colors.extend(colors)
+                        attribute_header_pos = f.tell()
+                        attribute_header = f.read(4)
+                        if len(attribute_header) < 4:
+                            raise EOFError("short read after PED color stream")
+
+                    if attribute_header[3] == 0x6A:
+                        nb0, nb1, nb2, nb3 = attribute_header
+                        normal_count = decodeVifNum(nb2)
+                        ctx.log(
+                            f"   >> PED normal header: b1={nb1:02X}, count={normal_count}, "
+                            f"b3={nb3:02X} at 0x{attribute_header_pos:X}"
+                        )
+                        norms: List[Tuple[float, float, float]] = []
+                        for _ in range(normal_count):
+                            nx = read_i8(f) / 128.0
+                            ny = read_i8(f) / 128.0
+                            nz = read_i8(f) / 128.0
+                            norms.append((nx, ny, nz))
+                        normal_pad = (4 - ((normal_count * 3) % 4)) % 4
+                        if normal_pad:
+                            f.read(normal_pad)
+                        part.normals.extend(norms)
+                        attribute_header_pos = f.tell()
+                        attribute_header = f.read(4)
+                        if len(attribute_header) < 4:
+                            raise EOFError("short read after PED normal stream")
+
+                    skin_header_pos = attribute_header_pos
+                    skin_header = attribute_header
                     sb0, sb1, sb2, sb3 = skin_header[0], skin_header[1], skin_header[2], skin_header[3]
                     if sb3 != 0x6C:
                         raise ValueError(
                             f"expected PED skin header 0x6C at 0x{skin_header_pos:X}, got {skin_header.hex()}"
                         )
-                    skin_count = int(sb2)
-                    if skin_count <= 0 or skin_count > 0x80:
-                        skin_count = int(cur_strip_vert_count)
+                    skin_count = decodeVifNum(sb2)
                     ctx.log(
                         f"   >> PED skin header: b1={sb1:02X}, count={skin_count}, "
                         f"b3={sb3:02X} at 0x{skin_header_pos:X}"
@@ -1648,6 +1694,33 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                             f.seek(mscal_pos, 0)
                         else:
                             ctx.log(f"    ✔ PED MSCAL at 0x{mscal_pos:X}")
+
+                            segment_end = f.tell()
+                            saved_segment_pos = f.tell()
+                            try:
+                                f.seek(split_segment_start, 0)
+                                segment_bytes = f.read(segment_end - split_segment_start)
+                                records = part_vif_decoder.feed(segment_bytes, final=False)
+                                vif_command_metadata = [
+                                    {
+                                        "offset": int(record.stream_offset),
+                                        "word": int(record.word),
+                                        "command": int(record.command),
+                                        "num": int(record.num),
+                                        "immediate": int(record.immediate),
+                                        "payload_size": int(len(record.payload)),
+                                        "source_vector_count": int(record.source_vector_count),
+                                        "destination": int(record.destination),
+                                    }
+                                    for record in records
+                                ]
+                            except Exception as vif_decode_error:
+                                ctx.log(
+                                    f"    ⚠ Stateful VIF decode failed at 0x{split_segment_start:X}: {vif_decode_error}"
+                                )
+                                part_vif_decoder.reset()
+                            finally:
+                                f.seek(saved_segment_pos, 0)
 
                     rel_after_segment = (f.tell() - split_segment_start) % 16
                     if rel_after_segment:
@@ -1709,8 +1782,8 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                 f.seek(uv_header_pos + 4, 0)
                 b0, b1, b2, b3 = uv_header[0], uv_header[1], uv_header[2], uv_header[3]
 
-                cur_strip_tvert_count = int(b2)
-                if cur_strip_tvert_count <= 0 or cur_strip_tvert_count > 0x80:
+                cur_strip_tvert_count = decodeVifNum(b2)
+                if cur_strip_tvert_count > 0x100:
                     ctx.log(
                         f"    ⚠ UV count b2={cur_strip_tvert_count} looks invalid; using curStripVertCount={cur_strip_vert_count}"
                     )
@@ -1766,26 +1839,24 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                         break
 
                     if b1 == 0x80 and b3 in (0x6F, 0x6A, 0x6C):
-                        section_count = b2
+                        section_count = decodeVifNum(b2)
                         ctx.log(
                             f"   >> Subsection header: b1={b1:02X}, count={section_count}, b3={b3:02X} at 0x{subsection_pos:X}"
                         )
 
                         if b3 == 0x6F:
                             ctx.log(f"      🎨 Reading {section_count} vertex colors")
+                            colors: List[Tuple[int, int, int, int]] = []
                             for i in range(section_count):
                                 vcolor = read_u16(f)
-
-                                r = (vcolor & 0x1F) * (1.0 / 32.0)
-
-                                gcol = ((vcolor >> 5) & 0x1F) * (1.0 / 32.0)
-                                b = ((vcolor >> 10) & 0x1F) * (1.0 / 32.0)
-                                a = ((vcolor >> 15) & 0x01) * 1.0
+                                r, gcol, b, a = decodePs2PackedColor1555(vcolor)
+                                colors.append((r, gcol, b, a))
                                 ctx.log(
-                                    f"         R={r:.3f} G={gcol:.3f} B={b:.3f} A={a:.1f} (raw=0x{vcolor:04X})"
+                                    f"         R={r} G={gcol} B={b} A={a} (raw=0x{vcolor:04X})"
                                 )
-                            pad = 2 - ((2 * section_count) % 4)
-                            if pad != 4:
+                            part.vertex_colors.extend(colors)
+                            pad = (4 - ((2 * section_count) % 4)) % 4
+                            if pad:
                                 f.read(pad)
 
                         elif b3 == 0x6A:
@@ -1848,11 +1919,21 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
             strip_meta = StripMeta(
                 base_vertex_index=base_idx,
                 vertex_count=cur_strip_vert_count,
+                dma_vertex_count=dma_vertex_count or cur_strip_vert_count,
+                culling_disabled=culling_disabled,
+                source_offset=split_segment_start,
+                vif_destination=vif_destination,
+                adc_flags=[],
+                vif_commands=vif_command_metadata,
+                batch_index=strip_batch_index,
+                overlap_vertex_count=2 if strip_batch_index > 0 else 0,
+                continues_previous_strip=strip_batch_index > 0,
                 skin_indices=[list(lst) for lst in skin_indices],
                 skin_weights=[list(lst) for lst in skin_weights],
                 skin_raw_dwords=[list(lst) for lst in skin_raw_dwords],
             )
             part.strips_meta.append(strip_meta)
+            strip_batch_index += 1
             if not hasattr(part, 'skin_raw_dwords'):
                 part.skin_raw_dwords = []
             part.skin_raw_dwords.extend([list(lst) for lst in skin_raw_dwords])
@@ -2030,17 +2111,61 @@ def decodePspSkinInfluences(
     return bone_indices, bone_weights, raw_weights
 
 
+def find_prototype_psp_geometry_header(f, file_len: int) -> int:
+    known_flags = {0x120, 0x121, 0x115, 0x114, 0xA1, 0x1C321}
+    current = f.tell()
+    try:
+        scan_end = min(int(file_len or 0), 0x1000)
+        if scan_end < 0x48:
+            return 0
+        for offset in range(0x20, scan_end - 0x48 + 1, 4):
+            f.seek(offset, 0)
+            raw = f.read(0x48)
+            if len(raw) != 0x48:
+                break
+            try:
+                size, flags, num_strips = struct.unpack_from("<3I", raw, 0)
+                num_verts = struct.unpack_from("<i", raw, 0x2C)[0]
+                vertex_offset = struct.unpack_from("<I", raw, 0x40)[0]
+            except struct.error:
+                continue
+            if flags not in known_flags:
+                continue
+            if size < 0x48 or size > int(file_len or 0):
+                continue
+            if num_strips <= 0 or num_strips > 4096:
+                continue
+            if num_verts <= 0 or num_verts > 1000000:
+                continue
+            absolute_vertex_offset = int(offset) + int(vertex_offset)
+            if vertex_offset <= 0 or absolute_vertex_offset > int(file_len or 0):
+                continue
+            return int(offset)
+    finally:
+        f.seek(current, 0)
+    return 0
+
 def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeometryInfo:
     g = StoriesPSPGeometryInfo()
     ctx.log("Attempting PSP Stories MDL read...")
 
-    f.seek(geom_ptr)
-    geometry_struct_offset = f.tell()
+    prototype_header = int(getattr(ctx, "prototype_psp_geometry_header", 0) or 0)
+    if bool(getattr(ctx, "prototype_psp_layout", False)) and not prototype_header:
+        prototype_header = find_prototype_psp_geometry_header(f, int(getattr(ctx, "file_len", 0) or 0))
+        ctx.prototype_psp_geometry_header = int(prototype_header)
 
-    g.materials = read_material_list(ctx, f)
-
-    f.seek(12, 1)
-    psp_header_offset = f.tell()
+    if prototype_header:
+        geometry_struct_offset = max(0, prototype_header - 0x20)
+        g.materials = []
+        psp_header_offset = int(prototype_header)
+        f.seek(psp_header_offset, 0)
+        ctx.log(f"Prototype PSP geometry header detected directly at 0x{psp_header_offset:X}; material table is not assumed to use the retail wrapper.")
+    else:
+        f.seek(geom_ptr)
+        geometry_struct_offset = f.tell()
+        g.materials = read_material_list(ctx, f)
+        f.seek(12, 1)
+        psp_header_offset = f.tell()
 
     psp_header = f.read(0x48)
     if len(psp_header) != 0x48:
@@ -2406,12 +2531,29 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
     ctx.log("✔ All PSP geometry meshes have been parsed (no Blender objects created here).")
     return g
 
+def resolveStoriesGameFromFrameNames(frame_names: Dict[int, str]) -> str:
+    names = {canon_frame_name(str(name)) for name in (frame_names or {}).values() if str(name or "").strip()}
+    if not names:
+        return ""
+    lcs_names = {canon_frame_name(str(name)) for name in commonBoneNamesLCS}
+    vcs_names = {canon_frame_name(str(name)) for name in commonBoneNamesVCS}
+    lcs_only = lcs_names - vcs_names
+    vcs_only = vcs_names - lcs_names
+    lcs_hits = len(names & lcs_only)
+    vcs_hits = len(names & vcs_only)
+    if lcs_hits > vcs_hits and lcs_hits > 0:
+        return "LCS"
+    if vcs_hits > lcs_hits and vcs_hits > 0:
+        return "VCS"
+    return ""
+
 class read_stories:
 
-    def __init__(self, filepath: str, platform: str, mdl_type: str, print_debug_log: bool = False):
+    def __init__(self, filepath: str, platform: str, mdl_type: str, game: str = "AUTO", print_debug_log: bool = False):
         self.filepath = filepath
-        self.platform = platform
-        self.mdl_type = mdl_type
+        self.platform = str(platform or "AUTO").upper().strip()
+        self.mdl_type = str(mdl_type or "AUTO").upper().strip()
+        self.game = str(game or "AUTO").upper().strip()
         self.print_debug_log = bool(print_debug_log)
         self.ctx = None
 
@@ -2420,14 +2562,42 @@ class read_stories:
             filepath=self.filepath,
             platform=self.platform,
             mdl_type=self.mdl_type,
+            game=self.game,
             print_debug_log=self.print_debug_log,
         )
 
         filepath = self.filepath
         platform = self.platform
         mdl_type = self.mdl_type
+        game_hint = self.game
+        mdl_type_u = str(mdl_type or "AUTO").upper().strip()
+        layout_names = {
+            "SIM": "ATOMIC",
+            "PED": "SKINNED_CLUMP",
+            "CUT": "ACTOR_CLUMP",
+            "VEH": "VEHICLE_CLUMP",
+        }
+        runtime_classes = {
+            "SIM": "CSimpleModelInfo",
+            "PED": "CPedModelInfo",
+            "CUT": "CBaseModelInfo",
+            "VEH": "CVehicleModelInfo",
+        }
+        usages = {
+            "SIM": "WORLD_OBJECT",
+            "PED": "PED",
+            "CUT": "CUTSCENE_ACTOR",
+            "VEH": "VEHICLE",
+        }
+        ctx.serialized_layout = layout_names.get(mdl_type_u, "UNKNOWN")
+        ctx.runtime_model_info_hint = runtime_classes.get(mdl_type_u, "UNKNOWN")
+        ctx.model_usage_hint = usages.get(mdl_type_u, "UNKNOWN")
 
         with open(filepath, "rb") as f:
+            ctx.log(
+                f"MDL structure: game={ctx.game}, platform={ctx.platform}, layout={ctx.serialized_layout}, "
+                f"runtime_class={ctx.runtime_model_info_hint}, usage={ctx.model_usage_hint}"
+            )
             ctx.log(f"✔ Opened: {filepath}")
             if f.read(4) != b"ldm\x00":
                 ctx.log("Invalid Stories MDL header.")
@@ -2439,26 +2609,66 @@ class read_stories:
             ctx.global_num_table = read_u32(f)
 
             is_psp = platform == "PSP"
-            if is_psp:
-                ctx.log("Detected PSP MDL: Skipping 4 bytes after global_numTable.")
-                f.seek(-4, 1)
 
-            if ctx.global_num_table == (ctx.local_num_table + 4):
-                ctx.actor_mdl = True
-                ctx.log("✔ Ped/actor or prop MDL detected.")
+            # Early LCS Stories prototype/handheld MDLs use the normal Leeds relocation
+            # prefix but carry PSP-style geometry.  The archive samples consistently
+            # use allocMem=0x10000 at +0x1C and a valid top-level pointer at +0x20.
+            header_pos = f.tell()
+            raw_num_entries = read_u32(f)
+            raw_ptr2_before_tex = read_u32(f)
+            raw_allocated_memory = read_u32(f)
+            raw_top_level_ptr = read_u32(f)
+            prototype_top_identifier = 0
+            if 0 < raw_top_level_ptr < ctx.file_len - 4:
+                current_pos = f.tell()
+                try:
+                    f.seek(raw_top_level_ptr, 0)
+                    prototype_top_identifier = read_u32(f)
+                except Exception:
+                    prototype_top_identifier = 0
+                finally:
+                    f.seek(current_pos, 0)
+
+            ctx.prototype_psp_layout = bool(
+                is_psp
+                and ctx.shrink == 0
+                and raw_allocated_memory == 0x00010000
+                and prototype_top_identifier in {0x01050001, 0x01000001, 0x00000002}
+            )
+
+            if ctx.prototype_psp_layout:
+                ctx.num_entries = raw_num_entries
+                ctx.ptr2_before_tex = raw_ptr2_before_tex
+                ctx.allocated_memory = raw_allocated_memory
+                possible_ptr = raw_top_level_ptr
+                next_ptr_offset = 0x20
+                ctx.top_level_ptr = raw_top_level_ptr
+                ctx.game = "LCS" if game_hint in {"AUTO", "LCS"} else game_hint
+                ctx.log(
+                    f"Detected prototype PSP Leeds MDL header: top=0x{raw_top_level_ptr:X}, "
+                    f"identifier=0x{prototype_top_identifier:X}, allocMem=0x{raw_allocated_memory:X}."
+                )
             else:
-                f.seek(-4, 1)
-                ctx.num_entries = read_u32(f)
-                ctx.log("✔ Non-actor MDL detected: possibly a prop.")
+                f.seek(header_pos, 0)
                 if is_psp:
-                    f.seek(4, 1)
+                    ctx.log("Detected PSP MDL: using retail PSP relocation-prefix interpretation.")
+                    f.seek(-4, 1)
 
-            ctx.num_entries = read_u32(f)
-            ctx.ptr2_before_tex = read_u32(f)
-            ctx.allocated_memory = read_u32(f)
+                if ctx.global_num_table == (ctx.local_num_table + 4):
+                    ctx.actor_mdl = True
+                    ctx.log("✔ Relocation-table shape matches the actor/Clump-capable MDL family; runtime model-info class is not implied.")
+                else:
+                    f.seek(-4, 1)
+                    ctx.num_entries = read_u32(f)
+                    ctx.log("✔ Alternate relocation-table shape detected; treating model class and serialized layout independently.")
+                    if is_psp:
+                        f.seek(4, 1)
 
-            next_ptr_offset = f.tell()
-            possible_ptr = read_u32(f)
+                ctx.num_entries = read_u32(f)
+                ctx.ptr2_before_tex = read_u32(f)
+                ctx.allocated_memory = read_u32(f)
+                next_ptr_offset = f.tell()
+                possible_ptr = read_u32(f)
             if str(mdl_type or "").upper().strip() == "VEH" and next_ptr_offset == 0x20:
                 vehicle_header_pos = f.tell()
                 try:
@@ -2484,8 +2694,8 @@ class read_stories:
                 )
             ctx.log(f"Pointer after allocMem (offset 0x{next_ptr_offset:X}): 0x{possible_ptr:X}")
 
-            def is_known_vtable(val: int) -> bool:
-                KNOWN_VTABLES = {
+            def is_known_top_level_identifier(val: int) -> bool:
+                KNOWN_IDENTIFIERS = {
 
                     0x00000002,
                     0x0000AA02,
@@ -2496,9 +2706,9 @@ class read_stories:
                     0x01000001,
                 }
 
-                return val in KNOWN_VTABLES or (val & 0xFFFF) in {v & 0xFFFF for v in KNOWN_VTABLES}
+                return val in KNOWN_IDENTIFIERS or (val & 0xFFFF) in {v & 0xFFFF for v in KNOWN_IDENTIFIERS}
 
-            inline_top_level_magic = possible_ptr in {
+            inline_top_level_identifier = possible_ptr in {
                 LCSCLUMPPS2 if 'LCSCLUMPPS2' in locals() else 0x00000002,
                 VCSCLUMPPS2 if 'VCSCLUMPPS2' in locals() else 0x0000AA02,
                 0x00000002,
@@ -2509,12 +2719,12 @@ class read_stories:
                 0x0000AA01,
             }
 
-            if (next_ptr_offset == 0x20 and int(ctx.allocated_memory or 0) == 0 and inline_top_level_magic):
+            if (next_ptr_offset == 0x20 and int(ctx.allocated_memory or 0) == 0 and inline_top_level_identifier):
                 ctx.inline_clump_header = possible_ptr in {0x00000002, 0x0000AA02}
                 ctx.top_level_ptr = next_ptr_offset
                 ctx.renderflags_offset = 0
                 ctx.log(
-                    f"Detected inline cutscene/actor top-level section at 0x{next_ptr_offset:X}: magic=0x{possible_ptr:X}"
+                    f"Detected inline cutscene/actor top-level section at 0x{next_ptr_offset:X}: identifier=0x{possible_ptr:X}"
                 )
                 peek_type = "inline_top_level"
                 string_val = ""
@@ -2534,14 +2744,14 @@ class read_stories:
                         peek_type = "string"
                     else:
                         val = struct.unpack("<I", peek_bytes[:4])[0]
-                        if is_known_vtable(val):
-                            peek_type = "vtable"
+                        if is_known_top_level_identifier(val):
+                            peek_type = "top_level_identifier"
                         else:
                             peek_type = "struct_or_flags"
                     f.seek(file_current)
                 else:
-                    if is_known_vtable(possible_ptr):
-                        peek_type = "vtable"
+                    if is_known_top_level_identifier(possible_ptr):
+                        peek_type = "top_level_identifier"
                     elif 32 <= (possible_ptr & 0xFF) <= 126:
                         peek_type = "string_candidate"
                     else:
@@ -2554,9 +2764,9 @@ class read_stories:
             renderflags_offset = 0
 
             if peek_type == "inline_top_level":
-                ctx.log("This MDL uses the cutscene actor header variant: the 16-byte Clump starts directly at MDL +0x20.")
-            elif peek_type == "vtable":
-                ctx.log("This pointer is a vtable/top-level struct (Clump/Atomic etc).")
+                ctx.log("This MDL uses the inline actor/Clump serialization variant: the 16-byte Clump starts directly at MDL +0x20. Cutscene is a usage context, not a distinct runtime model-info class.")
+            elif peek_type == "top_level_identifier":
+                ctx.log("This pointer references a recognized top-level Clump/Atomic structure.")
                 ctx.top_level_ptr = possible_ptr
             elif peek_type in ("string", "string_candidate"):
                 ctx.log(
@@ -2582,10 +2792,10 @@ class read_stories:
             ctx.log(f"Number of entries: 0x{ctx.num_entries:X}")
             ctx.log(f"Ptr2BeforeTexNameList: 0x{ctx.ptr2_before_tex:X}")
             ctx.log(f"Allocated memory: 0x{ctx.allocated_memory:X}")
-            ctx.log(f"Top-level ptr or magic value: 0x{ctx.top_level_ptr:X}")
+            ctx.log(f"Top-level pointer or identifier: 0x{ctx.top_level_ptr:X}")
 
             f.seek(ctx.top_level_ptr)
-            top_magic = read_u32(f)
+            top_identifier = read_u32(f)
 
             LCSCLUMPPS2 = 0x00000002
             VCSCLUMPPS2 = 0x0000AA02
@@ -2600,22 +2810,36 @@ class read_stories:
             ctx.section_type = 0
             ctx.import_type = 0
 
-            if top_magic in (LCSCLUMPPS2, VCSCLUMPPS2):
+            if top_identifier in (LCSCLUMPPS2, VCSCLUMPPS2):
                 ctx.section_type = 7
                 if is_psp:
-                    if top_magic == CLUMPPSP:
-                        ctx.log(" Top magic matches PSP values, setting import type 3.")
+                    if game_hint == "LCS":
+                        ctx.import_type = 1
+                        ctx.game = "LCS"
+                    elif game_hint == "VCS":
                         ctx.import_type = 3
+                        ctx.game = "VCS"
+                    else:
+                        ctx.import_type = 4
+                        ctx.game = "AUTO"
+                        ctx.log("PSP Clump identifier is shared by Stories titles; game remains unresolved until frame names are available.")
                 else:
-                    ctx.import_type = 1 if top_magic == LCSCLUMPPS2 else 2
-            elif top_magic in (LCSATOMIC1, LCSATOMIC2, VCSATOMIC1, VCSATOMIC2):
+                    ctx.import_type = 1 if top_identifier == LCSCLUMPPS2 else 2
+                    ctx.game = "LCS" if ctx.import_type == 1 else "VCS"
+            elif top_identifier in (LCSATOMIC1, LCSATOMIC2, VCSATOMIC1, VCSATOMIC2):
                 ctx.section_type = 2
-                ctx.import_type = 1 if top_magic in (LCSATOMIC1, LCSATOMIC2) else 2
-            elif top_magic in (VCSATOMICPSP1, VCSATOMICPSP2):
+                ctx.import_type = 1 if top_identifier in (LCSATOMIC1, LCSATOMIC2) else 2
+                ctx.game = "LCS" if ctx.import_type == 1 else "VCS"
+                if bool(getattr(ctx, "prototype_psp_layout", False)):
+                    ctx.platform = "PSP"
+                    platform = "PSP"
+                    ctx.log("Prototype LCS atomic identifier uses PSP geometry despite the legacy LCS top-level tag.")
+            elif top_identifier in (VCSATOMICPSP1, VCSATOMICPSP2):
                 ctx.section_type = 2
-                ctx.import_type = 3 if top_magic in (VCSATOMICPSP1, VCSATOMICPSP2) else 2
+                ctx.import_type = 3
+                ctx.game = "VCS"
 
-            ctx.log(f"Section Type: {ctx.section_type}, Import Type: {ctx.import_type}")
+            ctx.log(f"Section Type: {ctx.section_type}, Game: {ctx.game}, Import Type: {ctx.import_type}")
 
             atomic_info = StoriesAtomicInfo()
             ctx.atomic = atomic_info
@@ -2721,6 +2945,20 @@ class read_stories:
                             except Exception as hierarchy_error:
                                 ctx.log(f"⚠️ Failed to parse hierarchy table: {hierarchy_error}")
                         atomic_info.armature = arm
+                        if platform == "PSP" and int(getattr(ctx, "import_type", 0) or 0) == 4:
+                            resolved_game = resolveStoriesGameFromFrameNames(getattr(arm, "frame_names", {}) or {})
+                            if resolved_game == "LCS":
+                                ctx.game = "LCS"
+                                ctx.import_type = 1
+                                atomic_info.import_type = 1
+                                ctx.log("Resolved PSP Stories game as LCS from frame names.")
+                            elif resolved_game == "VCS":
+                                ctx.game = "VCS"
+                                ctx.import_type = 3
+                                atomic_info.import_type = 3
+                                ctx.log("Resolved PSP Stories game as VCS from frame names.")
+                            else:
+                                ctx.log("PSP Stories game remains unresolved; title-specific fallback bone tables are disabled.")
                     except Exception as e:
                         ctx.log(f"⚠️ Failed to build armature: {e}")
                         atomic_info.armature = None
@@ -2728,6 +2966,8 @@ class read_stories:
                 if platform == "PS2":
                     atomic_info.ps2_geometry = read_ps2_geometry(ctx, f, geom_ptr)
                 else:
+                    if bool(getattr(ctx, "prototype_psp_layout", False)) and not int(geom_ptr or 0):
+                        ctx.prototype_psp_geometry_header = find_prototype_psp_geometry_header(f, int(ctx.file_len or 0))
                     atomic_info.psp_geometry = read_psp_geometry(ctx, f, geom_ptr)
 
                 if platform == "PS2" and str(mdl_type or "").upper().strip() == "VEH" and int(getattr(ctx, "clump_ptr", 0) or 0):
@@ -2752,7 +2992,7 @@ class read_stories:
                 if missing_frames:
 
                     import_type = int(getattr(ctx, 'import_type', 0) or 0)
-                    if import_type in (0, 1):
+                    if import_type == 1:
                         bone_names = list(commonBoneNamesLCS)
                     elif import_type in (2, 3):
                         bone_names = list(commonBoneNamesVCS)
@@ -2791,12 +3031,14 @@ def read_stories_mdl(
     filepath: str,
     platform: str,
     mdl_type: str,
+    game: str = "AUTO",
     print_debug_log: bool = False,
 ) -> StoriesMDLContext:
     reader = read_stories(
         filepath,
         platform,
         mdl_type,
+        game=game,
         print_debug_log=print_debug_log,
     )
     return reader.read()
@@ -2828,6 +3070,298 @@ VIF_POS_HEADER = 0x79000000
 VIF_TEX_HEADER = 0x76004000
 
 VIF_MSCAL = 0x14000006
+
+@dataclass
+class Ps2VifCommandRecord:
+    stream_offset: int
+    word: int
+    command: int
+    num: int
+    immediate: int
+    payload: bytes = b""
+    source_vector_count: int = 0
+    destination: int = 0
+
+@dataclass
+class Ps2VifDecoderState:
+    cycle_length: int = 1
+    write_length: int = 1
+    mode: int = 0
+    mask: int = 0
+    row: Tuple[int, int, int, int] = (0, 0, 0, 0)
+    column: Tuple[int, int, int, int] = (0, 0, 0, 0)
+
+class Ps2VifStreamDecoder:
+    def __init__(self):
+        self.state = Ps2VifDecoderState()
+        self.buffer = bytearray()
+        self.stream_offset = 0
+        self.vu_memory: Dict[int, List[int]] = {}
+
+    def reset(self) -> None:
+        self.state = Ps2VifDecoderState()
+        self.buffer.clear()
+        self.stream_offset = 0
+        self.vu_memory.clear()
+
+    def unpackSourceVectorCount(self, num: int) -> int:
+        count = int(num)
+        cycle_length = int(self.state.cycle_length)
+        write_length = int(self.state.write_length)
+
+        if count <= 0:
+            return 0
+        if write_length <= cycle_length:
+            return count
+        if cycle_length <= 0:
+            return 0
+
+        complete_cycles, remainder = divmod(count, write_length)
+        return (complete_cycles * cycle_length) + min(remainder, cycle_length)
+
+    def unpackPayloadSize(self, command: int, num: int) -> Tuple[int, int]:
+        command = int(command) & 0x7F
+        if command == 0x77:
+            return 0, 0
+
+        format_value = command & 0x0F
+        vector_size = (format_value >> 2) + 1
+        component_format = format_value & 0x03
+
+        if component_format == 0:
+            component_size = 4
+            packed_vector_size = vector_size * component_size
+        elif component_format == 1:
+            component_size = 2
+            packed_vector_size = vector_size * component_size
+        elif component_format == 2:
+            component_size = 1
+            packed_vector_size = vector_size * component_size
+        elif vector_size == 4:
+            packed_vector_size = 2
+        else:
+            return 0, 0
+
+        source_vector_count = self.unpackSourceVectorCount(num)
+        payload_size = source_vector_count * packed_vector_size
+        payload_size = (payload_size + 3) & ~3
+        return payload_size, source_vector_count
+
+    def commandPayloadSize(self, command: int, num: int, immediate: int) -> Tuple[int, int]:
+        command = int(command) & 0x7F
+        if command == 0x20:
+            return 4, 0
+        if command in (0x30, 0x31):
+            return 16, 0
+        if command == 0x4A:
+            return decodeVifNum(num) * 8, 0
+        if command in (0x50, 0x51):
+            return (int(immediate) & 0xFFFF) * 16, 0
+        if 0x60 <= command <= 0x7F:
+            return self.unpackPayloadSize(command, decodeVifNum(num))
+        return 0, 0
+
+    def decodeScalar(self, payload: bytes, offset: int, size: int, unsigned: bool) -> int:
+        if offset < 0 or offset + size > len(payload):
+            return 0
+        if size == 1:
+            return int(payload[offset]) if unsigned else int(struct.unpack_from("<b", payload, offset)[0])
+        if size == 2:
+            fmt = "<H" if unsigned else "<h"
+            return int(struct.unpack_from(fmt, payload, offset)[0])
+        if size == 4:
+            fmt = "<I" if unsigned else "<i"
+            return int(struct.unpack_from(fmt, payload, offset)[0])
+        return 0
+
+    def decodeUnpackVectors(self, record: Ps2VifCommandRecord) -> List[Tuple[int, int, int, int]]:
+        command = int(record.command) & 0x7F
+        if command < 0x60 or command > 0x7F:
+            return []
+
+        count = int(record.source_vector_count)
+        if command == 0x77:
+            return []
+
+        format_value = command & 0x0F
+        vector_size = (format_value >> 2) + 1
+        component_format = format_value & 0x03
+        unsigned = bool(int(record.immediate) & 0x4000)
+        vectors: List[Tuple[int, int, int, int]] = []
+
+        if component_format == 3:
+            if vector_size != 4:
+                return []
+            for vector_index in range(count):
+                offset = vector_index * 2
+                if offset + 2 > len(record.payload):
+                    break
+                packed = struct.unpack_from("<H", record.payload, offset)[0]
+                vectors.append((
+                    (packed & 0x001F) << 3,
+                    (packed & 0x03E0) >> 2,
+                    (packed & 0x7C00) >> 7,
+                    (packed & 0x8000) >> 8,
+                ))
+            return vectors
+
+        component_size = (4, 2, 1)[component_format]
+        packed_vector_size = vector_size * component_size
+        payload_absolute_offset = int(record.stream_offset) + 4
+
+        for vector_index in range(count):
+            vector_offset = vector_index * packed_vector_size
+            components = [
+                self.decodeScalar(
+                    record.payload,
+                    vector_offset + (component_index * component_size),
+                    component_size,
+                    unsigned,
+                )
+                for component_index in range(vector_size)
+            ]
+
+            if vector_size == 1:
+                lanes = (components[0], components[0], components[0], components[0])
+            elif vector_size == 2:
+                lanes = (components[0], components[1], components[0], components[1])
+            elif vector_size == 3:
+                fourth_offset = vector_offset + (3 * component_size)
+                fourth_absolute_offset = payload_absolute_offset + fourth_offset
+                vector_absolute_offset = payload_absolute_offset + vector_offset
+                same_qword = (vector_absolute_offset // 16) == (fourth_absolute_offset // 16)
+                fourth = self.decodeScalar(
+                    record.payload, fourth_offset, component_size, unsigned
+                ) if same_qword else 0
+                lanes = (components[0], components[1], components[2], fourth)
+            else:
+                lanes = (components[0], components[1], components[2], components[3])
+            vectors.append(tuple(int(value) for value in lanes))
+
+        return vectors
+
+    def applyUnpackMode(self, value: int, lane: int) -> int:
+        mode = int(self.state.mode) & 0x03
+        row_value = int(self.state.row[lane])
+        if mode == 1:
+            return int(value) + row_value
+        if mode == 2:
+            result = int(value) + row_value
+            row_values = list(self.state.row)
+            row_values[lane] = result & 0xFFFFFFFF
+            self.state.row = tuple(row_values)
+            return result
+        if mode == 3:
+            row_values = list(self.state.row)
+            row_values[lane] = int(value) & 0xFFFFFFFF
+            self.state.row = tuple(row_values)
+            return int(value)
+        return int(value)
+
+    def executeUnpack(self, record: Ps2VifCommandRecord) -> None:
+        command = int(record.command) & 0x7F
+        if command < 0x60 or command > 0x7F:
+            return
+
+        source_vectors = self.decodeUnpackVectors(record)
+        base_destination = int(record.destination) & 0x3FF
+        write_count = int(record.num)
+        use_mask = bool(command & 0x10)
+        is_v45 = (command & 0x0F) == 0x0F
+        cycle_length = int(self.state.cycle_length)
+        write_length = max(1, int(self.state.write_length))
+        source_index = 0
+
+        for write_index in range(write_count):
+            cycle_position = write_index % write_length
+            has_source = command != 0x77
+            if write_length > cycle_length:
+                has_source = has_source and cycle_position < cycle_length
+
+            if write_length <= cycle_length:
+                cycle_group = write_index // write_length
+                destination_offset = (cycle_group * cycle_length) + cycle_position
+            else:
+                destination_offset = write_index
+
+            destination = (base_destination + destination_offset) & 0x3FF
+            old_lanes = list(self.vu_memory.get(destination, [0, 0, 0, 0]))
+            data_lanes = source_vectors[source_index] if has_source and source_index < len(source_vectors) else None
+            if has_source:
+                source_index += 1
+
+            mask_cycle = min(cycle_position, 3)
+            column_value = int(self.state.column[mask_cycle])
+            new_lanes = list(old_lanes)
+            for lane in range(4):
+                selector = (
+                    (int(self.state.mask) >> ((mask_cycle * 8) + (lane * 2))) & 0x03
+                ) if use_mask else 0
+                if selector == 0:
+                    if data_lanes is not None:
+                        new_lanes[lane] = int(data_lanes[lane]) if is_v45 else self.applyUnpackMode(int(data_lanes[lane]), lane)
+                elif selector == 1:
+                    new_lanes[lane] = int(self.state.row[lane])
+                elif selector == 2:
+                    new_lanes[lane] = column_value
+            self.vu_memory[destination] = [int(value) & 0xFFFFFFFF for value in new_lanes]
+
+    def applyCommandState(self, record: Ps2VifCommandRecord) -> None:
+        command = int(record.command) & 0x7F
+        if command == 0x01:
+            raw_cycle_length = int(record.immediate) & 0xFF
+            raw_write_length = (int(record.immediate) >> 8) & 0xFF
+            self.state.cycle_length = raw_cycle_length
+            self.state.write_length = 256 if raw_write_length == 0 else raw_write_length
+        elif command == 0x05:
+            self.state.mode = int(record.immediate) & 0x03
+        elif command == 0x20 and len(record.payload) >= 4:
+            self.state.mask = struct.unpack_from("<I", record.payload, 0)[0]
+        elif command == 0x30 and len(record.payload) >= 16:
+            self.state.row = tuple(struct.unpack_from("<4I", record.payload, 0))
+        elif command == 0x31 and len(record.payload) >= 16:
+            self.state.column = tuple(struct.unpack_from("<4I", record.payload, 0))
+        elif 0x60 <= command <= 0x7F:
+            self.executeUnpack(record)
+
+    def feed(self, data: bytes, final: bool = False) -> List[Ps2VifCommandRecord]:
+        self.buffer.extend(bytes(data or b""))
+        records: List[Ps2VifCommandRecord] = []
+
+        while len(self.buffer) >= 4:
+            word = struct.unpack_from("<I", self.buffer, 0)[0]
+            command = (word >> 24) & 0x7F
+            num = decodeVifNum((word >> 16) & 0xFF) if 0x60 <= command <= 0x7F else ((word >> 16) & 0xFF)
+            immediate = word & 0xFFFF
+            payload_size, source_vector_count = self.commandPayloadSize(command, num, immediate)
+            total_size = 4 + payload_size
+            if len(self.buffer) < total_size:
+                break
+
+            payload = bytes(self.buffer[4:total_size])
+            record = Ps2VifCommandRecord(
+                stream_offset=int(self.stream_offset),
+                word=int(word),
+                command=int(command),
+                num=int(num),
+                immediate=int(immediate),
+                payload=payload,
+                source_vector_count=int(source_vector_count),
+                destination=int(immediate & 0x3FF) if 0x60 <= command <= 0x7F else 0,
+            )
+            records.append(record)
+            self.applyCommandState(record)
+
+            del self.buffer[:total_size]
+            self.stream_offset += total_size
+
+        if final and self.buffer:
+            raise ValueError(
+                f"Incomplete VIF command or payload at stream offset 0x{self.stream_offset:X}: "
+                f"{len(self.buffer)} trailing bytes"
+            )
+
+        return records
 
 @dataclass
 class Ps2Vertex:
@@ -3270,7 +3804,16 @@ def trim_ps2_ped_dma_packet_to_byte_length(packet: bytes, target_byte_length: in
     return best
 
 def validate_ps2_dma_vif_payload(payload: bytes, *, vif_profile: str = "SIM") -> None:
-    profile = str(vif_profile).upper().strip()
+    # Packet shape is authoritative.  Older callers can still accidentally
+    # request the default SIM profile for a PED payload; do not let that turn
+    # a legal PED packet into the SIM-only "MSCAL at first dword of final
+    # qword" failure.  Every Leeds PED sub-strip begins with 0x6C018000.
+    requested_profile = str(vif_profile).upper().strip()
+    payload_begins_with_ped_split = (
+        len(payload) >= 4 and struct.unpack_from("<I", payload, 0)[0] == 0x6C018000
+    )
+    profile = "PED" if payload_begins_with_ped_split else requested_profile
+
     if profile != "PED":
         if (len(payload) % 16) != 0:
             raise ValueError(f"PS2 DMA/VIF payload is not 16-byte aligned (len={len(payload)}).")
@@ -3434,6 +3977,8 @@ def validate_dma_ref_packet(packet: bytes, *, vif_profile: str = "SIM") -> None:
             f"DMA REF QWC mismatch: tag says {qwc}, payload needs {expected_qwc} qwords."
         )
 
+    # The payload validator is shape-authoritative and auto-detects Leeds PED
+    # split packets. Keep the caller hint only as a fallback for non-PED data.
     validate_ps2_dma_vif_payload(payload, vif_profile=vif_profile)
 
 def build_ps2_dma_for_strip(
@@ -3516,9 +4061,10 @@ def build_ps2_dma_for_strip(
 
         return struct.pack("<hhh", ix, iy, iz)
 
-    def encode_uv_bytes(u: float, v: float) -> bytes:
+    def encode_uv_bytes(u: float, v: float, flip_v: bool = False) -> bytes:
+        export_v = (1.0 - v) if flip_v else v
         uu = int(apply_round(u * 127.5))
-        vv = int(apply_round(v * 127.5))
+        vv = int(apply_round(export_v * 127.5))
         uu = max(0, min(255, uu))
         vv = max(0, min(255, vv))
         return struct.pack("<BB", uu, vv)
@@ -3535,7 +4081,14 @@ def build_ps2_dma_for_strip(
 
     seg_count = num_verts
     payload = bytearray()
-    is_ped = (str(vif_profile).upper().strip() == "PED")
+    # A split-header packet is, by definition in this writer, a Leeds PED
+    # packet.  Treat that as authoritative even if a stale/upstream caller
+    # accidentally passes the default SIM profile.  Mixing a PED split
+    # header with SIM UV/normal/skin UNPACK immediates creates hybrid packets
+    # such as 0x76xx808D, which retail PED parsing rejects.
+    requested_profile = str(vif_profile).upper().strip()
+    is_ped = (requested_profile == "PED") or bool(include_split_header)
+    effective_profile = "PED" if is_ped else "SIM"
     emit_normals = bool(use_normals) or is_ped
 
     if include_split_header:
@@ -3590,18 +4143,18 @@ def build_ps2_dma_for_strip(
     payload.extend(write_u32(0x000000FF))
     payload.extend(write_u32(0))
 
-    if str(vif_profile).upper().strip() == "PED":
+    if is_ped:
         tex_header = (0x76 << 24) | ((seg_count & 0xFF) << 16) | 0xC055
     else:
         tex_header = (0x76 << 24) | ((seg_count & 0xFF) << 16) | 0x808D
     payload.extend(write_u32(tex_header))
     for v in verts:
-        payload.extend(encode_uv_bytes(v.u, v.v))
+        payload.extend(encode_uv_bytes(v.u, v.v, flip_v=is_ped))
     pad_bytes_to(payload, 4)
 
     if emit_normals:
 
-        if str(vif_profile).upper().strip() == "PED":
+        if is_ped:
             norm_header = (0x6A << 24) | ((seg_count & 0xFF) << 16) | 0x802B
         else:
             norm_header = (0x6A << 24) | ((seg_count & 0xFF) << 16) | 0x8047
@@ -3701,7 +4254,7 @@ def build_ps2_dma_for_strip(
     )
     if has_skin_stream:
 
-        if str(vif_profile).upper().strip() == "PED":
+        if is_ped:
             skin_header = (0x6C << 24) | ((seg_count & 0xFF) << 16) | 0x807F
         else:
             skin_header = (0x6C << 24) | ((seg_count & 0xFF) << 16) | 0x8047
@@ -3712,7 +4265,11 @@ def build_ps2_dma_for_strip(
     payload.extend(write_u32(VIF_MSCAL))
 
     pad_bytes_to(payload, 16)
-    validate_ps2_dma_vif_payload(payload, vif_profile=vif_profile)
+    # Validate the packet using the profile actually emitted above.  A PED
+    # split packet can legally place MSCAL before padding within its final
+    # qword; validating it as SIM produces the false
+    # "does not end with MSCAL on a qword boundary" error.
+    validate_ps2_dma_vif_payload(payload, vif_profile=effective_profile)
     qwc_total = len(payload) // 16
     if qwc_total > 0xFFFF:
         raise ValueError(f"DMA payload too large (QWC={qwc_total}).")
@@ -3844,7 +4401,24 @@ def finalize_mdl_header_ped_ps2(
     struct.pack_into("<I", buf, header.file_len_off, int(file_size) & 0xFFFFFFFF)
     struct.pack_into("<I", buf, header.local_num_off, int(local_num_offset) & 0xFFFFFFFF)
     struct.pack_into("<I", buf, header.global_num_off, int(global_num_offset) & 0xFFFFFFFF)
-    struct.pack_into("<I", buf, header.num_entries_off, int(pointer_count) & 0xFFFFFFFF)
+
+    # Retail PS2 PED/Clump MDLs use the split relocation-table form:
+    #   local_numTable  -> one DWORD root offset
+    #   global_numTable -> one DWORD local-table self pointer, followed by
+    #                      the relocatable pointer-field offsets
+    #
+    # Header numEntries counts DWORDs beginning at global_numTable, so the
+    # bookkeeping/self DWORD IS part of the declared count. The previous
+    # exporter wrote only len(pointer_fields), which caused the EE relocation
+    # loop to stop one row early. Depending on ordering, Atomic.hierarchy_ptr
+    # was left file-relative and the game immediately walked an invalid pointer.
+    declared_relocation_dwords = int(pointer_count) + 1
+    struct.pack_into(
+        "<I",
+        buf,
+        header.num_entries_off,
+        declared_relocation_dwords & 0xFFFFFFFF,
+    )
 
     struct.pack_into("<I", buf, header.ptr2_before_tex_off, int(local_num_offset) & 0xFFFFFFFF)
 
@@ -3874,9 +4448,71 @@ def write_pointer_tables_ped_ps2(
     pointer_fields: List[int],
     *,
     root_offset: int,
+    required_fields: Optional[Iterable[int]] = None,
 ) -> Tuple[int, int]:
-    local_num_offset = len(buf)
+    seen = set()
+    normalized_fields: List[int] = []
 
+    for raw_off in list(pointer_fields or []):
+        try:
+            off = int(raw_off)
+        except Exception:
+            continue
+        if off < 0 or off in seen:
+            continue
+        seen.add(off)
+        normalized_fields.append(off)
+
+    forced_fields = list(required_fields or [])
+
+    # PS2 PED local root points at Atomic +0x24. The hierarchy pointer is
+    # Atomic +0x2C, so it is always root_offset + 8. Derive the hierarchy
+    # anchor relocation here, at the final serializer, instead of depending
+    # on an earlier builder variable surviving every export path.
+    try:
+        atomic_hierarchy_field = int(root_offset) + 8
+        if 0 <= atomic_hierarchy_field and atomic_hierarchy_field + 4 <= len(buf):
+            hierarchy_offset = struct.unpack_from("<I", buf, atomic_hierarchy_field)[0]
+            if hierarchy_offset != 0:
+                hierarchy_anchor_field = int(hierarchy_offset) + 0x34
+                forced_fields.append(hierarchy_anchor_field)
+    except Exception:
+        pass
+
+    for raw_off in forced_fields:
+        try:
+            off = int(raw_off)
+        except Exception:
+            continue
+        if off < 0:
+            continue
+        if off + 4 > len(buf):
+            raise ValueError(f"Required PS2 PED relocation field is outside the buffer: 0x{off:X}.")
+        value = struct.unpack_from("<I", buf, off)[0]
+        if value == 0:
+            raise ValueError(f"Required PS2 PED relocation field is null: 0x{off:X}.")
+        if off not in seen:
+            seen.add(off)
+            normalized_fields.append(off)
+
+    pointer_fields[:] = normalized_fields
+
+    # The hierarchy anchor must be present in the exact list that is about to
+    # be serialized. Refuse to produce another count-minus-one PED MDL.
+    try:
+        atomic_hierarchy_field = int(root_offset) + 8
+        hierarchy_offset = struct.unpack_from("<I", buf, atomic_hierarchy_field)[0]
+        if hierarchy_offset != 0:
+            hierarchy_anchor_field = int(hierarchy_offset) + 0x34
+            if hierarchy_anchor_field not in pointer_fields:
+                raise ValueError(
+                    f"PS2 PED hierarchy anchor relocation 0x{hierarchy_anchor_field:X} "
+                    "was not registered before pointer-table serialization."
+                )
+    except struct.error as exc:
+        raise ValueError("PS2 PED hierarchy pointer could not be read before relocation serialization.") from exc
+
+    local_num_offset = len(buf)
     write_u32(buf, int(root_offset) & 0xFFFFFFFF)
 
     global_num_offset = len(buf)
@@ -5683,8 +6319,27 @@ def _build_ps2_ped_header_material_entry_ptrs(
     if not rebuilt:
         rebuilt = list(offsets[:3])
 
+    # The PS2 PED container header always exposes three relocatable material
+    # helper pointer slots at 0x28/0x2C/0x30.  If the edited model has fewer
+    # than three distinct material descriptors (common after Blender Separate),
+    # those slots must alias the last valid descriptor rather than become NULL.
+    # A NULL here is illegal because all three header fields are present in the
+    # PED relocation table.
+    if rebuilt:
+        last_valid = 0
+        for value in rebuilt:
+            if int(value) > 0:
+                last_valid = int(value) & 0xFFFFFFFF
+        normalized = []
+        for value in rebuilt[:3]:
+            v = int(value) & 0xFFFFFFFF
+            if v == 0 and last_valid:
+                v = last_valid
+            normalized.append(v)
+        rebuilt = normalized
+
     while len(rebuilt) < 3:
-        rebuilt.append(0)
+        rebuilt.append(int(rebuilt[-1]) & 0xFFFFFFFF if rebuilt else 0)
 
     return [int(v) & 0xFFFFFFFF for v in rebuilt[:3]]
 def _load_ped_source_template_blocks(atomic_meta: Dict[str, Any]) -> Dict[str, Any]:
@@ -6162,19 +6817,14 @@ def _decode_ps2_ped_skin_word(raw_value: int) -> Tuple[int, float]:
 
     bone_token = raw & 0xFF
     bone_index = int(bone_token // 4)
-
     weight_word = raw & 0xFFFFFF00
     try:
         weight = float(struct.unpack('<f', struct.pack('<I', weight_word))[0])
     except Exception:
         weight = 0.0
 
-    if not math.isfinite(weight):
+    if not math.isfinite(weight) or weight < 0.0:
         weight = 0.0
-    if weight < 0.0:
-        weight = 0.0
-    if weight > 4.0:
-        weight = 4.0
 
     return bone_index, weight
 
@@ -6407,6 +7057,19 @@ def _append_ps2_ped_frames_from_armature(
                 return matrices
         return []
 
+    try:
+        prefer_live_armature_bind_matrices = bool((atomic_meta or {}).get('prefer_live_armature_bind_matrices', False))
+    except Exception:
+        prefer_live_armature_bind_matrices = False
+
+    try:
+        preserve_imported_frame_matrices = bool((atomic_meta or {}).get('preserve_imported_frame_matrices', False))
+    except Exception:
+        preserve_imported_frame_matrices = False
+
+    if preserve_imported_frame_matrices:
+        prefer_live_armature_bind_matrices = False
+
     def _build_imported_frame_matrix_maps() -> Tuple[Dict[str, Matrix], Dict[str, Matrix]]:
         world_by_name: Dict[str, Matrix] = {}
         local_by_name: Dict[str, Matrix] = {}
@@ -6438,7 +7101,13 @@ def _append_ps2_ped_frames_from_armature(
                     world_by_name[canon] = world_mats[idx]
                 if idx < len(local_mats) and canon not in local_by_name:
                     local_by_name[canon] = local_mats[idx]
-        policy = _seed_vcs_runtime_frame_maps_if_needed(import_type_hint, world_by_name, local_by_name)
+        # When exporting an edited/custom rig, live Blender rest matrices are the
+        # authority. Never seed the canned VCS runtime skeleton into that path;
+        # doing so mixes two bind spaces and can rotate/offset the rebuilt PED.
+        if prefer_live_armature_bind_matrices:
+            policy = 'live_armature_rest_no_default_seed'
+        else:
+            policy = _seed_vcs_runtime_frame_maps_if_needed(import_type_hint, world_by_name, local_by_name)
         try:
             if policy == 'seeded_default_vcs_runtime_frame_arrays' and atomic_meta is not None:
                 atomic_meta['frame_matrix_authority'] = 'DEFAULT_VCS_PS2_RUNTIME_FRAME_BASIS'
@@ -6455,29 +7124,17 @@ def _append_ps2_ped_frames_from_armature(
     except Exception:
         pass
 
-    try:
-        prefer_live_armature_bind_matrices = bool((atomic_meta or {}).get('prefer_live_armature_bind_matrices', False))
-    except Exception:
-        prefer_live_armature_bind_matrices = False
-
-    try:
-        preserve_imported_frame_matrices = bool((atomic_meta or {}).get('preserve_imported_frame_matrices', False))
-    except Exception:
-        preserve_imported_frame_matrices = False
-
-    if preserve_imported_frame_matrices:
-
-        prefer_live_armature_bind_matrices = False
-
     def _live_armature_global_matrix(bone: Any) -> Optional[Matrix]:
         try:
             live_m = bone.matrix_local.copy()
             if getattr(live_m, 'size', 4) != 4:
                 live_m = live_m.to_4x4()
-            try:
-                return armature_obj.matrix_world @ live_m
-            except Exception:
-                return live_m
+            # Leeds frame globals are model/armature-local, not Blender world
+            # matrices. Object placement belongs to the scene and must never be
+            # baked into an exported MDL skeleton. Custom mesh export is also
+            # normalized to armature object space, so this keeps both sides in
+            # the same coordinate system.
+            return live_m
         except Exception:
             return None
 
@@ -6624,6 +7281,11 @@ def _append_ps2_ped_frames_from_armature(
 
     def _bone_global_matrix(bone: Any) -> Matrix:
 
+        if prefer_live_armature_bind_matrices:
+            live_m = _live_armature_global_matrix(bone)
+            if live_m is not None:
+                return live_m
+
         if preserve_imported_frame_matrices:
             mapped_m = _matrix_from_imported_map(bone, imported_world_by_name)
             if mapped_m is not None:
@@ -6635,19 +7297,29 @@ def _append_ps2_ped_frames_from_armature(
             'bleeds_mdl_export_world_matrix',
             'bleeds_frame_matrix',
         ))
-        if imported_m is not None:
+        if imported_m is not None and not prefer_live_armature_bind_matrices:
             return imported_m
 
         mapped_m = _matrix_from_imported_map(bone, imported_world_by_name)
-        if mapped_m is not None:
+        if mapped_m is not None and not prefer_live_armature_bind_matrices:
             return mapped_m
 
         live_m = _live_armature_global_matrix(bone)
         if live_m is not None:
             return live_m
+        if imported_m is not None:
+            return imported_m
         return Matrix.Identity(4)
 
     def _bone_local_matrix(bone: Any) -> Optional[Matrix]:
+
+        if prefer_live_armature_bind_matrices:
+            # Rebuilt PEDs are emitted with the canonical Leeds parent graph.
+            # Returning Blender's current parent-relative local matrix here
+            # would be wrong if an artist changed bone parenting. Keep the live
+            # armature-space global matrix and derive local transforms later
+            # from the canonical exported parent.
+            return None
 
         if preserve_imported_frame_matrices:
             mapped_m = _matrix_from_imported_map(bone, imported_local_by_name)
@@ -6661,14 +7333,17 @@ def _append_ps2_ped_frames_from_armature(
             'bleeds_mdl_export_local_matrix',
             'bleeds_frame_local_matrix',
         ))
-        if imported_m is not None:
+        if imported_m is not None and not prefer_live_armature_bind_matrices:
             return imported_m
 
         mapped_m = _matrix_from_imported_map(bone, imported_local_by_name)
-        if mapped_m is not None:
+        if mapped_m is not None and not prefer_live_armature_bind_matrices:
             return mapped_m
 
-        return _live_armature_local_matrix(bone)
+        live_m = _live_armature_local_matrix(bone)
+        if live_m is not None:
+            return live_m
+        return imported_m
 
     def _find_source_frame_bone(*names: str) -> Any:
         for raw_name in names:
@@ -6788,15 +7463,23 @@ def _append_ps2_ped_frames_from_armature(
         base_helper_name = _source_frame_name_from_bone(base_helper_bone, base_helper_name)
     base_helper_matrix, base_helper_local_matrix = _source_matrix_pair_for_bone(base_helper_bone)
     if base_helper_bone is None:
-        default_base_matrix = _vcs_default_ped_frame_global_matrix(base_helper_name)
-        if default_base_matrix is None:
-            default_base_matrix = _vcs_default_ped_frame_global_matrix('male_base01')
-        if default_base_matrix is not None:
-            base_helper_matrix = default_base_matrix.copy()
-            base_helper_local_matrix = default_base_matrix.copy()
-        else:
+        # An edited/custom armature must not inherit a hard-coded retail VCS
+        # helper transform. Use the normalized scene-root basis. The canned
+        # helper is only a compatibility fallback for an unedited VCS import
+        # whose original helper metadata is unavailable.
+        if prefer_live_armature_bind_matrices:
             base_helper_matrix = root_helper_matrix.copy()
             base_helper_local_matrix = root_helper_matrix.copy()
+        else:
+            default_base_matrix = _vcs_default_ped_frame_global_matrix(base_helper_name)
+            if default_base_matrix is None:
+                default_base_matrix = _vcs_default_ped_frame_global_matrix('male_base01')
+            if default_base_matrix is not None:
+                base_helper_matrix = default_base_matrix.copy()
+                base_helper_local_matrix = default_base_matrix.copy()
+            else:
+                base_helper_matrix = root_helper_matrix.copy()
+                base_helper_local_matrix = root_helper_matrix.copy()
 
     root_bone_index = canon_to_index.get(canon_frame_name('root'), -1)
     if root_bone_index < 0 and bone_nodes:
@@ -6942,6 +7625,19 @@ def _append_ps2_ped_frames_from_armature(
             node_offsets.append(female_base_off)
         else:
             node_offsets.append(first_regular_off + ((i - 3) * node_size))
+
+    if len(node_offsets) != len(set(node_offsets)):
+        duplicates = sorted({off for off in node_offsets if node_offsets.count(off) > 1})
+        raise ValueError(
+            "PED frame serialization produced duplicate frame offsets: "
+            + ", ".join(f"0x{off:X}" for off in duplicates)
+        )
+
+    for node_index, node_off in enumerate(node_offsets):
+        if node_off < 0 or node_off + node_size > len(buf):
+            raise ValueError(
+                f"PED frame {node_index} points outside the serialized frame region: 0x{node_off:X}"
+            )
 
     if pending_frame_names is None:
         pending_frame_names = []
@@ -7399,25 +8095,26 @@ def _ped_known_hanim_maps(import_type_hint: Optional[int]) -> Tuple[Dict[str, in
         imp = None
 
     if imp in (2, 3):
-
         name_sequence = (
             "root", "pelvis", "spine", "spine1", "neck", "head",
             "jaw", "bip01_l_clavicle", "l_upperarm", "l_forearm", "l_hand", "l_finger",
             "bip01_r_clavicle", "r_upperarm", "r_forearm", "r_hand", "r_finger", "l_thigh",
             "l_calf", "l_foot", "l_toe0", "r_thigh", "r_calf", "r_foot", "r_toe0",
         )
+        # VCS PS2 retail PLR/PED runtime HAnim IDs.  The previous custom
+        # mapping was not the mapping present in the retail VCS player model.
         bone_ids = (
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
-            0xFF, 0x1F, 0x20, 0x21, 0x22, 0x23,
+            0x06, 0x1F, 0x20, 0x21, 0x22, 0x23,
             0x15, 0x16, 0x17, 0x18, 0x19, 0x29,
             0x2A, 0x2B, 0xFF, 0x33, 0x34, 0x35,
             0xFF,
         )
         bone_types = (
-            0, 0, 0, 0, 0, 0,
-            1, 0, 0, 0, 0, 1,
-            0, 0, 0, 0, 1, 0,
-            0, 1, 1, 0, 0, 1,
+            0, 0, 0, 2, 0, 2,
+            3, 2, 0, 0, 0, 1,
+            0, 0, 0, 0, 1, 2,
+            0, 0, 1, 0, 0, 0,
             1,
         )
     else:
@@ -7446,11 +8143,14 @@ def _ped_ps2_runtime_hierarchy_maps(import_type_hint: Optional[int]) -> Tuple[Di
             "bip01_r_clavicle", "r_upperarm", "r_forearm", "r_hand", "r_finger",
             "l_thigh", "l_calf", "l_foot", "l_toe0", "r_thigh", "r_calf", "r_foot", "r_toe0",
         )
+        # Runtime RslTAnim/HAnim IDs in canonical VCS PS2 retail node order.
+        # These values were verified against the original retail plr.mdl rather
+        # than inferred from a custom export.
         bone_ids = (
-            0x00, 0x01, 0x02, 0x23, 0x15, 0x35,
-            0xFF, 0x2A, 0x2B, 0xFF, 0x33, 0x34,
-            0x16, 0x17, 0x18, 0x19, 0x29,
-            0x1F, 0x20, 0x21, 0x22, 0x03, 0x04, 0x05, 0x06,
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
+            0x06, 0x1F, 0x20, 0x21, 0x22, 0x23,
+            0x15, 0x16, 0x17, 0x18, 0x19,
+            0x29, 0x2A, 0x2B, 0xFF, 0x33, 0x34, 0x35, 0xFF,
         )
         bone_types = (
             0, 0, 0, 2, 0, 2,
@@ -7511,10 +8211,13 @@ def _collect_ps2_ped_hanim_entries(
         ordered: List[Any] = []
 
         def _sort_key(b: Any) -> Tuple[int, str]:
-            bid = _read_int_prop(b, ('BoneID', 'bone_id', 'bleeds_bone_id', 'bleeds_boneid'))
-            if bid is None:
-                bid = 10 ** 9
-            return (int(bid), str(_bone_name_for_export(b)))
+            node_index = _read_int_prop(
+                b,
+                ('bleeds_mdl_hierarchy_node_index', 'hierarchy_node_index', 'node_index', 'bleeds_anim_table_index'),
+            )
+            if node_index is None:
+                node_index = 10 ** 9
+            return (int(node_index), str(_bone_name_for_export(b)))
 
         def _visit(b: Any) -> None:
             ordered.append(b)
@@ -7525,7 +8228,7 @@ def _collect_ps2_ped_hanim_entries(
             _visit(root_bone)
         return ordered
 
-    id_map, type_map = _ped_ps2_runtime_hierarchy_maps(import_type_hint)
+    fallback_id_map, fallback_type_map = _ped_ps2_runtime_hierarchy_maps(import_type_hint)
     known_order = _ped_known_hanim_order(import_type_hint)
     child_map: Dict[str, List[Any]] = {}
     root_bones: List[Any] = []
@@ -7542,6 +8245,9 @@ def _collect_ps2_ped_hanim_entries(
 
     ordered_bones: List[Any] = []
     seen_bones = set()
+
+    # Standard Stories PEDs use compact hierarchy node order. Preserve it even
+    # if Blender internally reordered bones or the artist renamed collections.
     for canon_name in known_order:
         bone = canon_to_bone.get(canon_frame_name(canon_name))
         if bone is None:
@@ -7552,6 +8258,8 @@ def _collect_ps2_ped_hanim_entries(
         ordered_bones.append(bone)
         seen_bones.add(marker)
 
+    # Keep non-standard helper/extra bones deterministic without allowing them
+    # to disturb the canonical node indices above.
     for bone in _depth_first_bone_order(root_bones or bones[:1], child_map):
         marker = id(bone)
         if marker in seen_bones:
@@ -7571,30 +8279,59 @@ def _collect_ps2_ped_hanim_entries(
     next_synth_id = 0
     entries: List[Tuple[int, int, int]] = []
 
+    raw_hierarchy_id_keys = (
+        'bleeds_mdl_export_hierarchy_bone_id',
+        'bleeds_mdl_hierarchy_bone_id',
+        'bleeds_mdl_raw_hanim_bone_id',
+        'bleeds_hierarchy_bone_id',
+        'bleeds_raw_hanim_bone_id',
+    )
+    raw_hierarchy_type_keys = (
+        'bleeds_mdl_export_hierarchy_bone_type',
+        'bleeds_mdl_hierarchy_bone_type',
+        'bleeds_mdl_raw_hanim_bone_type',
+        'bleeds_hierarchy_bone_type',
+    )
+    semantic_anim_id_keys = (
+        'bleeds_hanim_bone_id',
+        'bleeds_anim_bone_id',
+        'bleeds_mdl_anim_bone_id',
+        'BoneID',
+        'bone_id',
+        'bleeds_bone_id',
+        'bleeds_boneid',
+    )
+
     for node_index, bone in enumerate(ordered_bones):
         export_name = _bone_name_for_export(bone)
         canon = canon_frame_name(export_name)
         children = child_map.get(str(getattr(bone, 'name', '')), []) or []
 
-        mapped_bone_id = id_map.get(canon)
-        bone_id = mapped_bone_id
+        # Standard VCS PED nodes must use the runtime HAnim ID namespace.
+        # Do not serialize semantic IDs (or the old 2000/2001 toe placeholders)
+        # into this field. Imported metadata remains useful for non-standard nodes.
+        if canon in fallback_id_map and int(import_type_hint or 0) in (2, 3):
+            bone_id = fallback_id_map.get(canon)
+        else:
+            bone_id = _read_int_prop(bone, raw_hierarchy_id_keys)
         if bone_id is None:
-            bone_id = _read_int_prop(bone, ('bleeds_hanim_bone_id', 'BoneID', 'bone_id', 'bleeds_bone_id', 'bleeds_boneid'))
+            bone_id = fallback_id_map.get(canon)
+        if bone_id is None:
+            bone_id = _read_int_prop(bone, semantic_anim_id_keys)
         if bone_id is None:
             while next_synth_id in used_ids or next_synth_id == 0xFF:
                 next_synth_id += 1
             bone_id = next_synth_id
             next_synth_id += 1
-        bone_id = int(bone_id)
-        if bone_id < 0:
-            bone_id = 0
-        if bone_id > 0xFF:
-            bone_id = 0xFF
+
+        bone_id = max(0, min(0xFF, int(bone_id)))
         used_ids.add(bone_id)
 
-        bone_type = _read_int_prop(bone, ('BoneType', 'bone_type', 'bleeds_bone_type', 'bleeds_bonetype'))
+        bone_type = _read_int_prop(bone, raw_hierarchy_type_keys)
         if bone_type is None:
-            bone_type = type_map.get(canon)
+            bone_type = fallback_type_map.get(canon)
+        if bone_type is None:
+            bone_type = _read_int_prop(bone, ('BoneType', 'bone_type', 'bleeds_bone_type', 'bleeds_bonetype'))
         if bone_type is None:
             if len(children) == 0:
                 bone_type = 1
@@ -7621,7 +8358,8 @@ def _collect_ps2_ped_source_frame_node_map(
         source_path = str(template.get("source_path") or "").strip()
 
     frame_ptr = int(
-        template.get("frame_offset", 0)
+        _ped_template_meta_u32(meta, "atomic_frame_ptr", "bleeds_mdl_atomic_frame_ptr")
+        or template.get("frame_offset", 0)
         or _ped_template_meta_u32(meta, "frame_ptr", "bleeds_mdl_frame_ptr")
         or 0
     )
@@ -7871,6 +8609,15 @@ def _build_ps2_ped_hierarchy_header_info(
     source_by_offset = source_nodes.get("by_offset") if isinstance(source_nodes, dict) else {}
     preferred_canon_name = ""
 
+    # The Atomic frame pointer is the authoritative source for the hierarchy
+    # node/anchor pointer.  Preserve its semantic target across rebuilds rather
+    # than falling back to the first/root frame.
+    atomic_frame_ptr = _ped_template_meta_u32(meta, "atomic_frame_ptr", "bleeds_mdl_atomic_frame_ptr")
+    if isinstance(source_by_offset, dict) and atomic_frame_ptr:
+        atomic_node = source_by_offset.get(int(atomic_frame_ptr))
+        if isinstance(atomic_node, dict):
+            preferred_canon_name = str(atomic_node.get("canon", "") or "")
+
     if isinstance(source_by_offset, dict):
         for rel in range(0x30, header_size, 4):
             raw_val = struct.unpack_from("<I", header_bytes, rel)[0]
@@ -7883,7 +8630,8 @@ def _build_ps2_ped_hierarchy_header_info(
             node_info = source_by_offset.get(val)
             if isinstance(node_info, dict):
                 result["node_ptr_field_rel"] = int(rel)
-                preferred_canon_name = str(node_info.get("canon", "") or "")
+                if not preferred_canon_name:
+                    preferred_canon_name = str(node_info.get("canon", "") or "")
                 break
 
     anchor_off = _choose_ps2_ped_hierarchy_anchor_offset(
@@ -7970,7 +8718,9 @@ def _append_ps2_ped_hierarchy_block_common(
         if node_ptr_field_rel + 4 <= header_size and node_ptr_field_rel >= 0:
             struct.pack_into("<I", header, int(node_ptr_field_rel), anchor_off & 0xFFFFFFFF)
             if pointer_fields is not None:
-                pointer_fields.append(int(hier_off) + int(node_ptr_field_rel))
+                atomic_frame_ptr_field = int(hier_off) + int(node_ptr_field_rel)
+                if atomic_frame_ptr_field not in pointer_fields:
+                    pointer_fields.append(atomic_frame_ptr_field)
 
     buf.extend(header)
 
@@ -8216,6 +8966,7 @@ def _append_ps2_ped_hierarchy_block_from_frames(
     if not entries:
         return _append_ps2_ped_hierarchy_block(
             buf,
+            pointer_fields,
             import_type_hint=ped_import_type_hint,
             armature_obj=armature_obj,
             atomic_meta=atomic_meta,
@@ -8705,7 +9456,7 @@ def _append_ped_import_style_export_fields(
     lines.append(f"Number of entries: 0x{entry_count:X}")
     lines.append(f"Ptr2BeforeTexNameList: 0x{ptr2_before_tex:X}")
     lines.append(f"Allocated memory: 0x{alloc_mem:X}")
-    lines.append(f"Top-level ptr or magic value: 0x{top_level:X}")
+    lines.append(f"Top-level pointer or identifier: 0x{top_level:X}")
 
     if clump_off > 0:
         lines.append("Section Type: 7, Import Type: 2")
@@ -8837,7 +9588,7 @@ def _write_ped_export_log(filepath: str, data: bytes, export_context: Dict[str, 
         (0x08, 4, "file_len", "logical MDL size before sector padding"),
         (0x0C, 4, "local_numTable", "local relocation table header / root pointer area"),
         (0x10, 4, "global_numTable", "global relocation pointer list"),
-        (0x14, 4, "numEntries", "number of relocation pointer fields"),
+        (0x14, 4, "numEntries", "split relocation table DWORD count: local-table self prefix + pointer fields"),
         (0x18, 4, "ptr2_before_tex", "mirrors local table in PED exports"),
         (0x1C, 4, "allocMem", "engine allocation field"),
         (0x20, 4, "struct_or_flags", "PS2 PED header pointer slot"),
@@ -9078,7 +9829,14 @@ def _write_ped_export_log(filepath: str, data: bytes, export_context: Dict[str, 
 
     local_num_off = _log_read_u32(data, 0x0C)
     global_num_off = _log_read_u32(data, 0x10)
-    pointer_count = _log_read_u32(data, 0x14)
+    declared_table_dwords = _log_read_u32(data, 0x14)
+    split_prefix = (
+        local_num_off > 0
+        and global_num_off == local_num_off + 4
+        and global_num_off + 4 <= len(data)
+        and _log_read_u32(data, global_num_off) == local_num_off
+    )
+    pointer_count = max(0, int(declared_table_dwords) - 1) if split_prefix else int(declared_table_dwords)
     root_local = _log_read_u32(data, local_num_off) if local_num_off > 0 else 0
     local_self = _log_read_u32(data, global_num_off) if global_num_off > 0 else 0
 
@@ -9087,6 +9845,8 @@ def _write_ped_export_log(filepath: str, data: bytes, export_context: Dict[str, 
         lines.append(f"  local_numTable @ 0x{local_num_off:08X}: root_offset=0x{root_local:08X}")
     if global_num_off > 0:
         lines.append(f"  global_numTable @ 0x{global_num_off:08X}: local_table_self=0x{local_self:08X}")
+    lines.append(f"  declared_table_dwords = {declared_table_dwords}")
+    lines.append(f"  self_prefix_dwords = {1 if split_prefix else 0}")
     lines.append(f"  pointer_count = {pointer_count}")
     for index in range(int(pointer_count)):
         entry_off = int(global_num_off) + 4 + (index * 4)
@@ -9359,6 +10119,161 @@ def _write_prop_export_log(filepath: str, data: bytes, export_context: Dict[str,
         lines.append("")
 
     return lines
+
+def validate_ps2_ped_export_buffer(
+    buf: bytes,
+    *,
+    pointer_fields: List[int],
+    local_num_offset: int,
+    global_num_offset: int,
+    dma_packets: List[bytes],
+    geometry_write_info: Optional[Dict[str, Any]] = None,
+) -> None:
+    data = bytes(buf)
+    logical_size = len(data)
+    if logical_size < 0x40:
+        raise ValueError("PS2 PED MDL is shorter than its fixed container header.")
+    if data[:4] != b"ldm\x00":
+        raise ValueError(f"PS2 PED MDL signature is invalid: {data[:4]!r}.")
+
+    header_size = struct.unpack_from("<I", data, 0x08)[0]
+    header_local = struct.unpack_from("<I", data, 0x0C)[0]
+    header_global = struct.unpack_from("<I", data, 0x10)[0]
+    header_count = struct.unpack_from("<I", data, 0x14)[0]
+    header_ptr2 = struct.unpack_from("<I", data, 0x18)[0]
+
+    if int(header_size) != logical_size:
+        raise ValueError(
+            f"PS2 PED MDL logical-size mismatch: header=0x{header_size:X}, buffer=0x{logical_size:X}."
+        )
+    if int(header_local) != int(local_num_offset) or int(header_ptr2) != int(local_num_offset):
+        raise ValueError(
+            "PS2 PED MDL local relocation pointer mismatch: "
+            f"header=0x{header_local:X}/ptr2=0x{header_ptr2:X}, expected=0x{int(local_num_offset):X}."
+        )
+    if int(header_global) != int(global_num_offset):
+        raise ValueError(
+            f"PS2 PED MDL global relocation pointer mismatch: header=0x{header_global:X}, "
+            f"expected=0x{int(global_num_offset):X}."
+        )
+    expected_header_count = len(pointer_fields) + 1
+    if int(header_count) != expected_header_count:
+        raise ValueError(
+            "PS2 PED MDL relocation count mismatch: "
+            f"header={header_count}, expected split-table dwords={expected_header_count} "
+            f"(1 local-table self prefix + {len(pointer_fields)} pointer fields)."
+        )
+
+    if not (0 <= int(local_num_offset) <= logical_size - 4):
+        raise ValueError(f"PS2 PED local relocation table is out of range: 0x{int(local_num_offset):X}.")
+    if not (0 <= int(global_num_offset) <= logical_size - 4):
+        raise ValueError(f"PS2 PED global relocation table is out of range: 0x{int(global_num_offset):X}.")
+
+    local_root = struct.unpack_from("<I", data, int(local_num_offset))[0]
+    if local_root >= logical_size:
+        raise ValueError(f"PS2 PED local relocation root is out of range: 0x{local_root:X}.")
+
+    table_bytes = int(header_count) * 4
+    if int(global_num_offset) + table_bytes > logical_size:
+        raise ValueError("PS2 PED global relocation table is truncated.")
+    table_self = struct.unpack_from("<I", data, int(global_num_offset))[0]
+    if table_self != int(local_num_offset):
+        raise ValueError(
+            f"PS2 PED global relocation table does not point back to local table: "
+            f"0x{table_self:X} != 0x{int(local_num_offset):X}."
+        )
+
+    seen_fields = set()
+    for index, expected_field in enumerate(pointer_fields):
+        field_off = int(expected_field)
+        if field_off in seen_fields:
+            raise ValueError(f"PS2 PED relocation field is duplicated: 0x{field_off:X}.")
+        seen_fields.add(field_off)
+        if field_off < 0 or field_off + 4 > logical_size:
+            raise ValueError(f"PS2 PED relocation field[{index}] is out of range: 0x{field_off:X}.")
+
+        table_field = struct.unpack_from("<I", data, int(global_num_offset) + 4 + (index * 4))[0]
+        if table_field != field_off:
+            raise ValueError(
+                f"PS2 PED relocation table entry[{index}] mismatch: table=0x{table_field:X}, "
+                f"expected field=0x{field_off:X}."
+            )
+
+        pointed_value = struct.unpack_from("<I", data, field_off)[0]
+        if pointed_value == 0:
+            raise ValueError(f"PS2 PED relocation field[{index}] @0x{field_off:X} contains a null pointer.")
+        if pointed_value >= logical_size:
+            raise ValueError(
+                f"PS2 PED relocation field[{index}] @0x{field_off:X} points outside the logical MDL: "
+                f"0x{pointed_value:X} >= 0x{logical_size:X}."
+            )
+
+    for packet_index, packet in enumerate(list(dma_packets or [])):
+        try:
+            validate_dma_ref_packet(bytes(packet), vif_profile="PED")
+        except Exception as exc:
+            raise ValueError(f"PS2 PED DMA/VIF packet[{packet_index}] failed structural validation: {exc}") from exc
+
+    info = dict(geometry_write_info or {})
+    if info:
+        geom_offset = int(info.get("geom_offset", -1))
+        dma_start = int(info.get("dma_start", -1))
+        expected_dma_start = int(info.get("expected_dma_start_from_first_tristrip", -1))
+        if geom_offset < 0 or geom_offset >= logical_size:
+            raise ValueError(f"PS2 PED geometry offset is invalid: 0x{geom_offset:X}.")
+        if dma_start < 0 or dma_start >= logical_size or (dma_start & 0x0F):
+            raise ValueError(f"PS2 PED DMA stream start is invalid/unaligned: 0x{dma_start:X}.")
+        if expected_dma_start != dma_start:
+            raise ValueError(
+                f"PS2 PED firstTriStripOff does not resolve to the DMA stream: "
+                f"expected=0x{expected_dma_start:X}, actual=0x{dma_start:X}."
+            )
+
+        if geom_offset + 0x60 > logical_size:
+            raise ValueError("PS2 PED geometry header is truncated before the runtime part table.")
+
+        descriptor_count = struct.unpack_from("<I", data, geom_offset + 0x10)[0]
+        packed_geometry = struct.unpack_from("<I", data, geom_offset + 0x30)[0]
+        runtime_part_count = (int(packed_geometry) >> 20) & 0xFFF
+        if runtime_part_count != len(list(dma_packets or [])):
+            raise ValueError(
+                "PS2 PED runtime part-count mismatch: "
+                f"geometry={runtime_part_count}, DMA packets={len(list(dma_packets or []))}."
+            )
+        if descriptor_count <= 0 or descriptor_count > 512:
+            raise ValueError(
+                "PS2 PED material descriptor count is invalid: "
+                f"descriptors={descriptor_count}."
+            )
+
+        # Retail Leeds PEDs routinely reuse one descriptor from several runtime
+        # geometry parts. The part count and descriptor count are independent;
+        # the actual invariant is that every emitted part tex_id addresses an
+        # existing descriptor slot.
+        part_table = geom_offset + 0x60
+        for part_index in range(runtime_part_count):
+            part_off = part_table + (part_index * 0x30)
+            if part_off + 0x30 > logical_size:
+                raise ValueError(f"PS2 PED part header[{part_index}] is truncated.")
+            tex_id = struct.unpack_from("<H", data, part_off + 0x22)[0]
+            if tex_id >= descriptor_count:
+                raise ValueError(
+                    f"PS2 PED part[{part_index}] tex_id={tex_id} is outside the "
+                    f"material descriptor table (count={descriptor_count})."
+                )
+
+        packet_cursor = dma_start
+        for packet_index, packet in enumerate(list(dma_packets or [])):
+            packet_bytes = bytes(packet)
+            if packet_cursor + len(packet_bytes) > logical_size:
+                raise ValueError(
+                    f"PS2 PED DMA packet[{packet_index}] exceeds the logical MDL at 0x{packet_cursor:X}."
+                )
+            if data[packet_cursor:packet_cursor + len(packet_bytes)] != packet_bytes:
+                raise ValueError(
+                    f"PS2 PED DMA packet[{packet_index}] bytes do not match the geometry stream at 0x{packet_cursor:X}."
+                )
+            packet_cursor += len(packet_bytes)
 
 def _write_mdl_export_log(filepath: str, *, mdl_kind: str, export_context: Optional[Dict[str, Any]] = None) -> None:
     export_context = dict(export_context or {})
@@ -9683,6 +10598,17 @@ def write_simplemodel_ps2_ped_mdl(
         forced_fields=forced_fields,
     )
     pointer_fields = sanitize_ped_ps2_pointer_fields(pointer_fields)
+
+    # The hierarchy anchor at +0x34 is a real relocatable pointer. Older export
+    # paths could leave it out of the declared table even though the field was
+    # populated, producing an otherwise-valid MDL with relocation_count-1.
+    if hierarchy_offset > 0:
+        hierarchy_anchor_field = int(hierarchy_offset) + 0x34
+        if hierarchy_anchor_field + 4 <= len(buf):
+            hierarchy_anchor_value = struct.unpack_from("<I", buf, hierarchy_anchor_field)[0]
+            if hierarchy_anchor_value != 0 and hierarchy_anchor_field not in pointer_fields:
+                pointer_fields.append(hierarchy_anchor_field)
+
     pointer_fields = order_ped_ps2_pointer_fields_retail_like(
         pointer_fields,
         header=header,
@@ -9693,18 +10619,32 @@ def write_simplemodel_ps2_ped_mdl(
     write_frame_name_strings_before_tables(buf, pending_frame_names)
 
     ped_local_root_offset = int(atomic_offset) + 0x24
+    required_relocation_fields: List[int] = []
+    if hierarchy_offset > 0:
+        required_relocation_fields.append(int(hierarchy_offset) + 0x34)
+
     local_num_offset, global_num_offset = write_pointer_tables_ped_ps2(
         buf,
         pointer_fields,
         root_offset=int(ped_local_root_offset),
+        required_fields=required_relocation_fields,
     )
     write_texture_strings_after_tables(buf, pending_textures)
 
     file_size = len(buf)
     header_material_ptrs = _build_ps2_ped_header_material_entry_ptrs(None, material_offsets)
-    extra0 = header_material_ptrs[0] if len(header_material_ptrs) > 0 else 0
-    extra1 = header_material_ptrs[1] if len(header_material_ptrs) > 1 else extra0
-    extra2 = header_material_ptrs[2] if len(header_material_ptrs) > 2 else extra1
+    extra0 = int(header_material_ptrs[0]) if len(header_material_ptrs) > 0 else 0
+    extra1 = int(header_material_ptrs[1]) if len(header_material_ptrs) > 1 else 0
+    extra2 = int(header_material_ptrs[2]) if len(header_material_ptrs) > 2 else 0
+    if extra0 == 0:
+        for candidate in header_material_ptrs:
+            if int(candidate) > 0:
+                extra0 = int(candidate)
+                break
+    if extra1 == 0:
+        extra1 = extra0
+    if extra2 == 0:
+        extra2 = extra1
 
     finalize_mdl_header_ped_ps2(
         buf=buf,
@@ -9722,6 +10662,15 @@ def write_simplemodel_ps2_ped_mdl(
 
     if hierarchy_offset > 0 and hierarchy_offset + 8 <= len(buf):
         struct.pack_into("<I", buf, int(hierarchy_offset), 0x00003000)
+
+    validate_ps2_ped_export_buffer(
+        buf,
+        pointer_fields=pointer_fields,
+        local_num_offset=int(local_num_offset),
+        global_num_offset=int(global_num_offset),
+        dma_packets=[bytes(packet) for packet in dma_packets],
+        geometry_write_info=geometry_write_info,
+    )
 
     export_context = {
         "material_names": list(material_names),
@@ -9866,6 +10815,7 @@ class Manhunt2MdlReader:
             "record_size": 192,
             "name_offset": 24,
             "name_size": 40,
+            "local_matrix_offset": 64,
             "matrix_offset": 128,
         },
         {
@@ -9874,6 +10824,7 @@ class Manhunt2MdlReader:
             "record_size": 176,
             "name_offset": 24,
             "name_size": 40,
+            "local_matrix_offset": -1,
             "matrix_offset": 112,
         },
         {
@@ -9882,6 +10833,7 @@ class Manhunt2MdlReader:
             "record_size": 208,
             "name_offset": 24,
             "name_size": 40,
+            "local_matrix_offset": -1,
             "matrix_offset": 144,
         },
         {
@@ -9890,6 +10842,7 @@ class Manhunt2MdlReader:
             "record_size": 192,
             "name_offset": 32,
             "name_size": 40,
+            "local_matrix_offset": -1,
             "matrix_offset": 128,
         },
     )
@@ -9948,6 +10901,7 @@ class Manhunt2MdlReader:
         self.root_obj = None
         self.armature_obj = None
         self.bone_map = {}
+        self.skin_palette = []
         self.object_infos = []
         self.imported_mesh_objects = []
         self.debug_log = []
@@ -9977,6 +10931,8 @@ class Manhunt2MdlReader:
         self.select_bone_record_layout()
         self.create_import_collection()
         self.read_bones()
+        self.complete_missing_local_bone_matrices()
+        self.read_animation_bone_bindings()
         if self.import_armature and self.bone_map:
             self.build_armature()
         self.read_object_infos()
@@ -10157,6 +11113,14 @@ class Manhunt2MdlReader:
                     mesh_object.matrix_parent_inverse = root.matrix_world.inverted()
                 except Exception:
                     pass
+
+        if self.armature_obj is not None:
+            checked_children, repaired_children = self.enforce_mesh_armature_relationships()
+            self.log(
+                "MH2 armature/mesh relationship verification: checked={} repaired={}".format(
+                    checked_children, repaired_children
+                )
+            )
 
         self.root_obj = root
         for property_name, property_value in (
@@ -10413,6 +11377,11 @@ class Manhunt2MdlReader:
         name_start = int(layout["name_offset"])
         name_end = name_start + int(layout["name_size"])
         name = block[name_start:name_end].split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
+        local_matrix_offset = int(layout.get("local_matrix_offset", -1))
+        if local_matrix_offset >= 0:
+            source_local_matrix, blender_local_matrix = self.decode_bone_matrix(block, local_matrix_offset)
+        else:
+            source_local_matrix, blender_local_matrix = None, None
         source_matrix, blender_matrix = self.decode_bone_matrix(block, int(layout["matrix_offset"]))
         if source_matrix is None:
             return
@@ -10425,6 +11394,8 @@ class Manhunt2MdlReader:
             "subbone_offset": int(child_offset),
             "sibling_offset": int(sibling_offset),
             "anim_data_idx_offset": int(anim_data_idx_offset),
+            "source_local_matrix": source_local_matrix,
+            "local_matrix": blender_local_matrix,
             "source_matrix": source_matrix,
             "matrix": blender_matrix,
         }
@@ -10440,11 +11411,188 @@ class Manhunt2MdlReader:
         if self.is_valid_bone_offset(sibling_offset):
             self.read_bone_record(sibling_offset, depth + 1)
 
+    def complete_missing_local_bone_matrices(self):
+        """Derive local matrices from stored world matrices when a variant does not expose a verified local-matrix field."""
+        for offset, bone_info in self.bone_map.items():
+            if bone_info.get("local_matrix") is not None:
+                continue
+            parent_offset = int(bone_info.get("parent_offset", 0) or 0)
+            if parent_offset in self.bone_map:
+                parent_info = self.bone_map[parent_offset]
+                parent_world = parent_info.get("matrix")
+                source_parent_world = parent_info.get("source_matrix")
+                if parent_world is not None:
+                    bone_info["local_matrix"] = parent_world.inverted_safe() @ bone_info["matrix"]
+                if source_parent_world is not None:
+                    try:
+                        bone_info["source_local_matrix"] = source_parent_world.inverted_safe() @ bone_info["source_matrix"]
+                    except Exception:
+                        pass
+            else:
+                bone_info["local_matrix"] = bone_info["matrix"].copy()
+                bone_info["source_local_matrix"] = bone_info["source_matrix"].copy()
+            bone_info["local_matrix_source"] = "DERIVED_FROM_WORLD_HIERARCHY"
+
+    def normalize_mh2_animation_bone_name(self, name):
+        text = str(name or "").strip().lower()
+        for character in (" ", ".", "-", "~"):
+            text = text.replace(character, "_")
+        while "__" in text:
+            text = text.replace("__", "_")
+        text = text.strip("_")
+        text = text.replace("left_", "l_").replace("right_", "r_")
+        text = text.replace("upper_arm", "upperarm").replace("lower_arm", "forearm")
+        text = text.replace("lowerarm", "forearm")
+        return text
+
+    def mh2_animation_bone_id_from_name(self, name):
+        mapping = {
+            "bip01": 1000, "root": 1000, "head": 1001, "l_calf": 1002,
+            "bip01_l_clavicle": 1003, "l_clavicle": 1003, "l_finger0": 1004,
+            "l_finger1": 1005, "l_finger01": 1006, "l_finger2": 1008,
+            "l_finger11": 1011, "l_finger21": 1013, "l_foot": 1019,
+            "l_forearm": 1020, "l_hand": 1021, "l_thigh": 1023, "l_toe": 1024,
+            "l_toe0": 1024, "l_upperarm": 1039, "neck": 1040, "pelvis": 1045,
+            "r_calf": 1056, "bip01_r_clavicle": 1057, "r_clavicle": 1057,
+            "r_finger0": 1058, "r_finger1": 1059, "r_finger01": 1060,
+            "r_finger2": 1062, "r_finger11": 1065, "r_finger21": 1067,
+            "r_foot": 1073, "r_forearm": 1074, "r_hand": 1075, "r_thigh": 1077,
+            "r_toe": 1078, "r_toe0": 1078, "r_upperarm": 1093, "spine": 1094,
+            "spine1": 1095, "spine2": 1096,
+        }
+        normalized = self.normalize_mh2_animation_bone_name(name)
+        if normalized in mapping:
+            return int(mapping[normalized])
+        if normalized.startswith("bip01_") and normalized[6:] in mapping:
+            return int(mapping[normalized[6:]])
+        return None
+
+    def read_animation_bone_bindings(self):
+        """Resolve MH2 IFP BoneIDs and the vertex skin palette from the MDL.
+
+        Retail MH2 skin bytes index the animation/bone-transform palette. They
+        are not hierarchy traversal indices.  The same table also supplies the
+        authoritative int16 BoneID used by ANCT/SEQT IFP tracks.
+        """
+        candidates = []
+        for bone_info in self.bone_map.values():
+            offset = int(bone_info.get("anim_data_idx_offset", 0) or 0)
+            if offset and offset not in candidates:
+                candidates.append(offset)
+        if self.bone_trans_idx_offs and int(self.bone_trans_idx_offs) not in candidates:
+            candidates.append(int(self.bone_trans_idx_offs))
+
+        current_position = self.file.tell()
+        best_palette = []
+        try:
+            for index_offset in candidates:
+                if not self.is_valid_offset(index_offset, 0x20, 24):
+                    continue
+                try:
+                    self.file.seek(index_offset)
+                    raw = self.file.read(24)
+                    if len(raw) != 24:
+                        continue
+                    num_bones, unknown, root_bone_offset, anim_data_offset, bone_transform_offset, zero = struct.unpack("<6i", raw)
+                    if num_bones <= 0 or num_bones > 4096:
+                        continue
+                    if not self.is_valid_offset(anim_data_offset, 0x20, num_bones * 8):
+                        continue
+
+                    self.file.seek(anim_data_offset)
+                    palette = []
+                    bound_count = 0
+                    for palette_index in range(num_bones):
+                        row = self.file.read(8)
+                        if len(row) != 8:
+                            break
+                        anim_bone_id, bone_type, bone_offset = struct.unpack("<hhI", row)
+                        bone_info = self.bone_map.get(int(bone_offset))
+                        palette_entry = {
+                            "index": int(palette_index),
+                            "anim_bone_id": int(anim_bone_id),
+                            "bone_type": int(bone_type),
+                            "bone_offset": int(bone_offset),
+                            "name": bone_info.get("name", "") if bone_info is not None else "",
+                        }
+                        palette.append(palette_entry)
+                        if bone_info is None:
+                            continue
+                        bone_info["anim_bone_id"] = int(anim_bone_id)
+                        bone_info["anim_bone_type"] = int(bone_type)
+                        bone_info["skin_palette_index"] = int(palette_index)
+                        bone_info["anim_bone_id_source"] = "ANIM_BIND_TABLE"
+                        bound_count += 1
+                        self.log(
+                            "MH2 animation binding[{:02d}]: BoneID {} -> {!r} (0x{:08X}, type {})".format(
+                                palette_index, anim_bone_id, bone_info.get("name", ""), bone_offset, bone_type
+                            )
+                        )
+
+                    if bound_count and len(palette) > len(best_palette):
+                        best_palette = palette
+                        self.log(
+                            "MH2 animation/skin palette accepted at 0x{:08X}: rows={} bound={}".format(
+                                index_offset, len(palette), bound_count
+                            )
+                        )
+                except Exception as exc:
+                    self.log("MH2 animation binding table 0x{:08X} skipped: {}".format(index_offset, exc))
+        finally:
+            self.file.seek(current_position)
+
+        if best_palette:
+            self.skin_palette = best_palette
+
+        fallback_count = 0
+        for bone_info in self.bone_map.values():
+            if "anim_bone_id" in bone_info:
+                continue
+            fallback_id = self.mh2_animation_bone_id_from_name(bone_info.get("name", ""))
+            if fallback_id is None:
+                continue
+            bone_info["anim_bone_id"] = int(fallback_id)
+            bone_info["anim_bone_type"] = 0
+            bone_info["anim_bone_id_source"] = "RETAIL_NAME_FALLBACK"
+            fallback_count += 1
+        if fallback_count:
+            self.log("MH2 animation BoneID name fallback assigned {} bone(s)".format(fallback_count))
+        if not self.skin_palette:
+            self.log("MH2 skin palette table unavailable; retaining hierarchy-order skin fallback for this variant")
+
+    def get_imported_armature_name(self):
+        def normalize_name(value):
+            return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+        explicit_armature_names = {
+            "hfori",
+            "male_base",
+            "male_base01",
+            "female_base",
+            "female_base01",
+        }
+
+        matches = []
+        for offset, bone_info in self.bone_map.items():
+            name = str(bone_info.get("name", "") or "").strip()
+            normalized = normalize_name(name)
+            if normalized not in explicit_armature_names:
+                continue
+            priority = 0 if normalized == "hfori" else 10
+            matches.append((priority, int(offset), name))
+
+        if matches:
+            matches.sort(key=lambda item: (item[0], item[1]))
+            return matches[0][2]
+
+        return "unnamed"
+
     def build_armature(self):
         import bpy
 
-        armature = bpy.data.armatures.new("{}_Armature".format(self.stem))
-        armature_object = bpy.data.objects.new(armature.name, armature)
+        armature_name = self.get_imported_armature_name()
+        armature = bpy.data.armatures.new(armature_name)
+        armature_object = bpy.data.objects.new(armature_name, armature)
         self.collection.objects.link(armature_object)
 
         bpy.context.view_layer.objects.active = armature_object
@@ -10453,6 +11601,34 @@ class Manhunt2MdlReader:
         except Exception:
             pass
         self.run_mode_set("EDIT")
+
+        # MH2 stores both a local hierarchy matrix and a world/initial matrix.
+        # Rebuild child world transforms exactly as the Max/Allen hierarchy does:
+        # Blender column-vector equivalent of Max local * parent is parent @ local.
+        rebuilt_world = {}
+        visiting = set()
+
+        def resolve_world(offset):
+            if offset in rebuilt_world:
+                return rebuilt_world[offset]
+            bone_info = self.bone_map[offset]
+            parent_offset = int(bone_info.get("parent_offset", 0) or 0)
+            if offset in visiting:
+                self.log("MH2 hierarchy cycle warning at 0x{:08X}; using stored world matrix".format(offset))
+                return bone_info["matrix"].copy()
+            visiting.add(offset)
+            if parent_offset in self.bone_map:
+                local_matrix = bone_info.get("local_matrix", bone_info["matrix"])
+                world_matrix = resolve_world(parent_offset) @ local_matrix
+            else:
+                world_matrix = bone_info["matrix"].copy()
+            visiting.discard(offset)
+            rebuilt_world[offset] = world_matrix
+            bone_info["rebuilt_matrix"] = world_matrix
+            return world_matrix
+
+        for bone_offset in self.bone_map:
+            resolve_world(bone_offset)
 
         edit_bones_by_offset = {}
         used_names = set()
@@ -10467,8 +11643,9 @@ class Manhunt2MdlReader:
             bone_info["name"] = bone_name
 
             edit_bone = armature.edit_bones.new(bone_name)
-            head = bone_info["matrix"].to_translation()
-            y_axis = bone_info["matrix"].to_3x3() @ Vector((0.0, 1.0, 0.0))
+            bind_matrix = bone_info.get("rebuilt_matrix", bone_info["matrix"])
+            head = bind_matrix.to_translation()
+            y_axis = bind_matrix.to_3x3() @ Vector((0.0, 1.0, 0.0))
             if y_axis.length < 0.000001:
                 y_axis = Vector((0.0, 0.0, 1.0))
             tail = head + y_axis.normalized() * 0.05
@@ -10477,7 +11654,7 @@ class Manhunt2MdlReader:
             edit_bone.head = head
             edit_bone.tail = tail
             try:
-                z_axis = bone_info["matrix"].to_3x3() @ Vector((0.0, 0.0, 1.0))
+                z_axis = bind_matrix.to_3x3() @ Vector((0.0, 0.0, 1.0))
                 edit_bone.align_roll(z_axis)
             except Exception:
                 pass
@@ -10501,12 +11678,31 @@ class Manhunt2MdlReader:
                 target["bleeds_mh2_sibling_offset"] = int(bone_info.get("sibling_offset", 0))
                 target["bleeds_mh2_child_offset"] = int(bone_info.get("subbone_offset", 0))
                 target["bleeds_mh2_anim_data_idx_offset"] = int(bone_info.get("anim_data_idx_offset", 0))
+                target["bleeds_mh2_bind_matrix_source"] = "LOCAL_PARENT_REBUILD"
+                local_matrix = bone_info.get("local_matrix")
+                if local_matrix is not None:
+                    flat_local = [float(local_matrix[row][column]) for row in range(4) for column in range(4)]
+                    target["bleeds_mh2_local_rest_matrix"] = flat_local
+                    target["bleeds_mdl_import_local_matrix"] = flat_local
+                if "skin_palette_index" in bone_info:
+                    target["bleeds_mh2_skin_palette_index"] = int(bone_info["skin_palette_index"])
+                if "anim_bone_id" in bone_info:
+                    anim_bone_id = int(bone_info["anim_bone_id"])
+                    target["bleeds_anim_bone_id"] = anim_bone_id
+                    target["bleeds_mh2_anim_bone_id"] = anim_bone_id
+                    target["bleeds_mdl_anim_bone_id"] = anim_bone_id
+                    target["BoneID"] = anim_bone_id
+                    target["bleeds_mh2_anim_bone_type"] = int(bone_info.get("anim_bone_type", 0))
+                    target["bleeds_mh2_anim_bone_id_source"] = str(bone_info.get("anim_bone_id_source", "UNKNOWN"))
 
         armature_object["bleeds_model_game"] = "MH2"
         armature_object["bleeds_mh2_platform"] = "PSP" if self.asset_variant == "PSP_BETA" else "PC"
         armature_object["bleeds_mh2_asset_variant"] = self.asset_variant
         armature_object["bleeds_mh2_bone_record_layout"] = self.bone_record_layout["name"]
         armature_object["bleeds_mdl_filepath"] = self.path
+        armature_object["bleeds_mh2_animation_binding_count"] = int(sum(1 for bone_info in self.bone_map.values() if "anim_bone_id" in bone_info))
+        armature_object["bleeds_mh2_skin_palette_size"] = int(len(self.skin_palette))
+        armature_object["bleeds_mh2_bind_hierarchy"] = "LOCAL_PARENT_REBUILD"
         self.armature_obj = armature_object
 
     def read_object_infos(self):
@@ -11174,7 +12370,7 @@ class Manhunt2MdlReader:
             "has_skin_weights": bool(has_skin_weights),
             "weight_sum_min": 0.0 if weight_sum_min == 999999.0 else float(weight_sum_min),
             "weight_sum_max": 0.0 if weight_sum_max == -999999.0 else float(weight_sum_max),
-            "vertex_layout_name": str(vertex_layout.get("name", "heuristic")) if use_exact_layout else "heuristic",
+            "vertex_layout_name": str(vertex_layout.get("name", "general")) if use_exact_layout else "general",
             "bounds_text": bounds_text,
         }
 
@@ -11409,9 +12605,21 @@ class Manhunt2MdlReader:
     def parent_mesh_to_armature(self, mesh_object, create_rigid_parent_group=True):
         if mesh_object is None or self.armature_obj is None:
             return False
+
+        # Preserve the imported mesh placement while establishing a real
+        # Blender object parent-child relationship with the armature.
+        try:
+            world_matrix = mesh_object.matrix_world.copy()
+        except Exception:
+            world_matrix = None
+
         try:
             mesh_object.parent = self.armature_obj
-            mesh_object.matrix_parent_inverse = self.armature_obj.matrix_world.inverted()
+            mesh_object.parent_type = "OBJECT"
+            mesh_object.parent_bone = ""
+            mesh_object.matrix_parent_inverse = self.armature_obj.matrix_world.inverted_safe()
+            if world_matrix is not None:
+                mesh_object.matrix_world = world_matrix
         except Exception as exc:
             self.log("MH2 armature parenting failed for {!r}: {}".format(mesh_object.name, exc))
             return False
@@ -11430,24 +12638,71 @@ class Manhunt2MdlReader:
                 self.log("MH2 parent-bone vertex group failed for {!r}: {}".format(mesh_object.name, exc))
 
         try:
-            modifier = None
-            for existing_modifier in mesh_object.modifiers:
-                if existing_modifier.type == "ARMATURE" and existing_modifier.object == self.armature_obj:
-                    modifier = existing_modifier
-                    break
-            if modifier is None:
-                modifier = mesh_object.modifiers.new(name="MH2 Armature", type="ARMATURE")
-                modifier.object = self.armature_obj
-            modifier.show_in_editmode = True
-            modifier.show_on_cage = True
+            correct_modifier = None
+            duplicate_modifiers = []
+            for existing_modifier in list(mesh_object.modifiers):
+                if existing_modifier.type != "ARMATURE":
+                    continue
+                if correct_modifier is None:
+                    correct_modifier = existing_modifier
+                    correct_modifier.object = self.armature_obj
+                else:
+                    duplicate_modifiers.append(existing_modifier)
+            for duplicate_modifier in duplicate_modifiers:
+                try:
+                    mesh_object.modifiers.remove(duplicate_modifier)
+                except Exception:
+                    pass
+            if correct_modifier is None:
+                correct_modifier = mesh_object.modifiers.new(name="BLeeds MH2 Armature", type="ARMATURE")
+                correct_modifier.object = self.armature_obj
+            correct_modifier.name = "BLeeds MH2 Armature"
+            correct_modifier.show_in_editmode = True
+            correct_modifier.show_on_cage = True
         except Exception as exc:
             self.log("MH2 armature modifier creation failed for {!r}: {}".format(mesh_object.name, exc))
 
-        mesh_object["bleeds_mh2_child_of_armature"] = True
+        parent_ok = getattr(mesh_object, "parent", None) == self.armature_obj
+        modifier_ok = any(
+            modifier.type == "ARMATURE" and getattr(modifier, "object", None) == self.armature_obj
+            for modifier in mesh_object.modifiers
+        )
+        mesh_object["bleeds_mh2_child_of_armature"] = bool(parent_ok)
+        mesh_object["bleeds_mh2_armature_modifier_ok"] = bool(modifier_ok)
         mesh_object["bleeds_mh2_armature_name"] = self.armature_obj.name
+        mesh_object["bleeds_mh2_parent_relationship"] = "OBJECT_CHILD_OF_ARMATURE" if parent_ok else "FAILED"
         if mesh_object not in self.imported_mesh_objects:
             self.imported_mesh_objects.append(mesh_object)
-        return True
+        self.log(
+            "MH2 parent link {!r} -> {!r}: object_parent={} armature_modifier={}".format(
+                mesh_object.name, self.armature_obj.name, parent_ok, modifier_ok
+            )
+        )
+        return bool(parent_ok and modifier_ok)
+
+    def enforce_mesh_armature_relationships(self):
+        if self.armature_obj is None:
+            return 0, 0
+        checked = 0
+        repaired = 0
+        for mesh_object in list(self.imported_mesh_objects):
+            if mesh_object is None or getattr(mesh_object, "type", None) != "MESH":
+                continue
+            checked += 1
+            parent_ok = getattr(mesh_object, "parent", None) == self.armature_obj
+            modifier_ok = any(
+                modifier.type == "ARMATURE" and getattr(modifier, "object", None) == self.armature_obj
+                for modifier in mesh_object.modifiers
+            )
+            if not parent_ok or not modifier_ok:
+                if self.parent_mesh_to_armature(
+                    mesh_object,
+                    create_rigid_parent_group=not bool(mesh_object.get("bleeds_mh2_has_skin_weights", False)),
+                ):
+                    repaired += 1
+        self.armature_obj["bleeds_mh2_mesh_child_count"] = int(checked)
+        self.armature_obj["bleeds_mh2_mesh_child_repairs"] = int(repaired)
+        return checked, repaired
 
     def normalize_texture_name(self, value):
         text = os.path.splitext(os.path.basename(str(value or "")))[0]
@@ -11694,6 +12949,20 @@ class Manhunt2MdlReader:
         return material
 
     def get_skin_palette_names(self):
+        # Retail MH2 vertex bone bytes index the animation/bone-transform
+        # palette.  They are not hierarchy traversal indices.
+        if self.skin_palette:
+            names = []
+            for palette_index, palette_entry in enumerate(self.skin_palette):
+                bone_offset = int(palette_entry.get("bone_offset", 0) or 0)
+                bone_info = self.bone_map.get(bone_offset)
+                if bone_info is not None:
+                    bone_name = str(bone_info.get("name", "") or "")
+                else:
+                    bone_name = str(palette_entry.get("name", "") or "")
+                names.append(bone_name)
+            return names
+
         names = []
         used_names = set()
         for bone_index, bone_info in enumerate(self.bone_map.values()):
@@ -11717,7 +12986,7 @@ class Manhunt2MdlReader:
         vertex_groups = mesh_object.vertex_groups
         while len(vertex_groups) > 0:
             vertex_groups.remove(vertex_groups[0])
-        groups = [vertex_groups.new(name=name) for name in palette_names]
+        groups = [vertex_groups.new(name=name) if name else None for name in palette_names]
 
         assigned_influence_count = 0
         weighted_vertex_count = 0
@@ -11732,7 +13001,7 @@ class Manhunt2MdlReader:
                     continue
                 if not math.isfinite(weight) or weight <= 0.000001:
                     continue
-                if bone_index < 0 or bone_index >= len(groups):
+                if bone_index < 0 or bone_index >= len(groups) or groups[bone_index] is None:
                     continue
                 merged_weights[bone_index] = merged_weights.get(bone_index, 0.0) + weight
 

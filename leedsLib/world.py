@@ -205,14 +205,14 @@ class MDLParser:
             off += 22
 
         aa_tail, new_off = self.scan_aa_tail(off)
-        next_guess = (new_off & ~3)
+        next_offset = (new_off & ~3)
         return MDLMaterialList(
             count=count,
             size_bytes=size_bytes,
             materials=materials,
             bytes_read=off - base,
             aa_tail=aa_tail,
-            next_off=next_guess,
+            next_off=next_offset,
         )
 
     def parse_one_batch(self, buf: bytes, pos: int) -> Tuple[TriStrip, int]:
@@ -704,7 +704,7 @@ def classify_entries(entries: list) -> None:
             e.note = "tex_ref"
         else:
             e.kind = "MDL"
-            e.note = "mdl_or_other"
+            e.note = "embedded_render_resource_candidate"
             e.mdl_info = None
 
 def decode_textures_for_entries(data: bytes, header: WorldHeader, entries: list, stem: str) -> None:

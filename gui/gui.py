@@ -16,7 +16,9 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from .mdl_ot import *
+from .dff_ot import *
 from .anim_ot import *
+from .ifp_ot import *
 from .mdl_menus import *
 from .gui_menus import *
 from .col2_ot import *

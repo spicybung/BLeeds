@@ -15,15 +15,15 @@ from ..ops import tex_importer
 class IMPORT_OT_tex(Operator, ImportHelper):
 
     bl_idname = "import_scene.leeds_tex"
-    bl_label = "Import Texture List"
-    bl_description = "Import textures from a Rockstar Leeds CHK, XTX, or TEX file"
+    bl_label = "Import Leeds Texture Container"
+    bl_description = "Decode a Rockstar Leeds XTX/CHK/TEX texture container with PS2/PSP layout detection"
     bl_options = {'UNDO'}
 
     filename_ext = ".xtx"
 
     filter_glob: StringProperty(
         name="File Filter",
-        description="Filter for texture dictionary files",
+        description="Filter for Leeds texture container files",
         default="*.chk;*.xtx;*.tex",
         options={'HIDDEN'},
         maxlen=255,

@@ -60,6 +60,7 @@ class StoriesImportContext:
     filepath: str
     platform: str
     mdl_type: str
+    game: str
     shrink: int
     import_type: int
     atomic: Any
@@ -359,6 +360,34 @@ def get_bone_parent_map(import_type: int) -> Dict[str, str]:
         return dict(stories_mdl.commonBoneParentsVCS)
     return {}
 
+def getImportedArmatureName(filepath: str, arm_info: Any = None) -> str:
+    def normalize_name(value: Any) -> str:
+        return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+    explicit_armature_names = {
+        "hfori",
+        "male_base",
+        "male_base01",
+        "female_base",
+        "female_base01",
+    }
+
+    if arm_info is not None:
+        frame_names = dict(getattr(arm_info, "frame_names", {}) or {})
+        matches = []
+        for ptr, raw_name in frame_names.items():
+            name = str(raw_name or "").strip()
+            normalized = normalize_name(name)
+            if normalized in explicit_armature_names:
+                priority = 0 if normalized == "hfori" else 10
+                matches.append((priority, int(ptr), name))
+
+        if matches:
+            matches.sort(key=lambda item: (item[0], item[1]))
+            return matches[0][2]
+
+    return "unnamed"
+
 def create_armature_from_context(
     context: bpy.types.Context,
     stories_ctx: Any,
@@ -375,10 +404,14 @@ def create_armature_from_context(
     old_active = view_layer.objects.active
     old_mode = context.mode
 
-    base_name = os.path.splitext(os.path.basename(stories_ctx.filepath))[0]
-    arm_data = bpy.data.armatures.new(f"{base_name}_{name_suffix}")
-    arm_obj = bpy.data.objects.new(arm_data.name, arm_data)
+    armature_name = getImportedArmatureName(stories_ctx.filepath, arm_info)
+    arm_data = bpy.data.armatures.new(armature_name)
+    arm_obj = bpy.data.objects.new(armature_name, arm_data)
     collection.objects.link(arm_obj)
+    try:
+        arm_data.pose_position = "POSE"
+    except Exception:
+        pass
 
     view_layer.objects.active = arm_obj
     bpy.ops.object.mode_set(mode="EDIT")
@@ -426,6 +459,10 @@ def create_armature_from_context(
                 continue
             writeMdlImportedFrameMatrixAttributes(bone, int(ptr), str(name), arm_info)
             writeBlenderRestMatrixAttributes(bone, arm_data, str(name))
+            try:
+                bone.use_deform = True
+            except Exception:
+                pass
             try:
                 canon_name = stories_mdl.canon_frame_name(str(name))
                 id_map, type_map = stories_mdl._ped_known_hanim_maps(stories_ctx.import_type)
@@ -513,7 +550,6 @@ def match_mesh_to_armature_space(
 
     world_mat = arm_info.frame_mats_world.get(frame_ptr)
     if world_mat is not None:
-
         obj.matrix_world = world_mat
 
     for mod in list(obj.modifiers):
@@ -522,9 +558,45 @@ def match_mesh_to_armature_space(
 
     arm_mod = obj.modifiers.new(name="Armature", type="ARMATURE")
     arm_mod.object = arm_obj
+    arm_mod.use_vertex_groups = True
+    arm_mod.use_bone_envelopes = False
+    try:
+        arm_mod.show_viewport = True
+        arm_mod.show_render = True
+    except Exception:
+        pass
 
+    saved_world = obj.matrix_world.copy()
     obj.parent = arm_obj
-    obj.matrix_parent_inverse = arm_obj.matrix_world.inverted()
+    obj.parent_type = "OBJECT"
+    obj.parent_bone = ""
+    obj.matrix_parent_inverse = arm_obj.matrix_world.inverted_safe()
+    obj.matrix_world = saved_world
+
+    obj["bleeds_armature_parent_relationship"] = "OBJECT_CHILD_OF_ARMATURE"
+    obj["bleeds_armature_name"] = arm_obj.name
+    obj["bleeds_mdl_bind_space_policy"] = "ATOMIC_FRAME_WORLD_THEN_ARMATURE_CHILD"
+
+def hasUsableSkinWeights(skin_weights: Any, epsilon: float = 1.0e-6) -> bool:
+    for vertex_weights in list(skin_weights or []):
+        for weight in list(vertex_weights or []):
+            try:
+                if float(weight) > float(epsilon):
+                    return True
+            except Exception:
+                continue
+    return False
+
+def markRigidStoriesMesh(obj: bpy.types.Object, reason: str) -> None:
+    if obj is None:
+        return
+    for mod in list(obj.modifiers):
+        if mod.type == "ARMATURE":
+            obj.modifiers.remove(mod)
+    obj.vertex_groups.clear()
+    obj["bleeds_mdl_skin_binding"] = "RIGID_FRAME_OBJECT"
+    obj["bleeds_mdl_skin_binding_reason"] = str(reason)
+    obj["bleeds_armature_parent_relationship"] = "NONE_RIGID"
 
 def parent_object_keep_world(child_obj: bpy.types.Object, parent_obj: bpy.types.Object) -> None:
     if child_obj is None or parent_obj is None:
@@ -532,7 +604,12 @@ def parent_object_keep_world(child_obj: bpy.types.Object, parent_obj: bpy.types.
 
     saved_world = child_obj.matrix_world.copy()
     child_obj.parent = parent_obj
-    child_obj.matrix_parent_inverse = parent_obj.matrix_world.inverted()
+    try:
+        child_obj.parent_type = "OBJECT"
+        child_obj.parent_bone = ""
+    except Exception:
+        pass
+    child_obj.matrix_parent_inverse = parent_obj.matrix_world.inverted_safe()
     child_obj.matrix_world = saved_world
 
 def flattenMatrixForMdlProperty(matrix_value: Matrix) -> List[float]:
@@ -715,31 +792,94 @@ def getImportedHierarchyBoneNames(arm_obj: bpy.types.Object) -> List[str]:
 
     return names
 
+def normalizeMdlSkinBoneName(name: str) -> str:
+    text = str(name or "").strip().lower()
+    return "".join(ch for ch in text if ch.isalnum())
+
+def getCanonicalPedSkinPaletteBoneIds(import_type: int) -> List[int]:
+    if import_type in (0, 1):
+        return [int(value) for value in list(getattr(stories_mdl, "kamBoneID", []) or [])]
+    if import_type in (2, 3):
+        return [int(value) for value in list(getattr(stories_mdl, "kamBoneIDVCS", []) or [])]
+    return []
+
+def getArmatureBoneDirectAnimId(bone: Any) -> int:
+    if bone is None:
+        return -1
+
+    for property_name in (
+        "bleeds_anim_bone_id",
+        "bleeds_mdl_anim_bone_id",
+        "bleeds_ped_anim_bone_id",
+        "bleeds_hanim_bone_id",
+        "BoneID",
+        "bone_id",
+        "bleeds_bone_id",
+        "bleeds_boneid",
+        "leeds_anim_bone_id",
+        "anim_bone_id",
+    ):
+        try:
+            if property_name in bone:
+                return int(bone[property_name])
+        except Exception:
+            continue
+
+    return -1
+
 def getCanonicalPedSkinPaletteBoneNames(import_type: int, arm_obj: bpy.types.Object = None) -> List[str]:
-    names = [str(name) for name in get_bone_name_list(import_type)]
-    if not names:
+    canonical_names = [str(name) for name in get_bone_name_list(import_type)]
+    if not canonical_names:
         return []
 
-    if arm_obj is None:
-        return names
+    if arm_obj is None or getattr(arm_obj, "data", None) is None:
+        return canonical_names
 
-    try:
-        arm_bone_names = getArmatureBoneNameSet(arm_obj)
-    except Exception:
-        arm_bone_names = set()
+    arm_bones = list(getattr(arm_obj.data, "bones", []) or [])
+    if not arm_bones:
+        return canonical_names
 
-    if not arm_bone_names:
-        return names
+    by_direct_id: Dict[int, str] = {}
+    by_normalized_name: Dict[str, str] = {}
+    for bone in arm_bones:
+        bone_name = str(getattr(bone, "name", "") or "")
+        if not bone_name:
+            continue
 
-    usable = 0
-    for name in names:
-        if str(name) in arm_bone_names:
-            usable += 1
+        direct_id = getArmatureBoneDirectAnimId(bone)
+        if direct_id >= 0 and direct_id not in by_direct_id:
+            by_direct_id[direct_id] = bone_name
 
-    if usable >= max(6, int(len(names) * 0.50)):
-        return names
+        normalized_name = normalizeMdlSkinBoneName(bone_name)
+        if normalized_name and normalized_name not in by_normalized_name:
+            by_normalized_name[normalized_name] = bone_name
 
-    return names
+        try:
+            canonicalized = normalizeMdlSkinBoneName(stories_mdl.canon_frame_name(bone_name))
+            if canonicalized and canonicalized not in by_normalized_name:
+                by_normalized_name[canonicalized] = bone_name
+        except Exception:
+            pass
+
+    canonical_ids = getCanonicalPedSkinPaletteBoneIds(import_type)
+    resolved_names: List[str] = []
+    for palette_index, canonical_name in enumerate(canonical_names):
+        resolved_name = ""
+
+        if palette_index < len(canonical_ids):
+            direct_id = int(canonical_ids[palette_index])
+            resolved_name = by_direct_id.get(direct_id, "")
+
+        if not resolved_name:
+            normalized_canonical = normalizeMdlSkinBoneName(canonical_name)
+            resolved_name = by_normalized_name.get(normalized_canonical, "")
+
+        if not resolved_name:
+            resolved_name = canonical_name
+
+        resolved_names.append(str(resolved_name))
+
+    return resolved_names
 
 def getPs2PedSkinPaletteBoneNames(import_type: int, arm_obj: bpy.types.Object = None) -> List[str]:
     names = getCanonicalPedSkinPaletteBoneNames(import_type, arm_obj)
@@ -863,6 +1003,15 @@ def assign_ps2_skin_merged(
     obj.vertex_groups.clear()
 
     bone_names = getPs2PedSkinPaletteBoneNames(import_type, arm_obj)
+    armature_bone_names = getArmatureBoneNameSet(arm_obj)
+    try:
+        obj["bleeds_mdl_skin_palette_matching_bone_count"] = int(sum(1 for name in bone_names if name in armature_bone_names))
+        obj["bleeds_mdl_skin_palette_bone_count"] = int(len(bone_names))
+        obj["bleeds_mdl_skin_vertex_groups_resolved_to_armature"] = bool(
+            bone_names and all(name in armature_bone_names for name in bone_names)
+        )
+    except Exception:
+        pass
     stampPs2PedSkinPaletteAttributes(obj, import_type, arm_obj)
     try:
         stampPs2PedSkinPaletteAttributes(obj.data, import_type, arm_obj)
@@ -922,6 +1071,10 @@ def writeMergedPs2MdlSemanticAttributes(
     corner_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_export_vertex_index", 'CORNER')
     corner_strip = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_index", 'CORNER')
     corner_strip_vertex = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_vertex_index", 'CORNER')
+    corner_skin_raw = [
+        ensureMdlIntAttribute(mesh, f"bleeds_mdl_corner_skin_raw{slot}", 'CORNER')
+        for slot in range(4)
+    ]
 
     point_emit = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_emit_index", 'POINT')
     point_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_export_vertex_index", 'POINT')
@@ -1040,9 +1193,18 @@ def writeMergedPs2MdlSemanticAttributes(
                 setMdlIntAttributeValue(corner_export, loop_index, local_vertex_index)
                 setMdlIntAttributeValue(corner_strip, loop_index, src_strip_index)
                 setMdlIntAttributeValue(corner_strip_vertex, loop_index, src_strip_vertex_index)
+                raw4 = [0, 0, 0, 0]
+                if 0 <= local_vertex_index < len(skin_raw_dwords):
+                    raw4 = list(skin_raw_dwords[local_vertex_index])[:4]
+                while len(raw4) < 4:
+                    raw4.append(0)
+                for slot in range(4):
+                    setMdlIntAttributeValue(
+                        corner_skin_raw[slot], loop_index, signedInt32ForIdProp(raw4[slot])
+                    )
 
     try:
-        mesh["bleeds_mdl_semantic_attributes_version"] = 2
+        mesh["bleeds_mdl_semantic_attributes_version"] = 3
         mesh["bleeds_mdl_semantic_attributes_origin"] = "IMPORTED_PS2_CUT_MERGED"
         mesh["bleeds_mdl_source_part_count"] = int(len(parts))
         mesh["bleeds_mdl_source_part_vertex_starts"] = [int(v) for v in part_vertex_offsets]
@@ -1051,6 +1213,17 @@ def writeMergedPs2MdlSemanticAttributes(
         mesh["bleeds_mdl_source_part_face_counts"] = [int(v) for v in part_face_counts]
         mesh["bleeds_mdl_source_part_material_ids"] = [int(v) for v in part_material_ids]
         mesh["bleeds_mdl_source_part_strip_counts"] = [int(v) for v in part_strip_counts]
+        all_strips = [
+            strip
+            for source_part in parts
+            for strip in list(getattr(source_part, "strips_meta", []) or [])
+        ]
+        mesh["bleeds_mdl_source_strip_dma_counts"] = [int(getattr(strip, "dma_vertex_count", 0) or 0) for strip in all_strips]
+        mesh["bleeds_mdl_source_strip_culling_disabled"] = [bool(getattr(strip, "culling_disabled", False)) for strip in all_strips]
+        mesh["bleeds_mdl_source_strip_offsets"] = [int(getattr(strip, "source_offset", 0) or 0) for strip in all_strips]
+        mesh["bleeds_mdl_source_strip_vif_destinations"] = [int(getattr(strip, "vif_destination", 0) or 0) for strip in all_strips]
+        mesh["bleeds_mdl_source_strip_overlap_counts"] = [int(getattr(strip, "overlap_vertex_count", 0) or 0) for strip in all_strips]
+        mesh["bleeds_mdl_source_strip_continuations"] = [bool(getattr(strip, "continues_previous_strip", False)) for strip in all_strips]
     except Exception:
         pass
 
@@ -1127,6 +1300,15 @@ def buildCutsceneActorPartsByMaterial(parts: List[Any]) -> List[Any]:
                 new_strip = stories_mdl.StripMeta(
                     base_vertex_index=vertex_base + int(getattr(strip, "base_vertex_index", 0) or 0),
                     vertex_count=int(getattr(strip, "vertex_count", 0) or 0),
+                    dma_vertex_count=int(getattr(strip, "dma_vertex_count", 0) or 0),
+                    culling_disabled=bool(getattr(strip, "culling_disabled", False)),
+                    source_offset=int(getattr(strip, "source_offset", 0) or 0),
+                    vif_destination=int(getattr(strip, "vif_destination", 0) or 0),
+                    adc_flags=[bool(v) for v in list(getattr(strip, "adc_flags", []) or [])],
+                    vif_commands=[dict(v) for v in list(getattr(strip, "vif_commands", []) or [])],
+                    batch_index=int(getattr(strip, "batch_index", 0) or 0),
+                    overlap_vertex_count=int(getattr(strip, "overlap_vertex_count", 0) or 0),
+                    continues_previous_strip=bool(getattr(strip, "continues_previous_strip", False)),
                     skin_indices=[list(v) for v in list(getattr(strip, "skin_indices", []) or [])],
                     skin_weights=[list(v) for v in list(getattr(strip, "skin_weights", []) or [])],
                     skin_raw_dwords=[list(v) for v in list(getattr(strip, "skin_raw_dwords", []) or [])],
@@ -1588,6 +1770,10 @@ MDL_CORNER_ATTRIBUTES = (
     "bleeds_mdl_corner_source_export_vertex_index",
     "bleeds_mdl_corner_source_strip_index",
     "bleeds_mdl_corner_source_strip_vertex_index",
+    "bleeds_mdl_corner_skin_raw0",
+    "bleeds_mdl_corner_skin_raw1",
+    "bleeds_mdl_corner_skin_raw2",
+    "bleeds_mdl_corner_skin_raw3",
 )
 
 MDL_POINT_ATTRIBUTES = (
@@ -1770,9 +1956,7 @@ def decodePs2PedSkinWordToNodeWeight(raw_value: int) -> Tuple[int, float]:
         weight = struct.unpack('<f', struct.pack('<I', weight_raw))[0]
     except Exception:
         weight = 0.0
-    if not (-1000000.0 < float(weight) < 1000000.0):
-        weight = 0.0
-    if weight < 0.0:
+    if not math.isfinite(float(weight)) or weight < 0.0:
         weight = 0.0
     return int(node_index), float(weight)
 
@@ -1938,6 +2122,10 @@ def writePs2MdlSemanticAttributes(mesh: bpy.types.Mesh, part: Any, part_index: i
     corner_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_export_vertex_index", 'CORNER')
     corner_strip = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_index", 'CORNER')
     corner_strip_vertex = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_vertex_index", 'CORNER')
+    corner_skin_raw = [
+        ensureMdlIntAttribute(mesh, f"bleeds_mdl_corner_skin_raw{slot}", 'CORNER')
+        for slot in range(4)
+    ]
 
     point_emit = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_emit_index", 'POINT')
     point_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_export_vertex_index", 'POINT')
@@ -2076,10 +2264,19 @@ def writePs2MdlSemanticAttributes(mesh: bpy.types.Mesh, part: Any, part_index: i
             setMdlIntAttributeValue(corner_export, loop_index, vertex_index)
             setMdlIntAttributeValue(corner_strip, loop_index, src_strip_index)
             setMdlIntAttributeValue(corner_strip_vertex, loop_index, src_strip_vertex_index)
+            raw4 = [0, 0, 0, 0]
+            if 0 <= vertex_index < len(skin_raw_dwords):
+                raw4 = list(skin_raw_dwords[vertex_index])[:4]
+            while len(raw4) < 4:
+                raw4.append(0)
+            for slot in range(4):
+                setMdlIntAttributeValue(
+                    corner_skin_raw[slot], loop_index, signedInt32ForIdProp(raw4[slot])
+                )
 
     strip_counts = [int(getattr(strip, "vertex_count", 0)) for strip in strips_meta]
     try:
-        mesh["bleeds_mdl_semantic_attributes_version"] = 2
+        mesh["bleeds_mdl_semantic_attributes_version"] = 3
         mesh["bleeds_mdl_skin_attribute_schema"] = "RSLTANIM_NODE_FLOAT_POINT_V1"
         mesh["bleeds_mdl_semantic_attributes_origin"] = "IMPORTED_PS2"
         mesh["bleeds_mdl_source_part_index"] = int(part_index)
@@ -2089,6 +2286,12 @@ def writePs2MdlSemanticAttributes(mesh: bpy.types.Mesh, part: Any, part_index: i
         mesh["bleeds_mdl_source_loop_count"] = int(len(mesh.loops))
         mesh["bleeds_mdl_source_strip_count"] = int(len(strip_counts))
         mesh["bleeds_mdl_source_strip_counts"] = [int(v) for v in strip_counts]
+        mesh["bleeds_mdl_source_strip_dma_counts"] = [int(getattr(strip, "dma_vertex_count", 0) or 0) for strip in strips_meta]
+        mesh["bleeds_mdl_source_strip_culling_disabled"] = [bool(getattr(strip, "culling_disabled", False)) for strip in strips_meta]
+        mesh["bleeds_mdl_source_strip_offsets"] = [int(getattr(strip, "source_offset", 0) or 0) for strip in strips_meta]
+        mesh["bleeds_mdl_source_strip_vif_destinations"] = [int(getattr(strip, "vif_destination", 0) or 0) for strip in strips_meta]
+        mesh["bleeds_mdl_source_strip_overlap_counts"] = [int(getattr(strip, "overlap_vertex_count", 0) or 0) for strip in strips_meta]
+        mesh["bleeds_mdl_source_strip_continuations"] = [bool(getattr(strip, "continues_previous_strip", False)) for strip in strips_meta]
     except Exception:
         pass
 
@@ -2118,6 +2321,10 @@ def writeStoriesGouraudSemanticAttributes(
     corner_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_export_vertex_index", 'CORNER')
     corner_strip = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_index", 'CORNER')
     corner_strip_vertex = ensureMdlIntAttribute(mesh, "bleeds_mdl_corner_source_strip_vertex_index", 'CORNER')
+    corner_skin_raw = [
+        ensureMdlIntAttribute(mesh, f"bleeds_mdl_corner_skin_raw{slot}", 'CORNER')
+        for slot in range(4)
+    ]
 
     point_emit = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_emit_index", 'POINT')
     point_export = ensureMdlIntAttribute(mesh, "bleeds_mdl_point_source_export_vertex_index", 'POINT')
@@ -2204,9 +2411,21 @@ def writeStoriesGouraudSemanticAttributes(
             setMdlIntAttributeValue(corner_export, loop_index, vertex_index)
             setMdlIntAttributeValue(corner_strip, loop_index, 0)
             setMdlIntAttributeValue(corner_strip_vertex, loop_index, vertex_index)
+            raw4 = [0, 0, 0, 0]
+            if 0 <= vertex_index < len(raw_skin_values):
+                raw4 = list(raw_skin_values[vertex_index])[:4]
+            while len(raw4) < 4:
+                raw4.append(0)
+            for slot in range(4):
+                setMdlIntAttributeValue(
+                    corner_skin_raw[slot], loop_index, signedInt32ForIdProp(raw4[slot])
+                )
+            setMdlIntAttributeValue(corner_export, loop_index, vertex_index)
+            setMdlIntAttributeValue(corner_strip, loop_index, 0)
+            setMdlIntAttributeValue(corner_strip_vertex, loop_index, vertex_index)
 
     try:
-        mesh["bleeds_mdl_semantic_attributes_version"] = 2
+        mesh["bleeds_mdl_semantic_attributes_version"] = 3
         mesh["bleeds_mdl_skin_attribute_schema"] = "RSLTANIM_NODE_FLOAT_POINT_V1"
         mesh["bleeds_mdl_semantic_attributes_origin"] = "IMPORTED_PS2"
         mesh["bleeds_mdl_source_part_index"] = int(part_index)
@@ -2385,7 +2604,8 @@ def buildStoriesGouraudPartData(
 
         position_key = tuple(round(value, 6) for value in position)
         skin_key = effectiveStoriesSkinSignature(bone_indices, bone_weights)
-        cluster_key = (position_key, skin_key)
+        raw_skin_key = tuple(int(value) & 0xFFFFFFFF for value in raw_skin[:4])
+        cluster_key = (position_key, skin_key, raw_skin_key)
 
         new_vertex_index = None
         for candidate_index in clusters_by_position_and_skin.get(cluster_key, []):
@@ -2628,6 +2848,89 @@ def applyStoriesCustomLoopNormals(
             return False
 
 
+def validateStoriesMeshArmatureBinding(
+    obj: bpy.types.Object,
+    arm_obj: bpy.types.Object,
+) -> Tuple[bool, Dict[str, Any]]:
+    result: Dict[str, Any] = {
+        "modifier_target_ok": False,
+        "parent_ok": False,
+        "matching_group_count": 0,
+        "weighted_vertex_count": 0,
+        "matching_influence_count": 0,
+        "total_influence_count": 0,
+    }
+
+    if obj is None or arm_obj is None:
+        return False, result
+
+    try:
+        result["modifier_target_ok"] = any(
+            modifier.type == "ARMATURE" and modifier.object is arm_obj
+            for modifier in obj.modifiers
+        )
+    except Exception:
+        pass
+
+    try:
+        result["parent_ok"] = obj.parent is arm_obj and obj.parent_type == "OBJECT"
+    except Exception:
+        pass
+
+    try:
+        armature_names = {str(bone.name) for bone in arm_obj.data.bones}
+    except Exception:
+        armature_names = set()
+
+    group_name_by_index: Dict[int, str] = {}
+    try:
+        for group in obj.vertex_groups:
+            group_name_by_index[int(group.index)] = str(group.name)
+        result["matching_group_count"] = int(
+            sum(1 for name in group_name_by_index.values() if name in armature_names)
+        )
+    except Exception:
+        pass
+
+    try:
+        for vertex in obj.data.vertices:
+            matching_vertex = False
+            for membership in vertex.groups:
+                weight = float(getattr(membership, "weight", 0.0))
+                if weight <= 1.0e-8:
+                    continue
+                result["total_influence_count"] += 1
+                group_name = group_name_by_index.get(int(membership.group), "")
+                if group_name in armature_names:
+                    result["matching_influence_count"] += 1
+                    matching_vertex = True
+            if matching_vertex:
+                result["weighted_vertex_count"] += 1
+    except Exception:
+        pass
+
+    valid = bool(
+        result["modifier_target_ok"]
+        and result["parent_ok"]
+        and result["matching_group_count"] > 0
+        and result["weighted_vertex_count"] > 0
+        and result["matching_influence_count"] > 0
+    )
+
+    try:
+        obj["bleeds_mdl_binding_valid"] = bool(valid)
+        obj["bleeds_mdl_binding_modifier_target_ok"] = bool(result["modifier_target_ok"])
+        obj["bleeds_mdl_binding_parent_ok"] = bool(result["parent_ok"])
+        obj["bleeds_mdl_binding_matching_group_count"] = int(result["matching_group_count"])
+        obj["bleeds_mdl_binding_weighted_vertex_count"] = int(result["weighted_vertex_count"])
+        obj["bleeds_mdl_binding_matching_influence_count"] = int(result["matching_influence_count"])
+        obj["bleeds_mdl_binding_total_influence_count"] = int(result["total_influence_count"])
+    except Exception:
+        pass
+
+    return valid, result
+
+
 def assignPs2SkinData(
     obj: bpy.types.Object,
     skin_indices: List[List[int]],
@@ -2646,6 +2949,15 @@ def assignPs2SkinData(
     obj.vertex_groups.clear()
 
     bone_names = getPs2PedSkinPaletteBoneNames(import_type, arm_obj)
+    armature_bone_names = getArmatureBoneNameSet(arm_obj)
+    try:
+        obj["bleeds_mdl_skin_palette_matching_bone_count"] = int(sum(1 for name in bone_names if name in armature_bone_names))
+        obj["bleeds_mdl_skin_palette_bone_count"] = int(len(bone_names))
+        obj["bleeds_mdl_skin_vertex_groups_resolved_to_armature"] = bool(
+            bone_names and all(name in armature_bone_names for name in bone_names)
+        )
+    except Exception:
+        pass
     stampPs2PedSkinPaletteAttributes(obj, import_type, arm_obj)
     try:
         stampPs2PedSkinPaletteAttributes(mesh, import_type, arm_obj)
@@ -2666,6 +2978,30 @@ def assignPs2SkinData(
 
     writeMdlVertexSkinAssignments(obj, assignments)
 
+    try:
+        used_names = set()
+        weighted_vertices = 0
+        influence_count = 0
+        for vertex_index, name_weights in assignments.items():
+            positive = [(name, float(weight)) for name, weight in name_weights.items() if float(weight) > 0.0]
+            if positive:
+                weighted_vertices += 1
+            for name, weight in positive:
+                used_names.add(str(name))
+                influence_count += 1
+        armature_names = getArmatureBoneNameSet(arm_obj)
+        obj["bleeds_mdl_skin_weighted_vertices"] = int(weighted_vertices)
+        obj["bleeds_mdl_skin_influence_count"] = int(influence_count)
+        obj["bleeds_mdl_skin_used_group_count"] = int(len(used_names))
+        obj["bleeds_mdl_skin_used_groups_all_match_bones"] = bool(
+            used_names and all(name in armature_names for name in used_names)
+        )
+        obj["bleeds_mdl_skin_unmatched_used_groups"] = sorted(
+            name for name in used_names if name not in armature_names
+        )
+    except Exception:
+        pass
+
 def assign_ps2_skin(
     obj: bpy.types.Object,
     part: Any,
@@ -2683,6 +3019,15 @@ def assign_ps2_skin(
     obj.vertex_groups.clear()
 
     bone_names = getPs2PedSkinPaletteBoneNames(import_type, arm_obj)
+    armature_bone_names = getArmatureBoneNameSet(arm_obj)
+    try:
+        obj["bleeds_mdl_skin_palette_matching_bone_count"] = int(sum(1 for name in bone_names if name in armature_bone_names))
+        obj["bleeds_mdl_skin_palette_bone_count"] = int(len(bone_names))
+        obj["bleeds_mdl_skin_vertex_groups_resolved_to_armature"] = bool(
+            bone_names and all(name in armature_bone_names for name in bone_names)
+        )
+    except Exception:
+        pass
     stampPs2PedSkinPaletteAttributes(obj, import_type, arm_obj)
     try:
         stampPs2PedSkinPaletteAttributes(obj.data, import_type, arm_obj)
@@ -2769,20 +3114,36 @@ def build_ps2_meshes(
 
     base_name = os.path.splitext(os.path.basename(stories_ctx.filepath))[0]
     parts_to_import = list(getattr(geo, "parts", []) or [])
-    if mdl_type_u in {"PED", "CUT"}:
+    # PED parts are runtime/editor part identities, not merely material buckets.
+    # Preserve every actual MDL PED part as its own Blender object even when
+    # multiple parts share the same texture/material.  This is required for
+    # artist-separated meshes (for example a hand split from the torso) to
+    # survive export -> import round trips.
+    #
+    # Cutscene actors keep the historical material grouping path because their
+    # packet layout is consumed as a material-oriented presentation mesh.
+    if mdl_type_u == "CUT":
         original_packet_count = len(parts_to_import)
         parts_to_import = buildCutsceneActorPartsByMaterial(parts_to_import)
         try:
-            model_label = "PedModel" if mdl_type_u == "PED" else "CutsceneModel"
             stories_ctx.log(
-                f"✔ {model_label} Gouraud import: grouped {original_packet_count} source DMA packets into {len(parts_to_import)} material meshes before welding strip seams."
+                f"✔ CutsceneModel Gouraud import: grouped {original_packet_count} source DMA packets into {len(parts_to_import)} material meshes before welding strip seams."
+            )
+        except Exception:
+            pass
+    elif mdl_type_u == "PED":
+        try:
+            stories_ctx.log(
+                f"✔ PedModel import: preserving {len(parts_to_import)} MDL parts as distinct Blender meshes; shared materials do not merge part identity."
             )
         except Exception:
             pass
 
     for part_index, part in enumerate(parts_to_import):
-        if mdl_type_u in {"PED", "CUT"}:
+        if mdl_type_u == "CUT":
             name = f"{base_name}_ps2_mat{int(getattr(part, 'material_id', 0) or 0):02d}"
+        elif mdl_type_u == "PED":
+            name = f"{base_name}_ps2_p{part_index:02d}_mat{int(getattr(part, 'material_id', 0) or 0):02d}"
         else:
             name = f"{base_name}_ps2_p{part_index:02d}"
 
@@ -2896,9 +3257,7 @@ def build_ps2_meshes(
                     obj.data.materials[0] = mat
 
         if arm_obj is not None:
-
             match_mesh_to_armature_space(obj, stories_ctx, arm_obj)
-
             assignPs2SkinData(
                 obj,
                 gouraud_part.skin_indices,
@@ -2906,6 +3265,25 @@ def build_ps2_meshes(
                 stories_ctx.import_type,
                 arm_obj,
             )
+            obj["bleeds_mdl_skin_binding"] = "PED_SKIN_STREAM_ARMATURE"
+            binding_valid, binding_result = validateStoriesMeshArmatureBinding(obj, arm_obj)
+            try:
+                stories_ctx.log(
+                    "✔ PED mesh/armature bind {}: mesh={!r} armature={!r} modifier={} parent={} "
+                    "matching_groups={} weighted_vertices={} matching_influences={}/{}.".format(
+                        "PASS" if binding_valid else "FAIL",
+                        obj.name,
+                        arm_obj.name,
+                        bool(binding_result.get("modifier_target_ok", False)),
+                        bool(binding_result.get("parent_ok", False)),
+                        int(binding_result.get("matching_group_count", 0)),
+                        int(binding_result.get("weighted_vertex_count", 0)),
+                        int(binding_result.get("matching_influence_count", 0)),
+                        int(binding_result.get("total_influence_count", 0)),
+                    )
+                )
+            except Exception:
+                pass
 
         writeMdlPartMatrixProperties(obj, part_index)
 
@@ -3153,6 +3531,7 @@ def build_psp_meshes(
         if arm_obj is not None:
             match_mesh_to_armature_space(obj, stories_ctx, arm_obj)
             assign_psp_skin(obj, mesh_data, stories_ctx.import_type, arm_obj)
+            obj["bleeds_mdl_skin_binding"] = "PED_SKIN_STREAM_ARMATURE"
 
         created_objects.append(obj)
 
@@ -3212,7 +3591,7 @@ def readU32FromBytes(data: bytes, offset: int, default: int = 0) -> int:
         return int(default)
     return int(struct.unpack_from("<I", data, offset)[0])
 
-def isKnownStoriesTopMagic(value: int) -> bool:
+def isKnownStoriesTopLevelIdentifier(value: int) -> bool:
     known = {
         0x00000002,
         0x0000AA02,
@@ -3225,7 +3604,7 @@ def isKnownStoriesTopMagic(value: int) -> bool:
     }
     return int(value) in known
 
-def classifyStoriesTopMagic(value: int) -> Tuple[str, str, str]:
+def classifyStoriesTopLevelIdentifier(value: int) -> Tuple[str, str, str]:
     value = int(value)
     if value in {0x01050001, 0x01000001}:
         return ("LCS", "PS2", "ATOMIC")
@@ -3243,7 +3622,7 @@ def probeStoriesHeaderForPlatform(data: bytes, platform: str) -> Dict[str, Any]:
     result: Dict[str, Any] = {
         "platform": str(platform).upper().strip(),
         "top_level_ptr": 0,
-        "top_magic": 0,
+        "top_identifier": 0,
         "game": "",
         "section_kind": "",
         "allocated_memory": 0,
@@ -3285,7 +3664,7 @@ def probeStoriesHeaderForPlatform(data: bytes, platform: str) -> Dict[str, Any]:
     result["allocated_memory"] = int(allocated_memory)
     result["possible_ptr"] = int(possible_ptr)
 
-    inline_magic = possible_ptr in {
+    inline_identifier = possible_ptr in {
         0x00000002,
         0x0000AA02,
         0x01050001,
@@ -3295,28 +3674,28 @@ def probeStoriesHeaderForPlatform(data: bytes, platform: str) -> Dict[str, Any]:
     }
 
     top_level_ptr = 0
-    if next_ptr_offset == 0x20 and int(allocated_memory) == 0 and inline_magic:
+    if next_ptr_offset == 0x20 and int(allocated_memory) == 0 and inline_identifier:
         top_level_ptr = next_ptr_offset
-    elif 0 <= possible_ptr <= file_len - 4 and isKnownStoriesTopMagic(readU32FromBytes(data, possible_ptr)):
+    elif 0 <= possible_ptr <= file_len - 4 and isKnownStoriesTopLevelIdentifier(readU32FromBytes(data, possible_ptr)):
         top_level_ptr = possible_ptr
-    elif isKnownStoriesTopMagic(possible_ptr):
+    elif isKnownStoriesTopLevelIdentifier(possible_ptr):
         top_level_ptr = next_ptr_offset
     elif 0 <= possible_ptr <= file_len - 4:
         pointed_value = readU32FromBytes(data, possible_ptr)
-        if isKnownStoriesTopMagic(pointed_value):
+        if isKnownStoriesTopLevelIdentifier(pointed_value):
             top_level_ptr = possible_ptr
 
     if not (0 <= top_level_ptr <= file_len - 4):
         return result
 
-    top_magic = readU32FromBytes(data, top_level_ptr)
-    game, detected_platform, section_kind = classifyStoriesTopMagic(top_magic)
+    top_identifier = readU32FromBytes(data, top_level_ptr)
+    game, detected_platform, section_kind = classifyStoriesTopLevelIdentifier(top_identifier)
     if not game:
         return result
 
     result.update({
         "top_level_ptr": int(top_level_ptr),
-        "top_magic": int(top_magic),
+        "top_identifier": int(top_identifier),
         "game": str(game),
         "platform": str(detected_platform or platform).upper().strip(),
         "section_kind": str(section_kind),
@@ -3453,7 +3832,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
         if polygon_index < len(obj.data.polygons):
             obj.data.polygons[polygon_index].material_index = int(material_slot)
 
-    obj["bleeds_mdl_auto_detected"] = True
+    obj["bleeds_mdl_structure_detected"] = True
     obj["bleeds_mdl_detected_game"] = str(detected.get("game", "VCS") or "VCS")
     obj["bleeds_mdl_detected_platform"] = str(detected.get("platform", "PS2") or "PS2")
     obj["bleeds_mdl_detected_type"] = "RAW_EMBEDDED_MDL"
@@ -3519,10 +3898,37 @@ def importRawEmbeddedStoriesMdl(
     objects = buildRawEmbeddedStoriesMdlMeshObject(context, filepath, groups, collection_name, detected)
     if print_debug_log:
         print(
-            f"[mdl-auto] {os.path.basename(filepath)} -> raw embedded WRLD MDL "
+            f"[mdl-detect] {os.path.basename(filepath)} -> raw embedded WRLD MDL "
             f"format={detected['format']} verts={vertex_count} faces={face_count} materials={detected['material_count']}"
         )
     return objects, detected
+
+
+def looksLikePrototypePspStoriesMdl(data: bytes) -> bool:
+    if len(data) < 0x94 or data[:4] != b"ldm\x00":
+        return False
+    if readU32FromBytes(data, 0x04) != 0:
+        return False
+    file_len = readU32FromBytes(data, 0x08)
+    if file_len <= 0 or file_len > len(data):
+        return False
+    if readU32FromBytes(data, 0x1C) != 0x00010000:
+        return False
+    top_ptr = readU32FromBytes(data, 0x20)
+    if top_ptr <= 0 or top_ptr + 4 > file_len:
+        return False
+    if readU32FromBytes(data, top_ptr) not in {0x01050001, 0x01000001, 0x00000002}:
+        return False
+    known_flags = {0x120, 0x121, 0x115, 0x114, 0xA1, 0x1C321}
+    scan_end = min(file_len, 0x1000)
+    for offset in range(0x20, max(0x20, scan_end - 0x48 + 1), 4):
+        if readU32FromBytes(data, offset + 4) not in known_flags:
+            continue
+        size = readU32FromBytes(data, offset)
+        num_strips = readU32FromBytes(data, offset + 8)
+        if 0x48 <= size <= file_len and 0 < num_strips <= 4096:
+            return True
+    return False
 
 def probeStoriesMdlHeader(filepath: str) -> Dict[str, Any]:
     with open(filepath, "rb") as f:
@@ -3530,6 +3936,22 @@ def probeStoriesMdlHeader(filepath: str) -> Dict[str, Any]:
 
     if len(data) < 0x28 or data[:4] != b"ldm\x00":
         raise ValueError("Invalid Stories MDL header")
+
+    if looksLikePrototypePspStoriesMdl(data):
+        top_ptr = readU32FromBytes(data, 0x20)
+        top_identifier = readU32FromBytes(data, top_ptr)
+        _game, _platform, section_kind = classifyStoriesTopLevelIdentifier(top_identifier)
+        return {
+            "platform": "PSP",
+            "game": "LCS",
+            "section_kind": section_kind or "ATOMIC",
+            "top_level_ptr": int(top_ptr),
+            "top_identifier": int(top_identifier),
+            "allocated_memory": readU32FromBytes(data, 0x1C),
+            "possible_ptr": int(top_ptr),
+            "prototype": True,
+            "ok": True,
+        }
 
     probes = [probeStoriesHeaderForPlatform(data, "PS2"), probeStoriesHeaderForPlatform(data, "PSP")]
     ok_probes = [probe for probe in probes if bool(probe.get("ok"))]
@@ -3542,7 +3964,7 @@ def probeStoriesMdlHeader(filepath: str) -> Dict[str, Any]:
         "game": "",
         "section_kind": "",
         "top_level_ptr": 0,
-        "top_magic": 0,
+        "top_identifier": 0,
         "ok": False,
     }
 
@@ -3599,7 +4021,7 @@ def countStoriesContextGeometry(ctx: Any) -> Tuple[int, int, int, int]:
 
     return (int(part_count), int(vertex_count), int(face_count), int(material_count))
 
-def scoreStoriesAutoContext(ctx: Any, platform: str, mdl_type: str, probe: Dict[str, Any]) -> int:
+def rankStoriesParseResult(ctx: Any, platform: str, mdl_type: str, probe: Dict[str, Any], requested_game: str = "AUTO") -> int:
     part_count, vertex_count, face_count, material_count = countStoriesContextGeometry(ctx)
     score = 0
     if vertex_count > 0:
@@ -3612,7 +4034,13 @@ def scoreStoriesAutoContext(ctx: Any, platform: str, mdl_type: str, probe: Dict[
     score += material_count * 20
 
     import_type = int(getattr(ctx, "import_type", 0) or 0)
-    detected_game = str(probe.get("game", "") or "").upper().strip()
+    detected_game = str(getattr(ctx, "game", "") or probe.get("game", "") or "").upper().strip()
+    requested_game_u = str(requested_game or "AUTO").upper().strip()
+    if requested_game_u in {"LCS", "VCS"}:
+        if detected_game and detected_game != requested_game_u:
+            return -100000000
+        if detected_game == requested_game_u:
+            score += 5000
     if detected_game == "LCS" and import_type == 1:
         score += 1000
     if detected_game == "VCS" and import_type in {2, 3}:
@@ -3637,12 +4065,19 @@ def scoreStoriesAutoContext(ctx: Any, platform: str, mdl_type: str, probe: Dict[
 
     return int(score)
 
-def buildStoriesAutoCandidates(filepath: str, import_game: str, platform: str, mdl_type: str) -> List[Tuple[str, str]]:
+def buildStoriesParseOptions(filepath: str, import_game: str, platform: str, mdl_type: str) -> List[Tuple[str, str]]:
     import_game_u = str(import_game or "AUTO").upper().strip()
     platform_u = str(platform or "AUTO").upper().strip()
     mdl_type_u = str(mdl_type or "AUTO").upper().strip()
 
     probe = probeStoriesMdlHeader(filepath)
+    if import_game_u in {"LCS", "VCS"}:
+        probe_game = str(probe.get("game", "") or "").upper().strip()
+        if probe_game in {"LCS", "VCS"} and probe_game != import_game_u:
+            raise ValueError(
+                f"MDL header identifies {probe_game}, but import type is set to {import_game_u}."
+            )
+
     preferred_platform = str(probe.get("platform", "PS2") or "PS2").upper().strip()
     section_kind = str(probe.get("section_kind", "") or "").upper().strip()
 
@@ -3664,52 +4099,54 @@ def buildStoriesAutoCandidates(filepath: str, import_game: str, platform: str, m
     else:
         mdl_types = ["SIM", "PED", "CUT", "VEH"]
 
-    candidates: List[Tuple[str, str]] = []
+    parse_options: List[Tuple[str, str]] = []
     for candidate_platform in platforms:
         for candidate_type in mdl_types:
             pair = (candidate_platform, candidate_type)
-            if pair not in candidates:
-                candidates.append(pair)
+            if pair not in parse_options:
+                parse_options.append(pair)
 
-    return candidates
+    return parse_options
 
-def detectStoriesMdlImportSettings(filepath: str, import_game: str = "AUTO", platform: str = "AUTO", mdl_type: str = "AUTO") -> Dict[str, Any]:
+def determineStoriesMdlImportSettings(filepath: str, import_game: str = "AUTO", platform: str = "AUTO", mdl_type: str = "AUTO") -> Dict[str, Any]:
+    import_game_u = str(import_game or "AUTO").upper().strip()
     probe = probeStoriesMdlHeader(filepath)
-    candidates = buildStoriesAutoCandidates(filepath, import_game, platform, mdl_type)
+    parse_options = buildStoriesParseOptions(filepath, import_game, platform, mdl_type)
     failures = []
-    scored = []
+    results = []
 
-    for candidate_platform, candidate_type in candidates:
+    for option_platform, option_type in parse_options:
         try:
-            reader = stories_mdl.read_stories(filepath, candidate_platform, candidate_type)
+            reader = stories_mdl.read_stories(filepath, option_platform, option_type, game=import_game_u)
             ctx = reader.read()
-            score = scoreStoriesAutoContext(ctx, candidate_platform, candidate_type, probe)
+            score = rankStoriesParseResult(ctx, option_platform, option_type, probe, requested_game=import_game_u)
             part_count, vertex_count, face_count, material_count = countStoriesContextGeometry(ctx)
-            scored.append({
-                "platform": candidate_platform,
-                "mdl_type": candidate_type,
+            results.append({
+                "platform": option_platform,
+                "mdl_type": option_type,
                 "score": int(score),
                 "part_count": int(part_count),
                 "vertex_count": int(vertex_count),
                 "face_count": int(face_count),
                 "material_count": int(material_count),
                 "import_type": int(getattr(ctx, "import_type", 0) or 0),
+                "game": str(getattr(ctx, "game", "") or "").upper().strip(),
             })
         except Exception as exc:
-            failures.append(f"{candidate_platform}/{candidate_type}: {exc}")
+            failures.append(f"{option_platform}/{option_type}: {exc}")
 
-    if not scored:
-        failure_text = "; ".join(failures[:6]) if failures else "no parser candidates were attempted"
-        raise RuntimeError(f"Auto MDL detection failed for {os.path.basename(filepath)}: {failure_text}")
+    if not results:
+        failure_text = "; ".join(failures[:6]) if failures else "no parse options were valid"
+        raise RuntimeError(f"MDL structure detection failed for {os.path.basename(filepath)}: {failure_text}")
 
-    scored.sort(key=lambda item: int(item.get("score", 0)), reverse=True)
-    best = scored[0]
+    results.sort(key=lambda item: int(item.get("score", 0)), reverse=True)
+    best = results[0]
     if int(best.get("vertex_count", 0)) <= 0 and int(best.get("face_count", 0)) <= 0:
-        failure_text = "; ".join(failures[:4]) if failures else "all candidates produced empty geometry"
-        raise RuntimeError(f"Auto MDL detection produced no geometry for {os.path.basename(filepath)}: {failure_text}")
+        failure_text = "; ".join(failures[:4]) if failures else "all parse options produced empty geometry"
+        raise RuntimeError(f"MDL structure detection produced no geometry for {os.path.basename(filepath)}: {failure_text}")
 
-    game = str(probe.get("game", "") or "").upper().strip()
-    if not game:
+    game = str(best.get("game", "") or probe.get("game", "") or "").upper().strip()
+    if not game or game == "AUTO":
         import_type = int(best.get("import_type", 0) or 0)
         if import_type == 1:
             game = "LCS"
@@ -3719,10 +4156,10 @@ def detectStoriesMdlImportSettings(filepath: str, import_game: str = "AUTO", pla
     result = dict(best)
     result["game"] = game or str(import_game or "AUTO").upper().strip()
     result["probe"] = dict(probe)
-    result["candidates"] = scored
+    result["parse_results"] = results
     return result
 
-def import_stories_mdl_auto(
+def import_stories_mdl_detected(
     context: bpy.types.Context,
     filepath: str,
     import_game: str,
@@ -3765,7 +4202,7 @@ def import_stories_mdl_auto(
             "material_count": 0,
         }
     else:
-        detected = detectStoriesMdlImportSettings(filepath, import_game=import_game_u, platform=platform_u, mdl_type=mdl_type_u)
+        detected = determineStoriesMdlImportSettings(filepath, import_game=import_game_u, platform=platform_u, mdl_type=mdl_type_u)
 
     detected_platform = str(detected.get("platform", platform_u if platform_u != "AUTO" else "PS2") or "PS2").upper().strip()
     detected_mdl_type = str(detected.get("mdl_type", mdl_type_u if mdl_type_u != "AUTO" else "SIM") or "SIM").upper().strip()
@@ -3773,6 +4210,7 @@ def import_stories_mdl_auto(
     created_objects = import_stories_mdl(
         context=context,
         filepath=filepath,
+        game=str(detected.get("game", import_game_u) or import_game_u),
         platform=detected_platform,
         mdl_type=detected_mdl_type,
         collection_name=collection_name,
@@ -3783,17 +4221,17 @@ def import_stories_mdl_auto(
 
     for obj in created_objects:
         try:
-            obj["bleeds_mdl_auto_detected"] = True
+            obj["bleeds_mdl_structure_detected"] = True
             obj["bleeds_mdl_detected_game"] = str(detected.get("game", "") or "")
             obj["bleeds_mdl_detected_platform"] = detected_platform
             obj["bleeds_mdl_detected_type"] = detected_mdl_type
-            obj["bleeds_mdl_detected_score"] = int(detected.get("score", 0) or 0)
+            obj["bleeds_mdl_detection_rank"] = int(detected.get("score", 0) or 0)
         except Exception:
             pass
 
     if print_debug_log:
         print(
-            f"[mdl-auto] {os.path.basename(filepath)} -> "
+            f"[mdl-detect] {os.path.basename(filepath)} -> "
             f"game={detected.get('game', '') or '?'} platform={detected_platform} type={detected_mdl_type} "
             f"verts={int(detected.get('vertex_count', 0) or 0)} faces={int(detected.get('face_count', 0) or 0)}"
         )
@@ -3803,6 +4241,7 @@ def import_stories_mdl_auto(
 def import_stories_mdl(
     context: bpy.types.Context,
     filepath: str,
+    game: str,
     platform: str,
     mdl_type: str,
     collection_name: str,
@@ -3814,6 +4253,7 @@ def import_stories_mdl(
         filepath,
         platform,
         mdl_type,
+        game=game,
         print_debug_log=print_debug_log,
     )
     ctx_raw = stories_reader.read()
@@ -3822,6 +4262,7 @@ def import_stories_mdl(
         filepath=ctx_raw.filepath,
         platform=ctx_raw.platform,
         mdl_type=ctx_raw.mdl_type,
+        game=str(getattr(ctx_raw, "game", game) or game),
         shrink=ctx_raw.shrink,
         import_type=ctx_raw.import_type,
         atomic=ctx_raw.atomic,
@@ -3856,7 +4297,7 @@ def import_stories_mdl(
         if link_to_scene:
             context.scene.collection.children.link(collection)
 
-    root_name = f"{base_name}_ROOT"
+    root_name = base_name or "unnamed"
     root_obj = bpy.data.objects.new(root_name, None)
     root_obj.empty_display_type = "PLAIN_AXES"
     root_obj.empty_display_size = 0.5
@@ -3875,11 +4316,18 @@ def import_stories_mdl(
         pos_base = (float(geo.pos[0]), float(geo.pos[1]), float(geo.pos[2]))
 
     import_type_value = int(getattr(stories_ctx, "import_type", 0) or 0)
-    game = "LCS" if import_type_value in (0, 1) else "VCS"
+    game = str(getattr(stories_ctx, "game", "") or "UNKNOWN").upper().strip()
+    if game not in {"LCS", "VCS"}:
+        if import_type_value == 1:
+            game = "LCS"
+        elif import_type_value in {2, 3}:
+            game = "VCS"
+        else:
+            game = "UNKNOWN"
     entity_type = {
         "SIM": "SIMPLE_MODEL",
         "PED": "PED_MODEL",
-        "CUT": "CUTSCENE_MODEL",
+        "CUT": "MODEL",
         "VEH": "VEHICLE_MODEL",
     }.get(str(mdl_type).upper().strip(), "SIMPLE_MODEL")
 
@@ -3900,6 +4348,10 @@ def import_stories_mdl(
     root_obj["bleeds_model_game"] = str(game)
     root_obj["bleeds_mdl_platform"] = str(platform)
     root_obj["bleeds_mdl_type"] = str(mdl_type)
+    root_obj["bleeds_mdl_serialized_layout"] = str(getattr(stories_ctx, "serialized_layout", "UNKNOWN") or "UNKNOWN")
+    root_obj["bleeds_runtime_model_info_hint"] = str(getattr(stories_ctx, "runtime_model_info_hint", "UNKNOWN") or "UNKNOWN")
+    root_obj["bleeds_model_usage_hint"] = str(getattr(stories_ctx, "model_usage_hint", "UNKNOWN") or "UNKNOWN")
+    root_obj["bleeds_model_format_note"] = "Serialized MDL layout, runtime model-info class, and cutscene usage are separate fields."
     root_obj["bleeds_mdl_filepath"] = str(filepath)
     root_obj["bleeds_export_use_normals"] = True
     root_obj["bleeds_export_gouraud_shading"] = True
@@ -4071,6 +4523,7 @@ def import_stories_mdl(
             for obj in created_objects:
                 if obj is not None and obj.type == "MESH":
                     parent_object_keep_world(obj, root_obj)
+
     if arm_obj is not None:
         parent_object_keep_world(arm_obj, root_obj)
         created_objects.insert(0, arm_obj)

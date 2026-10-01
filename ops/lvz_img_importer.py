@@ -468,7 +468,7 @@ ENABLE_ROW_MODEL_ID_AUTHORITATIVE_PLACEMENT = False
 ROW_MODEL_ID_AUTHORITATIVE_SKIP_LIGHTS = True
 ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG = True
 
-# V93 cleanup: remove the old guessing/recovery layers from normal import.
+# V93 cleanup: remove the old approximate/recovery layers from normal import.
 # The current rule is format-driven: BeachX comes from the row RES/object id;
 # empty LVZ Resource[] entries are IMG-backed continuations.
 CONTINUES_IN_IMG_SCAN_STRIDE = 0x10
@@ -493,7 +493,7 @@ EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_RADIUS_RATIO = 0.42
 EXACT_WRLD_SUBMODEL_RAW_VARIANT_MAX_RADIUS_RATIO = 2.75
 EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_TARGET_RADIUS = 4.0
 EXACT_WRLD_SUBMODEL_RAW_VARIANT_SPARSE_FACE_LIMIT = 18
-# V97: keep the dangerous IPL/IDE/neighbor guess paths off, but restore the real
+# V97: keep the dangerous IPL/IDE/neighbor approximate paths off, but restore the real
 # structured exact-RES IMG table paths.  V96 disabled these as debugging bloat and
 # left rows such as RES 4477/4478/4494/4495 missing even though the IMG has real
 # table-backed payloads.  These three passes only build candidates keyed by the row
@@ -535,13 +535,13 @@ PLACEMENT_RES_REPORT_CANDIDATE_LIMIT = 24
 PLACEMENT_RES_REPORT_TARGET_IDS = {1179, 1725, 1881, 1887, 1989, 2184, 3528}
 _CURRENT_PLACEMENT_REPORT_ROWS = {}
 
-# V60: geometry data prints in Blender console/log. No recovery guesses.
+# V60: geometry data prints in Blender console/log. No recovery approximations.
 GEOMETRY_OBJECT_LOG_ENABLED = False
 GEOMETRY_OBJECT_LOG_MAX_LINES = 2048
 GEOMETRY_OBJECT_LOG_ALWAYS_RES_IDS = {1179, 1725, 1881, 1887, 1888, 1989, 2184, 3528, 4294, 5045}
 
 # V66: resolver audit. Logs the actual row -> candidate geometry chain
-# in Blender's console. No guesses are imported.
+# in Blender's console. No approximations are imported.
 RESOLVER_AUDIT_ENABLED = False
 RESOLVER_AUDIT_MAX_ROWS = 4096
 RESOLVER_AUDIT_ALWAYS_RES_IDS = {1019, 1033, 1179, 1287, 1511, 1586, 1612, 1633, 1670, 1725, 1881, 1887, 1888, 1961, 1989, 2082, 2184, 3528, 4294, 5045}
@@ -598,7 +598,7 @@ REAL_IPL_FOR_MISSING_MIN_FACES = 18
 # V83: do not suppress sparse WRLD submodel fragments.
 # The map legitimately places repeated small building pieces through row IPL/RES pairs.
 # Earlier builds counted these as missing with "NOT importing bad non-LIGHTS sparse building fragment".
-# That was a debug safety guess, not format truth, so it stays off for LVZ+IMG imports.
+# That was a debug safety approximation, not format truth, so it stays off for LVZ+IMG imports.
 ENABLE_ROW_LOCAL_RENDER_MODEL_RECOVERY = False
 ENABLE_SKIP_BAD_NONLIGHT_SPARSE_BUILDING_FRAGMENTS = False
 BAD_NONLIGHT_SPARSE_MAX_VERTS = 160
@@ -674,7 +674,7 @@ AGGREGATE_PIECE_LOG_LIMIT = 96
 AGGREGATE_GROUP_PARTS_BY_SECTOR: Dict[int, List[bpy.types.Object]] = {}
 WRLD_SUBMODEL_GROUP_LOOKUP: Dict[Tuple[int, int], dict] = {}
 WRLD_SUBMODEL_GROUP_GLOBAL_LOOKUP: Dict[int, dict] = {}
-WRLD_SUBMODEL_GROUP_INFER_ROWS: List[dict] = []
+WRLD_SUBMODEL_GROUP_ROWS: List[dict] = []
 
 
 def normalized_copy_stem(name: str) -> str:
@@ -2417,7 +2417,7 @@ def reset_aggregate_group_parts():
     AGGREGATE_GROUP_PARTS_BY_SECTOR.clear()
     WRLD_SUBMODEL_GROUP_LOOKUP.clear()
     WRLD_SUBMODEL_GROUP_GLOBAL_LOOKUP.clear()
-    WRLD_SUBMODEL_GROUP_INFER_ROWS.clear()
+    WRLD_SUBMODEL_GROUP_ROWS.clear()
 
 def all_aggregate_group_parts():
     # Only return Blender objects that were actually created lazily.
@@ -2852,10 +2852,10 @@ def is_light_placement_pass(pass_name) -> bool:
         p = ""
     return p == "LIGHTS" or p == "LIGHT" or p.startswith("LIGHT_")
 
-def infer_wrld_submodel_group_lookup(details, has_direct_exact_resource):
+def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
     WRLD_SUBMODEL_GROUP_LOOKUP.clear()
     WRLD_SUBMODEL_GROUP_GLOBAL_LOOKUP.clear()
-    WRLD_SUBMODEL_GROUP_INFER_ROWS.clear()
+    WRLD_SUBMODEL_GROUP_ROWS.clear()
     if not ENABLE_WRLD_SUBMODEL_GROUP_ID_RECOVERY:
         return 0
 
@@ -2949,7 +2949,7 @@ def infer_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                     _register_global_wrld_submodel_part(int(rid), part, int(group_count))
                     mapped += 1
             missing_ids.difference_update(set(int(v) for v in covered))
-            WRLD_SUBMODEL_GROUP_INFER_ROWS.append({
+            WRLD_SUBMODEL_GROUP_ROWS.append({
                 "sector_index": int(sector_index),
                 "range_start": int(start),
                 "range_end": int(start + group_count - 1),
@@ -3015,7 +3015,7 @@ def infer_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                     _register_global_wrld_submodel_part(int(rid), part, int(group_count))
                     mapped += 1
             unused_ids.difference_update(set(int(v) for v in covered))
-            WRLD_SUBMODEL_GROUP_INFER_ROWS.append({
+            WRLD_SUBMODEL_GROUP_ROWS.append({
                 "sector_index": int(sector_index),
                 "range_start": int(range_start),
                 "range_end": int(range_start + group_count - 1),
@@ -3379,8 +3379,8 @@ def looks_like_img_mdl_payload(img_bytes: bytes, base: int, end: int) -> bool:
     if base + 4 + size_bytes > end:
         return False
 
-    for stream_guess in (base + 4 + (count * 22), base + 4 + size_bytes):
-        cursor = stream_guess
+    for stream_start in (base + 4 + (count * 22), base + 4 + size_bytes):
+        cursor = stream_start
         while cursor < end and img_bytes[cursor] == 0xAA and cursor - base < 0x1000:
             cursor += 1
         cursor = LVZ.align_down4(cursor)
@@ -6155,10 +6155,10 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
             return True
         return False
 
-    inferred_submodel_count = infer_wrld_submodel_group_lookup(details, has_direct_exact_resource_for_row)
+    resolved_submodel_count = build_wrld_submodel_group_lookup(details, has_direct_exact_resource_for_row)
     if ENABLE_WRLD_SUBMODEL_GROUP_ID_RECOVERY:
-        LVZ.dbg(f"[submodel] inferred WRLD aggregate group-id recoveries: {inferred_submodel_count}")
-        for row in WRLD_SUBMODEL_GROUP_INFER_ROWS[:96]:
+        LVZ.dbg(f"[submodel] inferred WRLD aggregate group-id recoveries: {resolved_submodel_count}")
+        for row in WRLD_SUBMODEL_GROUP_ROWS[:96]:
             LVZ.dbg(
                 f"[submodel] sector={row['sector_index']} ids={row['range_start']}..{row['range_end']} "
                 f"parent={row['parent_res_id']} groups={row['group_count']} covered={row['covered_count']} "
@@ -6398,7 +6398,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
 
             # A fit failure must not create a new hole when an exact structured
             # RES model already existed in the normal LVZ/IMG tables.  Raw IMG
-            # guesses remain rejectable, but the best same-RES structured model
+            # approximate matches remain rejectable, but the best same-RES structured model
             # is retained as the conservative fallback.  This restores the old
             # static-model coverage without ever substituting an IPL/other RES.
             structured_candidates = [
@@ -7779,7 +7779,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                             report_row.get("matrix_m30", 0.0), report_row.get("matrix_m31", 0.0), report_row.get("matrix_m32", 0.0), report_row.get("matrix_m33", 0.0),
                         ]
                         w.writerow([
-                            "REFERENCE DFF EXACT GEOMETRY IMPORTED" if str(report_row.get("fallback_source", "")).startswith("reference-dff") else ("WRLD VERIFIED RENDER PAIR IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-verified-render-pair") else ("WRLD GLOBAL SPARSE SUBMODEL ID IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-global-sparse-submodel-id") else ("WRLD GLOBAL SUBMODEL ID IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-global-submodel-id") else ("WRLD SPARSE SUBMODEL RANGE IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-sparse-submodel-range") else ("WRLD SUBMODEL GROUP IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-submodel-group") else ("EXACT MISSING MDL IMPORTED" if not report_row.get("nearby_ipl_neighbor", False) else "HEURISTIC MISSING MDL IMPORTED")))))),
+                            "REFERENCE DFF EXACT GEOMETRY IMPORTED" if str(report_row.get("fallback_source", "")).startswith("reference-dff") else ("WRLD VERIFIED RENDER PAIR IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-verified-render-pair") else ("WRLD GLOBAL SPARSE SUBMODEL ID IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-global-sparse-submodel-id") else ("WRLD GLOBAL SUBMODEL ID IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-global-submodel-id") else ("WRLD SPARSE SUBMODEL RANGE IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-sparse-submodel-range") else ("WRLD SUBMODEL GROUP IMPORTED" if str(report_row.get("fallback_source", "")).startswith("wrld-submodel-group") else ("EXACT MISSING MDL IMPORTED" if not report_row.get("nearby_ipl_neighbor", False) else "NEARBY MISSING MDL IMPORTED")))))),
                             report_row["sector"],
                             report_row["row"],
                             report_row["pass"],
@@ -7865,12 +7865,12 @@ def blds_nearest_sector_xy_for_world_position(x: float, y: float, game_hint: str
         xinc, yinc, xstart, ystart = 100.0, 86.6, -2000.0, -2000.0
     else:
         xinc, yinc, xstart, ystart = 125.0, 108.25, -2400.0, -2000.0
-    row_guess = int(math.floor((float(y) - (ystart + yinc * 0.5)) / yinc))
+    row_index = int(math.floor((float(y) - (ystart + yinc * 0.5)) / yinc))
     best = None
-    for sector_y in range(row_guess - 2, row_guess + 4):
+    for sector_y in range(row_index - 2, row_index + 4):
         xbase = xstart + xinc * 0.5 - ((sector_y & 1) * xinc * 0.5)
-        col_guess = int(math.floor((float(x) - xbase) / xinc))
-        for sector_x in range(col_guess - 2, col_guess + 4):
+        column_index = int(math.floor((float(x) - xbase) / xinc))
+        for sector_x in range(column_index - 2, column_index + 4):
             cx = xbase + xinc * sector_x
             cy = ystart + yinc * 0.5 + yinc * sector_y
             dx = float(x) - cx
