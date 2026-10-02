@@ -4327,7 +4327,7 @@ def import_stories_mdl(
     entity_type = {
         "SIM": "SIMPLE_MODEL",
         "PED": "PED_MODEL",
-        "CUT": "MODEL",
+        "CUT": "CUTSCENE_MODEL",
         "VEH": "VEHICLE_MODEL",
     }.get(str(mdl_type).upper().strip(), "SIMPLE_MODEL")
 

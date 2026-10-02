@@ -36,7 +36,7 @@ def resolve_export_defaults_from_root(context):
     from ..ops import mdl_exporter
 
     try:
-        root = mdl_exporter.find_mdl_root(context)
+        root = mdl_exporter.find_mdl_root(context, create_if_missing=False)
     except Exception:
         return ("SIM", False)
 
@@ -413,19 +413,20 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         items=(
             ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),
             ("VCS", "VCS", "Grand Theft Auto: Vice City Stories"),
-            ("MH2", "MH2", "Manhunt 2"),
         ),
         default="VCS",
     )
 
     mdl_type: EnumProperty(
-        name="Type",
-        description="Leeds MDL serialized layout to export (not the runtime CBaseModelInfo class)",
+        name="Model Format",
+        description="Leeds Stories model class to build from the live Blender scene",
         items=(
-            ("SIM", "Atomic / Simple layout", "Prop/simple Atomic-oriented MDL serialization"),
-            ("PED", "Skinned Clump / Ped layout", "Skinned pedestrian/actor Clump serialization"),
+            ("SIMPLE", "SimpleModel", "Static/simple Leeds model"),
+            ("CLUMP", "ClumpModel", "Skinned or hierarchical Leeds clump model"),
+            ("CUT", "ClumpModel (CUT)", "Cutscene clump model"),
+            ("VEH", "VehicleModel", "Vehicle-oriented Leeds clump model"),
         ),
-        default="SIM",
+        default="SIMPLE",
     )
 
     max_batch_verts: IntProperty(
@@ -478,11 +479,11 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
         root_mdl_type, root_use_normals = resolve_export_defaults_from_root(context)
         if root_mdl_type == "PED":
-            self.mdl_type = "PED"
+            self.mdl_type = "CLUMP"
         self.use_normals = bool(root_use_normals)
 
         try:
-            root = mdl_exporter.find_mdl_root(context)
+            root = mdl_exporter.find_mdl_root(context, create_if_missing=False)
         except Exception:
             root = None
 
@@ -527,18 +528,17 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         from ..ops import mdl_exporter
 
         root_mdl_type, root_use_normals = resolve_export_defaults_from_root(context)
-        mdl_type = self.mdl_type
+        requested_model_format = str(self.mdl_type or "SIMPLE").upper().strip()
+        internal_mdl_type = "PED" if requested_model_format in {"CLUMP", "CUT"} else "SIM"
         use_normals = self.use_normals
 
-        if root_mdl_type == "PED" and mdl_type == "SIM":
-            mdl_type = "PED"
-        if mdl_type == "PED":
+        if requested_model_format in {"CLUMP", "CUT"}:
             use_normals = True
         else:
             use_normals = bool(use_normals or root_use_normals)
 
         try:
-            root = mdl_exporter.find_mdl_root(context)
+            root = mdl_exporter.find_mdl_root(context, create_if_missing=True)
             if root is not None:
                 try:
                     root.bleeds_mdl_platform = self.platform
@@ -548,6 +548,22 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     root["bleeds_mdl_platform"] = self.platform
                 except Exception:
                     pass
+                semantic_type = {
+                    "SIMPLE": "SIM",
+                    "CLUMP": "PED",
+                    "CUT": "CUT",
+                    "VEH": "VEH",
+                }.get(requested_model_format, "SIM")
+                try:
+                    root.bleeds_mdl_type = semantic_type
+                except Exception:
+                    pass
+                try:
+                    root["bleeds_mdl_type"] = semantic_type
+                    root["bleeds_export_model_format"] = requested_model_format
+                    root["bleeds_model_game"] = self.export_game
+                except Exception:
+                    pass
 
             if self.platform == "PSP":
                 raise RuntimeError("PSP MDL serialization is not implemented by the current BLeeds writer; choose PlayStation 2 for MDL export.")
@@ -555,7 +571,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
             mdl_exporter.export_stories_mdl_ps2(
                 context=context,
                 filepath=self.filepath,
-                mdl_type=mdl_type,
+                mdl_type=internal_mdl_type,
                 max_batch_verts=self.max_batch_verts,
                 rounding_mode=self.rounding_mode,
                 use_normals=use_normals,

@@ -26,15 +26,3 @@ This directory documents binary file formats used by Rockstar Leeds titles cover
 | `format/LVZ-IMG.md` | `.lvz`, `.img` | GTA Stories | Level/streaming resource tables and sector data |
 | `format/WBL.md` | `.wbl` | Chinatown Wars | World-block data |
 | `format/IFP.md` | `.ifp` | Manhunt | ANCT/BLOC/ANPK animation libraries |
-
-## Structure style
-
-Fixed structures use tables in this form:
-
-```text
-Offset  Size  Type    Data                 Description
---------------------------------------------------------------------------
-0x00    4b    LONG    Example              Meaning of the field
-```
-
-Variable-length payloads, pointer traversal, packed bit fields, alignment requirements, and title/platform variants are described immediately after the fixed prefix they belong to. A fixed size is not claimed when the available data does not establish one.

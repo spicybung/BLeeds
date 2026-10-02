@@ -82,6 +82,10 @@ class CW_MT_ExportChoice(Menu):
             text="R* Leeds: Model (.mdl)",
         )
         layout.operator(
+            "export_scene.leeds_tex",
+            text="R* Leeds: Texture Dictionary (.chk, .xtx, .tex)",
+        )
+        layout.operator(
             "export_scene.bleeds_dff",
             text="R* Studios: DFF (.dff)",
         )

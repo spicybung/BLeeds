@@ -3804,21 +3804,42 @@ def trim_ps2_ped_dma_packet_to_byte_length(packet: bytes, target_byte_length: in
     return best
 
 def validate_ps2_dma_vif_payload(payload: bytes, *, vif_profile: str = "SIM") -> None:
-    # Packet shape is authoritative.  Older callers can still accidentally
-    # request the default SIM profile for a PED payload; do not let that turn
-    # a legal PED packet into the SIM-only "MSCAL at first dword of final
-    # qword" failure.  Every Leeds PED sub-strip begins with 0x6C018000.
+    # The caller's profile is authoritative. SIM and PED packets both begin
+    # with VIF_UNPACK == 0x6C018000 and share the same first 48 bytes, so the
+    # leading opcode cannot distinguish the layouts. Auto-promoting every
+    # 0x6C018000 packet to PED incorrectly rejects valid SIM/SimpleModel data
+    # whose UV UNPACK immediate is 0x808D instead of the PED 0xC055 form.
     requested_profile = str(vif_profile).upper().strip()
-    payload_begins_with_ped_split = (
-        len(payload) >= 4 and struct.unpack_from("<I", payload, 0)[0] == 0x6C018000
-    )
-    profile = "PED" if payload_begins_with_ped_split else requested_profile
+    profile = requested_profile if requested_profile in {"SIM", "PED"} else "SIM"
 
     if profile != "PED":
         if (len(payload) % 16) != 0:
             raise ValueError(f"PS2 DMA/VIF payload is not 16-byte aligned (len={len(payload)}).")
-        if len(payload) < 4 or struct.unpack_from("<I", payload, len(payload) - 16)[0] != VIF_MSCAL:
-            raise ValueError("PS2 DMA/VIF payload does not end with MSCAL on a qword boundary.")
+        if len(payload) < 16:
+            raise ValueError("PS2 DMA/VIF payload is too short to contain a terminating MSCAL.")
+
+        # SIM packets are padded to a 16-byte DMA qword *after* MSCAL is
+        # emitted.  MSCAL therefore does not have to be the first word of
+        # the final qword; it can legally appear at +0, +4, +8, or +12.
+        # The old validator only checked len(payload)-16, which rejected
+        # untouched retail-compatible packets whenever stream sizes placed
+        # MSCAL later in the last qword.  Accept MSCAL anywhere in that last
+        # qword as long as every byte following it is zero padding.
+        final_qword = payload[-16:]
+        found_terminal_mscal = False
+        for offset in range(0, 16, 4):
+            if struct.unpack_from("<I", final_qword, offset)[0] != VIF_MSCAL:
+                continue
+            if any(final_qword[offset + 4:]):
+                continue
+            found_terminal_mscal = True
+            break
+
+        if not found_terminal_mscal:
+            raise ValueError(
+                "PS2 DMA/VIF payload has no terminating MSCAL in its final qword "
+                "followed only by zero padding."
+            )
         return
 
     pos = 0
@@ -9985,7 +10006,7 @@ def _write_prop_export_log(filepath: str, data: bytes, export_context: Dict[str,
     packed = _log_read_u32(data, global_geom_off + 0x10)
     material_count = (packed >> 20) & 0xFFF
     geom_size = packed & 0xFFFFF
-    first_tristrip_rel_off = _log_read_u16(data, global_geom_off + 0x16)
+    first_tristrip_rel_off = _log_read_u16(data, global_geom_off + 0x1A)
     dma_start_off = global_geom_off + first_tristrip_rel_off if first_tristrip_rel_off > 0 else 0
 
     lines.append("Exported structure order (sorted by file offset)")
@@ -10059,8 +10080,8 @@ def _write_prop_export_log(filepath: str, data: bytes, export_context: Dict[str,
     lines.append(f"  vertex_section_flags = 0x{_log_read_u32(data, global_geom_off + 0x14):08X}")
     lines.append(f"  total_vertex_count   = {_log_read_u16(data, global_geom_off + 0x18)}")
     lines.append(f"  first_tristrip_rel   = 0x{_log_read_u16(data, global_geom_off + 0x1A):04X}")
-    lines.append(f"  scale = ({_log_read_f32(data, global_geom_off + 0x20):.9g}, {_log_read_f32(data, global_geom_off + 0x24):.9g}, {_log_read_f32(data, global_geom_off + 0x28):.9g})")
-    lines.append(f"  pos   = ({_log_read_f32(data, global_geom_off + 0x2C):.9g}, {_log_read_f32(data, global_geom_off + 0x30):.9g}, {_log_read_f32(data, global_geom_off + 0x34):.9g})")
+    lines.append(f"  scale = ({_log_read_f32(data, global_geom_off + 0x28):.9g}, {_log_read_f32(data, global_geom_off + 0x2C):.9g}, {_log_read_f32(data, global_geom_off + 0x30):.9g})")
+    lines.append(f"  pos   = ({_log_read_f32(data, global_geom_off + 0x34):.9g}, {_log_read_f32(data, global_geom_off + 0x38):.9g}, {_log_read_f32(data, global_geom_off + 0x3C):.9g})")
     lines.append("")
 
     lines.append("Per-part Leeds headers")
@@ -10074,11 +10095,11 @@ def _write_prop_export_log(filepath: str, data: bytes, export_context: Dict[str,
         part_off = part_table_off + (part_index * 0x30)
         if part_off + 0x30 > len(data):
             break
-        rel_off = _log_read_u16(data, part_off + 0x1A)
+        rel_off = _log_read_u32(data, part_off + 0x1C)
         lines.append(
-            f"  part[{part_index:02d}] @ 0x{part_off:08X} | tex_id={_log_read_u16(data, part_off + 0x1E)} "
-            f"strip_vertex_count={_log_read_u16(data, part_off + 0x1C)} rel_off=0x{rel_off:04X} "
-            f"bbox_i16=({_log_read_i16(data, part_off + 0x20)}, {_log_read_i16(data, part_off + 0x22)}, {_log_read_i16(data, part_off + 0x24)}, {_log_read_i16(data, part_off + 0x26)}, {_log_read_i16(data, part_off + 0x28)}, {_log_read_i16(data, part_off + 0x2A)})"
+            f"  part[{part_index:02d}] @ 0x{part_off:08X} | tex_id={_log_read_u16(data, part_off + 0x22)} "
+            f"strip_vertex_count={_log_read_u16(data, part_off + 0x20)} rel_off=0x{rel_off:08X} "
+            f"bbox_i16=({_log_read_i16(data, part_off + 0x24)}, {_log_read_i16(data, part_off + 0x26)}, {_log_read_i16(data, part_off + 0x28)}, {_log_read_i16(data, part_off + 0x2A)}, {_log_read_i16(data, part_off + 0x2C)}, {_log_read_i16(data, part_off + 0x2E)})"
         )
     if safe_part_count == 0:
         lines.append("  <no part headers parsed>")

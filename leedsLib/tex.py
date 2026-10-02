@@ -768,7 +768,7 @@ def decode_ps2_texture(
             unswizzled = unswizzle_psp_32bit(raw, w, h)
         else:
             unswizzled = raw
-        rgba = np.frombuffer(unswizzled, dtype=np.uint8).reshape((h, w, 4))
+        rgba = np.frombuffer(unswizzled, dtype=np.uint8).reshape((h, w, 4)).copy()
         alpha = rgba[:, :, 3].astype(np.int32) * 255 // 128
         alpha = np.clip(alpha, 0, 255).astype(np.uint8)
         rgba[:, :, 3] = alpha

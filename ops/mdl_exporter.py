@@ -57,8 +57,101 @@ def use_gouraud_shading_for_export(root_obj: Optional[bpy.types.Object]) -> bool
     return True
 
 
-def find_mdl_root(context: bpy.types.Context) -> bpy.types.Object:
+def create_mdl_root_for_export(context: bpy.types.Context) -> bpy.types.Object:
+    selected = list(getattr(context, "selected_objects", []) or [])
+    active = getattr(context, "active_object", None)
+    if active is not None and active not in selected:
+        selected.insert(0, active)
 
+    export_objects = [obj for obj in selected if getattr(obj, "type", None) in {"MESH", "ARMATURE", "EMPTY"}]
+    if not export_objects and active is not None and getattr(active, "type", None) in {"MESH", "ARMATURE", "EMPTY"}:
+        export_objects = [active]
+
+    for obj in list(export_objects):
+        if getattr(obj, "type", None) != "MESH":
+            continue
+        try:
+            for modifier in obj.modifiers:
+                if modifier.type == "ARMATURE" and modifier.object is not None and modifier.object not in export_objects:
+                    export_objects.append(modifier.object)
+        except Exception:
+            pass
+
+    # Preserve a custom model's existing hierarchy instead of forcing the user
+    # to transplant meshes into an imported retail ROOT. Include ancestors and
+    # sibling/child model pieces connected to the selected hierarchy.
+    hierarchy_seeds = list(export_objects)
+    for obj in hierarchy_seeds:
+        parent = getattr(obj, "parent", None)
+        while parent is not None and getattr(parent, "type", None) in {"MESH", "ARMATURE", "EMPTY"}:
+            if parent not in export_objects:
+                export_objects.append(parent)
+            parent = getattr(parent, "parent", None)
+
+    hierarchy_tops = []
+    export_set_probe = set(export_objects)
+    for obj in list(export_objects):
+        if getattr(obj, "parent", None) not in export_set_probe:
+            hierarchy_tops.append(obj)
+    for top in hierarchy_tops:
+        try:
+            for child in top.children_recursive:
+                if getattr(child, "type", None) in {"MESH", "ARMATURE", "EMPTY"} and child not in export_objects:
+                    export_objects.append(child)
+        except Exception:
+            pass
+
+    if not any(getattr(obj, "type", None) == "MESH" for obj in export_objects):
+        raise RuntimeError("No mesh is selected for MDL export.")
+
+    export_set = set(export_objects)
+    top_level = []
+    for obj in export_objects:
+        parent = getattr(obj, "parent", None)
+        if parent not in export_set:
+            top_level.append(obj)
+
+    model_name = "MDL"
+    if active is not None:
+        model_name = str(getattr(active, "name", "MDL") or "MDL")
+    model_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", model_name).strip("_") or "MDL"
+
+    root = bpy.data.objects.new(model_name + "_ROOT", None)
+    root.empty_display_type = "PLAIN_AXES"
+    root.empty_display_size = 0.25
+    try:
+        root.bleeds_is_mdl_root = True
+    except Exception:
+        pass
+    root["bleeds_is_mdl_root"] = True
+    root["bleeds_mdl_root_generated"] = True
+    root["bleeds_mdl_root_source"] = "AUTO_FROM_LIVE_SCENE"
+    root["bleeds_imported_export_mode"] = "REBUILD"
+
+    collection = getattr(context, "collection", None)
+    if collection is None:
+        collection = getattr(getattr(context, "scene", None), "collection", None)
+    if collection is None:
+        raise RuntimeError("Could not find a Blender collection for the generated MDL ROOT.")
+    collection.objects.link(root)
+
+    for obj in top_level:
+        world_matrix = obj.matrix_world.copy()
+        obj.parent = root
+        obj.matrix_world = world_matrix
+
+    try:
+        root.select_set(True)
+    except Exception:
+        pass
+
+    print(
+        "[BLeeds] Generated MDL ROOT from live scene geometry: "
+        f"{root.name}; objects={len(export_objects)}; top_level={len(top_level)}"
+    )
+    return root
+
+def find_mdl_root(context: bpy.types.Context, create_if_missing: bool = True) -> bpy.types.Object:
     candidates: List[bpy.types.Object] = []
     if context.active_object is not None:
         candidates.append(context.active_object)
@@ -69,10 +162,10 @@ def find_mdl_root(context: bpy.types.Context) -> bpy.types.Object:
         if root is not None:
             return root
 
-    raise RuntimeError(
-        "Couldn't find an MDL ROOT. Select the imported ROOT empty (bleeds_is_mdl_root) "
-        "or select any child mesh under it."
-    )
+    if create_if_missing:
+        return create_mdl_root_for_export(context)
+
+    raise RuntimeError("No existing BLeeds MDL ROOT was found.")
 
 def gather_mesh_parts(context: bpy.types.Context, root: bpy.types.Object) -> List[bpy.types.Object]:
 
@@ -6462,6 +6555,22 @@ def export_stories_mdl_ps2(
                 prebuilt_sub_strips = None
         else:
             strip = build_strip_vertices_world(context, mesh_obj, use_normals=use_normals, root_obj=root)
+            topology_segments = list(getattr(build_strip_vertices_world, "last_topology_segments", []) or [])
+            if topology_segments:
+                prebuilt_sub_strips = []
+                for topology_segment in topology_segments:
+                    if len(topology_segment) < 3:
+                        continue
+                    if len(topology_segment) > int(ps2_max_strip_verts):
+                        prebuilt_sub_strips.extend(
+                            mdl_lib.split_ps2_tristrip_vertices(
+                                topology_segment,
+                                max_verts=int(ps2_max_strip_verts),
+                                overlap=2,
+                            )
+                        )
+                    else:
+                        prebuilt_sub_strips.append(list(topology_segment))
 
         if not strip:
             try:

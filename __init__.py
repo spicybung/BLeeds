@@ -15,12 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.5.1"
+__version__ = "1.5.2.7"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 5, 1),
+    "version": (1, 5, 2, 7),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Rockstar Leeds import/export tools for Blender 2.90 and newer",
@@ -544,6 +544,8 @@ _classes = [
     gui.IMPORT_OT_COL2,
     gui.EXPORT_OT_COL2,
     gui.IMPORT_OT_tex,
+    gui.EXPORT_OT_tex,
+    gui.SCENE_PT_bleeds_texture_io,
     gui.IMPORT_OT_leeds_world,
     gui.IMPORT_OT_CW_wbl,
     gui.EXPORT_OT_CW_wbl,
@@ -563,6 +565,47 @@ _classes = [
     gui.EXPORT_SCENE_OT_stories_lvz_img,
     gui.EXPORT_SCENE_OT_stories_mdl_ps2,
 ]
+
+def register_bleeds_texture_scene_props():
+    if not hasattr(bpy.types.Scene, "bleeds_texture_bit_depth"):
+        bpy.types.Scene.bleeds_texture_bit_depth = EnumProperty(
+            name="Bit Depth",
+            description="Export indexed textures; source depths above 8 bpp are reduced to 8 bpp",
+            items=[
+                ("AUTO", "Auto", "Preserve imported 4 bpp; export other images at 8 bpp"),
+                ("4", "4 bpp", "Quantize to a 16-color RGBA palette"),
+                ("8", "8 bpp", "Quantize to a 256-color RGBA palette"),
+            ],
+            default="AUTO",
+        )
+    if not hasattr(bpy.types.Scene, "bleeds_texture_format"):
+        bpy.types.Scene.bleeds_texture_format = EnumProperty(
+            name="Texture Format",
+            description="Leeds texture container extension",
+            items=[
+                ("CHK", ".chk", "Leeds CHK texture container"),
+                ("XTX", ".xtx", "Leeds XTX texture container"),
+                ("TEX", ".tex", "Leeds TEX texture container"),
+            ],
+            default="XTX",
+        )
+    if not hasattr(bpy.types.Scene, "bleeds_texture_platform"):
+        bpy.types.Scene.bleeds_texture_platform = EnumProperty(
+            name="Platform",
+            description="Target Leeds texture platform",
+            items=[
+                ("PS2", "PS2", "PlayStation 2 texture layout"),
+                ("PSP", "PSP", "PlayStation Portable texture layout"),
+            ],
+            default="PS2",
+        )
+
+
+def unregister_bleeds_texture_scene_props():
+    for property_name in ("bleeds_texture_format", "bleeds_texture_platform", "bleeds_texture_bit_depth"):
+        if hasattr(bpy.types.Scene, property_name):
+            delattr(bpy.types.Scene, property_name)
+
 
 def register_lvz_img_progress_properties():
     if not hasattr(bpy.types.WindowManager, "bleeds_lvz_img_progress"):
@@ -651,10 +694,10 @@ def register_bleeds_mdl_object_props():
             name="MDL Layout",
             description="Serialized Leeds MDL layout; runtime model-info class is tracked separately",
             items=[
-                ("SIM", "Atomic / Simple layout", "Prop/simple Atomic-oriented serialization"),
-                ("PED", "Skinned Clump / Ped layout", "Skinned pedestrian/actor Clump serialization"),
-                ("CUT", "Actor Clump layout", "Actor/cutscene Clump serialization; cutscene is usage rather than a runtime model class"),
-                ("VEH", "Vehicle Clump layout", "Vehicle-oriented Clump serialization"),
+                ("SIM", "SimpleModel", "Static/simple Leeds model serialization"),
+                ("PED", "ClumpModel", "Skinned or hierarchical Leeds clump serialization"),
+                ("CUT", "ClumpModel (CUT)", "Cutscene clump serialization"),
+                ("VEH", "VehicleModel", "Vehicle-oriented Leeds model serialization"),
             ],
             default="SIM",
         )
@@ -724,6 +767,43 @@ def unregister_bleeds_mdl_object_props():
         if hasattr(bpy.types.Object, prop_name):
             delattr(bpy.types.Object, prop_name)
 
+def safe_register_class(cls):
+    class_name = getattr(cls, "__name__", "")
+    bl_idname = getattr(cls, "bl_idname", "")
+
+    existing = getattr(bpy.types, class_name, None)
+    if existing is not None and existing is not cls:
+        try:
+            unregister_class(existing)
+        except Exception:
+            pass
+
+    if bl_idname:
+        for type_name in dir(bpy.types):
+            existing_type = getattr(bpy.types, type_name, None)
+            if existing_type is None or existing_type is cls:
+                continue
+            if getattr(existing_type, "bl_idname", None) == bl_idname:
+                try:
+                    unregister_class(existing_type)
+                except Exception:
+                    pass
+                break
+
+    try:
+        register_class(cls)
+    except ValueError as exc:
+        if "already registered" not in str(exc).lower():
+            raise
+        existing = getattr(bpy.types, class_name, None)
+        if existing is not None:
+            try:
+                unregister_class(existing)
+            except Exception:
+                pass
+        register_class(cls)
+
+
 def register():
     registered_classes = []
     import_menu = get_file_import_menu_type()
@@ -733,10 +813,11 @@ def register():
 
     try:
         register_bleeds_mdl_object_props()
+        register_bleeds_texture_scene_props()
         register_lvz_img_progress_properties()
 
         for cls in _classes:
-            register_class(cls)
+            safe_register_class(cls)
             registered_classes.append(cls)
 
         bpy.types.Object.cw_instance = bpy.props.PointerProperty(
@@ -754,7 +835,7 @@ def register():
         if not hasattr(bpy.types, gui.CW_MT_ExportChoice.bl_idname):
             raise RuntimeError("BLeeds export menu class was not registered")
 
-        print("BLeeds 1.5.1 registered successfully: classes=%d, import_menu=yes, export_menu=yes" % len(registered_classes))
+        print("BLeeds 1.5.2.6 registered successfully: classes=%d, import_menu=yes, export_menu=yes" % len(registered_classes))
 
     except Exception as exc:
         # Roll back partial registration so Blender never gets stuck in a ghost-enabled state.
@@ -770,8 +851,9 @@ def register():
             except Exception:
                 pass
         unregister_bleeds_mdl_object_props()
+        unregister_bleeds_texture_scene_props()
         unregister_lvz_img_progress_properties()
-        print("BLeeds 1.5.1 registration FAILED: %s" % exc)
+        print("BLeeds 1.5.2.6 registration FAILED: %s" % exc)
         raise
 
 def unregister():
@@ -785,4 +867,5 @@ def unregister():
         unregister_class(cls)
 
     unregister_bleeds_mdl_object_props()
+    unregister_bleeds_texture_scene_props()
     unregister_lvz_img_progress_properties()
