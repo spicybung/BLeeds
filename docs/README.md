@@ -1,4 +1,4 @@
-# File Format Documentation
+# R* Leeds File Format Documentation
 
 ## Purpose
 
