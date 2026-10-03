@@ -12,10 +12,10 @@ The following is a list of file formats that are currently supported by the addo
 
 - [X] Model files (.mdl), (.dff)*
   - [X] Import
-  - [x] Export *
+  - [x] Export 
 - [X] Texture Files (.chk, .xtx, .tex)*
   - [X] Import
-  - [X] Export
+  - [X] Export *
 - [X] Collision files (.col2)*
   - [X] Import
   - [x] Export *
@@ -24,7 +24,7 @@ The following is a list of file formats that are currently supported by the addo
   - [x] Export *
 - [X] Animation files (.anim), (.ifp)*
   - [X] Import 
-  - [X] Export (*experimental*)
+  - [X] Export *
 
 * all of the above are currently experimental, meaning not all files have been tested yet.
 
