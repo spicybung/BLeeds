@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-**BLeeds** is an IO for Blender, with scripts designed around the Leeds Engine file formats(Stories, Chinatown Wars, Manhunt 2). It is a work-in-progress reverse engineering of R* Leeds file formats.
+**BLeeds** is a Blender importer/exporter for Rockstar Leeds games such as Liberty City Stories, Vice City Stories, Grand Theft Auto: Chinatown Wars, as well as Manhunt 2. Work is done by extensive reverse engineering of R* Leeds file formats over a length of time.
 
 ## Supported Formats
 
@@ -10,21 +10,21 @@ The following is a list of file formats that are currently supported by the addo
 
 #### File Types
 
-- [X] Model files (.mdl)*
+- [X] Model files (.mdl), (.dff)*
   - [X] Import
   - [x] Export *
 - [X] Texture Files (.chk, .xtx, .tex)*
   - [X] Import
-  - [ ] Export
+  - [X] Export
 - [X] Collision files (.col2)*
   - [X] Import
   - [x] Export *
 - [X] Map files (.wrld, .wbl, .bsp)*
   - [X] Import
   - [x] Export *
-- [X] Animation files (.anim)*
+- [X] Animation files (.anim), (.ifp)*
   - [X] Import 
-  - [ ] Export
+  - [X] Export (*experimental*)
 
 * all of the above are currently experimental, meaning not all files have been tested yet.
 
