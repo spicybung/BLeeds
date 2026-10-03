@@ -19,12 +19,12 @@ The following is a list of file formats that are currently supported by the addo
 - [X] Collision files (.col2)*
   - [X] Import
   - [x] Export *
-- [X] Map files (.wrld, .wbl, .bsp)*
-  - [X] Import
-  - [x] Export *
 - [X] Animation files (.anim), (.ifp)*
   - [X] Import 
   - [X] Export *
+- [X] Map files (.wrld, .wbl, .bsp)*
+  - [X] Import
+  - [x] Export *
 - [X] IMG archives (.img + .lvz)
   - [X] Import *
   - [ ] Export
