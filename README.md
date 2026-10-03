@@ -2,7 +2,7 @@
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
 
-**BLeeds** is a Blender importer/exporter for Rockstar Leeds games such as Liberty City Stories, Vice City Stories, Grand Theft Auto: Chinatown Wars, as well as Manhunt 2. Work is done by extensive reverse engineering of R* Leeds file formats over a length of time.
+**BLeeds** is a Blender importer/exporter for Rockstar Leeds games such as Liberty City Stories, Vice City Stories, Grand Theft Auto: Chinatown Wars, as well as Manhunt 2. Work on this project has been done via extensive reverse engineering of R* Leeds file formats over a significant length of time.
 
 ## Supported Formats
 
