@@ -4862,10 +4862,11 @@ def build_source_point_vertices_world(
 
             # The Blender UV layer is the authoritative editable representation.
             # Do not overwrite it with the importer-time representative UV cache.
-            # The PS2 PED packet writer converts Blender V to the Leeds/VCS raster
+            # The PS2 packet writer converts Blender V to the Leeds/VCS raster
             # orientation only when serializing the final VIF UV bytes.
             if not uv_from_blender and vertex_index < len(imported_uvs):
                 u, vv = imported_uvs[int(vertex_index)]
+                vv = 1.0 - float(vv)
 
             nx, ny, nz = 0.0, 0.0, 1.0
             if use_normals:

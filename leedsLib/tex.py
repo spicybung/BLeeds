@@ -421,71 +421,74 @@ def validate_ps2_stories_runtime_container(data: bytes) -> Tuple[bool, List[str]
     messages: List[str] = []
     if len(data) < 0x24 or data[:3] != b"xet":
         return True, messages
-    if read_u32(data, 0x20) != 0x00008606:
+    if read_u32(data, 0x20) not in (0x8606, 0xCC06):
         return True, messages
+    if len(data) < 0x4C:
+        return False, ["PS2 texture dictionary is missing its collection header or relocations"]
 
-    if len(data) < 0x50:
-        return False, ["PS2 Stories XTX is missing the retail 0x50-byte runtime preface"]
+    logical_end = read_u32(data, 0x08)
+    relocation_offset = read_u32(data, 0x0C)
+    relocation_count = read_u32(data, 0x14)
+    relocation_end = relocation_offset + relocation_count * 4
+    if relocation_count < 2 or relocation_offset < 0x44 or relocation_end > len(data):
+        return False, ["PS2 texture relocation table is invalid"]
+    if logical_end != relocation_end or read_u32(data, 0x10) != relocation_offset:
+        messages.append("PS2 texture logical end or relocation pointer is inconsistent")
+    if len(data) % 2048:
+        messages.append("PS2 texture dictionary is not padded to a 2048-byte sector")
+    relocations = [read_u32(data, relocation_offset + index * 4) for index in range(relocation_count)]
+    if relocations[:2] != [0x28, 0x2C]:
+        messages.append("PS2 relocation table must start with the tail/head fields")
 
-    expected_preface = (0x00000001, 0x0012FD70, 0x000003B5, 0x0012FDB8)
-    actual_preface = tuple(read_u32(data, 0x30 + index * 4) for index in range(4))
-    if actual_preface != expected_preface:
-        messages.append(
-            "PS2 Stories XTX runtime preface differs from retail: "
-            + ", ".join(f"0x{value:08X}" for value in actual_preface)
-        )
-
-    first_slot = read_u32(data, 0x28)
-    current_slot = first_slot
+    current_slot = read_u32(data, 0x2C)
+    previous_slot = 0x28
     visited = set()
-    node_offsets: List[int] = []
-    header_offsets: List[int] = []
-    raster_offsets: List[int] = []
-
-    for texture_index in range(4096):
-        if current_slot == 0x28:
-            break
-        if current_slot in visited:
-            messages.append(f"PS2 Stories XTX linked-list cycle at slot 0x{current_slot:X}")
+    nodes = []
+    headers = []
+    raster_offsets = []
+    expected_relocations = [0x28, 0x2C]
+    while current_slot != 0x28:
+        if current_slot in visited or len(visited) >= 4096:
+            messages.append("PS2 texture list has a cycle or too many entries")
             break
         visited.add(current_slot)
-        if current_slot < 8:
-            messages.append(f"PS2 Stories XTX invalid slot pointer 0x{current_slot:X}")
-            break
         base = current_slot - 8
-        if base < 0x50 or base + 0x50 > len(data):
-            messages.append(f"PS2 Stories XTX node 0x{base:X} is outside the runtime object range")
+        if base < 0x50 or base + 0x60 > relocation_offset:
+            messages.append("PS2 texture node is outside the object range")
             break
-
-        header_offset = read_u32(data, base + 0x00)
-        next_slot = read_u32(data, base + 0x08)
-        if header_offset < 0x50 or header_offset + 16 > len(data):
-            messages.append(f"PS2 Stories XTX texture {texture_index} header 0x{header_offset:X} is invalid")
+        if read_u32(data, base + 8) != previous_slot:
+            messages.append("PS2 texture previous link is inconsistent")
+        if read_u32(data, base + 4) != 0x20:
+            messages.append("PS2 texture collection back-pointer must be 0x20")
+        header = read_u32(data, base)
+        if header < 0x50 or header + 16 > relocation_offset:
+            messages.append("PS2 texture raster header is invalid")
             break
-
-        raster_offset = read_u32(data, header_offset + 0x08)
-        raw_flags = read_u32(data, header_offset + 0x0C)
-        runtime_fields = decode_ps2_runtime_flags(raw_flags)
-        if runtime_fields is None:
-            messages.append(
-                f"PS2 Stories XTX texture {texture_index} uses editor-canonical flags 0x{raw_flags:08X}; "
-                "the game expects the serialized Leeds PS2 runtime bit layout"
-            )
-        if raster_offset < 0x50 or raster_offset >= len(data):
-            messages.append(f"PS2 Stories XTX texture {texture_index} raster 0x{raster_offset:X} overlaps/outside the runtime preface")
-
-        node_offsets.append(base)
-        header_offsets.append(header_offset)
-        raster_offsets.append(raster_offset)
-        current_slot = next_slot
-
-    if node_offsets and header_offsets and raster_offsets:
-        if max(raster_offsets) >= min(node_offsets):
-            messages.append("PS2 Stories XTX runtime ordering is not raster data -> linked nodes -> texture headers")
-        if max(node_offsets) >= min(header_offsets):
-            messages.append("PS2 Stories XTX linked nodes overlap or follow the texture-header block")
-
-    return len(messages) == 0, messages
+        fields = decode_ps2_runtime_flags(read_u32(data, header + 12))
+        if fields is None:
+            messages.append("PS2 texture flags do not use the runtime bit layout")
+        else:
+            width, height, depth, mip_count, swizzle_mask, unknown_bits = fields
+            expected_transfer = (0x450000 | (width // 2)) if depth == 4 else (0x250000 | width) if depth == 8 else 0
+            if depth in (4, 8) and read_u32(data, header + 4) != expected_transfer:
+                messages.append("PS2 indexed texture transfer word is inconsistent")
+        raster = read_u32(data, header + 8)
+        if raster < 0x50 or raster >= base:
+            messages.append("PS2 texture raster overlaps or follows the nodes")
+        nodes.append(base)
+        headers.append(header)
+        raster_offsets.append(raster)
+        expected_relocations.extend((base, base + 4, base + 8, base + 12))
+        previous_slot = current_slot
+        current_slot = read_u32(data, base + 12)
+    if read_u32(data, 0x28) != previous_slot:
+        messages.append("PS2 texture collection tail is inconsistent")
+    expected_relocations.extend(header + 8 for header in headers)
+    if relocations != expected_relocations:
+        messages.append("PS2 texture relocation fields do not match the runtime pointers")
+    if nodes and (max(raster_offsets) >= min(nodes) or max(node + 0x60 for node in nodes) > min(headers)):
+        messages.append("PS2 texture objects do not follow raster/node/header order")
+    return not messages, messages
 
 
 def parse_psp_header(data: bytes, offset: int) -> Optional[PspTexHeader]:

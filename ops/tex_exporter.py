@@ -159,7 +159,63 @@ def quantize_texture_rgba(rgba: bytes, bit_depth: int, platform: str) -> bytes:
     return bytes(raster) + padding + palette_bytes
 
 
-def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: str = "PS2", bit_depth="AUTO") -> bytes:
+def build_ps2_texture_container(texture_records, texture_format="XTX") -> bytes:
+    if len(texture_records) > 4096:
+        raise ValueError("Too many textures for a Leeds texture dictionary")
+    data = bytearray(0x44)
+    data[:4] = b"xet\0"
+    if str(texture_format).upper() == "XTX":
+        struct.pack_into("<I", data, 0x20, 0xCC06)
+        struct.pack_into("<IIIII", data, 0x30, 0xCCCCCCCC, 0xCCCCCCCC, 0, 0x001D3B1C, 0x07070040)
+    else:
+        struct.pack_into("<I", data, 0x20, 0x8606)
+        struct.pack_into("<IIII", data, 0x30, 1, 0x0012FD70, 0x3B5, 0x0012FDB8)
+    struct.pack_into("<II", data, 0x28, 0x28, 0x28)
+
+    raster_offsets = []
+    for name, width, height, raster, depth in texture_records:
+        data.extend(bytes(align(len(data), 16) - len(data)))
+        raster_offsets.append(len(data))
+        data.extend(raster)
+
+    node_offsets = []
+    for record in texture_records:
+        data.extend(bytes(align(len(data), 16) - len(data)))
+        node_offsets.append(len(data))
+        data.extend(bytes(0x60))
+
+    header_offsets = []
+    for index, (name, width, height, raster, depth) in enumerate(texture_records):
+        data.extend(bytes(align(len(data), 16) - len(data)))
+        header_offsets.append(len(data))
+        transfer = (0x00450000 | (width // 2)) if depth == 4 else (0x00250000 | width)
+        flags = power_of_two_log2(width) | (power_of_two_log2(height) << 6) | (depth << 12) | (1 << 20)
+        data.extend(struct.pack("<IIII", 0, transfer, raster_offsets[index], flags))
+
+    relocations = [0x28, 0x2C]
+    if texture_records:
+        struct.pack_into("<II", data, 0x28, node_offsets[-1] + 8, node_offsets[0] + 8)
+    for index, (name, width, height, raster, depth) in enumerate(texture_records):
+        base = node_offsets[index]
+        previous_slot = node_offsets[index - 1] + 8 if index else 0x28
+        next_slot = node_offsets[index + 1] + 8 if index + 1 < len(node_offsets) else 0x28
+        struct.pack_into("<IIII", data, base, header_offsets[index], 0x20, previous_slot, next_slot)
+        encoded_name = name.encode("ascii", "replace")[:63]
+        data[base + 0x10:base + 0x10 + len(encoded_name)] = encoded_name
+        relocations.extend((base, base + 4, base + 8, base + 12))
+    relocations.extend(offset + 8 for offset in header_offsets)
+    if texture_records:
+        data.extend(bytes(align(len(data), 16) - len(data)))
+    relocation_offset = len(data)
+    for field_offset in relocations:
+        data.extend(struct.pack("<I", field_offset))
+    logical_end = len(data)
+    struct.pack_into("<IIIII", data, 0x08, logical_end, relocation_offset, relocation_offset, len(relocations), 0)
+    data.extend(bytes(align(logical_end, 2048) - logical_end))
+    return bytes(data)
+
+
+def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: str = "PS2", bit_depth="AUTO", texture_format="XTX") -> bytes:
     platform = str(platform or "PS2").upper().strip()
     if platform not in {"PS2", "PSP"}:
         platform = "PS2"
@@ -170,6 +226,9 @@ def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: s
         depth = resolve_texture_depth(image, bit_depth)
         raster = quantize_texture_rgba(rgba, depth, platform)
         texture_records.append((clean_texture_name(image.name), width, height, raster, depth))
+
+    if platform == "PS2":
+        return build_ps2_texture_container(texture_records, texture_format)
 
     if not texture_records:
         raise ValueError("No image textures are available to export")
@@ -259,7 +318,8 @@ def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: s
 
 def export_leeds_texture_container(filepath: str, images: Iterable[bpy.types.Image], platform: str = "PS2", bit_depth="AUTO") -> int:
     image_list = list(images)
-    payload = build_leeds_texture_container(image_list, platform=platform, bit_depth=bit_depth)
+    texture_format = os.path.splitext(filepath)[1].lstrip(".").upper() or "XTX"
+    payload = build_leeds_texture_container(image_list, platform=platform, bit_depth=bit_depth, texture_format=texture_format)
     with open(filepath, "wb") as output_file:
         output_file.write(payload)
     return len(image_list)

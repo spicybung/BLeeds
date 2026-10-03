@@ -92,7 +92,7 @@ class StoriesGouraudPartData:
 MATERIAL_CACHE: Dict[str, bpy.types.Material] = {}
 
 def convertStoriesPs2UvToBlender(u: float, v: float) -> Tuple[float, float]:
-    return (float(u), float(v))
+    return (float(u), 1.0 - float(v))
 
 def getArmatureFrameMatrix(arm_info: Any, dict_name: str, ptr: int, fallback: Matrix = None) -> Matrix:
     if fallback is None:

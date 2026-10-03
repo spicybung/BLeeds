@@ -4170,7 +4170,7 @@ def build_ps2_dma_for_strip(
         tex_header = (0x76 << 24) | ((seg_count & 0xFF) << 16) | 0x808D
     payload.extend(write_u32(tex_header))
     for v in verts:
-        payload.extend(encode_uv_bytes(v.u, v.v, flip_v=is_ped))
+        payload.extend(encode_uv_bytes(v.u, v.v, flip_v=True))
     pad_bytes_to(payload, 4)
 
     if emit_normals:
