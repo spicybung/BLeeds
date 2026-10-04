@@ -44,7 +44,7 @@ Contributions are welcome! If you have suggestions, bug reports, or want to cont
 
 ## Documentation
 
-For documentation, visit the [Wiki](https://github.com/spicybung/bLeeds/wiki).
+For documentation, visit the [BLeeds Wiki](https://github.com/spicybung/BLeeds/wiki).
 
 ## License
 
