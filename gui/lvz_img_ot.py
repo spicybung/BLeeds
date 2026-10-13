@@ -15,12 +15,14 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import StringProperty, BoolProperty
 from ..leedsLib import lvz_img as LVZ
 from ..ops import lvz_img_importer
+from ..ops.world_selection import iterImportWorldSelection
+from ..ops.uv_playback import requestNativeUvPlayback
 
 
 class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_lvz_img"
-    bl_label = "Import LVZ + IMG"
-    bl_description = "Import a map from a matching Rockstar Leeds LVZ and IMG pair"
+    bl_label = "Import Leeds World"
+    bl_description = "Open GAME.DTZ with adjacent world pairs, or a Leeds LVZ/IMG map; animated textures play automatically"
     bl_options = {'REGISTER'}
 
     filename_ext = ".lvz"
@@ -37,7 +39,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     )
 
     filter_glob: StringProperty(
-        default="*.lvz;*.LVZ",
+        default="*.lvz;*.LVZ;*.img;*.IMG;*.dtz;*.DTZ",
         options={'HIDDEN'},
         maxlen=255,
     )
@@ -48,14 +50,13 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         layout.prop(self, "debug_print")
 
     def execute(self, context):
-        self._import_iterator = lvz_img_importer.iter_import_lvz_img_archive(
+        self._import_iterator = iterImportWorldSelection(
             operator=self,
             context=context,
-            lvz_path=self.filepath,
+            filepath=self.filepath,
             apply_img_transforms=True,
             debug_print=self.debug_print,
             write_debug_log=self.write_debug_log,
-            game_dtz_path="",
             import_game_dtz_2dfx=True,
         )
         self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
@@ -90,6 +91,8 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
             self._stop_timer(context)
             result = finished.value if finished.value is not None else {'FINISHED'}
             lvz_img_importer.finish_active_import_progress(context, succeeded=('FINISHED' in result))
+            if 'FINISHED' in result:
+                requestNativeUvPlayback(context)
             return result
         except Exception as exc:
             try:

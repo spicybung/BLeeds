@@ -36,34 +36,7 @@ from bpy_extras.io_utils import ImportHelper
 from bpy.props import StringProperty, BoolProperty
 from mathutils import Matrix
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .IMG & .LVZ - file formats for Stories/MH2 worlds            #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process for included formats)
-# • https://gtamods.com/wiki/Relocatable_chunk#:~:text=The%20different%20file%20types%20are%3A
-# • https://gtamods.com/wiki/IMG_archive
-# • https://web.archive.org/web/20180402031926/http://gtamodding.ru/wiki/IMG (*Russian*)
-# • https://web.archive.org/web/20180406213309/http://gtamodding.ru/wiki/LVZ (*Russian*)
-# • https://web.archive.org/web/20180729202923/http://gtamodding.ru/wiki/WRLD (*Russian*)
-# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (*Russian* - WRLD textures)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesview/worldstream.cpp
-# • https://web-archive-org.translate.goog/web/20180810183857/http://gtamodding.ru/wiki/LVZ?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# • https://web-archive-org.translate.goog/web/20180807031320/http://www.gtamodding.ru/wiki/IMG?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto)
-# • https://web-archive-org.translate.goog/web/20180729204205/http://gtamodding.ru/wiki/CHK?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (ditto - WRLD textures)
-# - Mod resources/cool stuff:
-# • https://gtaforums.com/topic/285544-gtavcslcs-modding/ (includes old unimg.exe for GTA: Stories)
-# • https://github.com/electronicarts/RenderWare3Docs/blob/master/whitepapers/worlds.pdf (Leeds Worlds are based on RW Worlds, which are based on .bsp)
-# • https://developer.valvesoftware.com/wiki/BSP_(Quake) (see above)
-# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .MDL's, .WRLD's, .BSP's... )
-# • https://vk.com/video143954957_456239416 (*Russian* - how DTZ + LVZ + IMG work together in GTA: Stories by Daniil Sayanov)
-# • https://www.gtagarage.com/mods/screen.php?s=60828 (converts LVZ + IMG to RW .DFF)
 
-#######################################################
-
-# Normal import logs keep the useful parser and placement totals, but translate
-# internal development labels into readable messages.  Raw patch names, policy
-# notes, and implementation-only fallback names stay out of user logs.
 CONCISE_IMPORT_LOG = True
 
 
@@ -327,9 +300,8 @@ class DebugOut:
 
     def log(self, msg: str):
         raw_msg = str(msg)
-        # Console debugging is opt-in and must show the real parser trace. The
-        # previous implementation condensed the message before printing, which
-        # made the file-browser "Debug print" choice appear to do nothing.
+
+
         if self.enable_console:
             print(raw_msg)
 
@@ -434,8 +406,8 @@ IMG_PASS_NAMES_LCS = (
     "LIGHTS",
     "TRANSPARENT",
 )
-# LIGHTS is a normal WRLD mesh pass. It is separate from model-attached 2DFX
-# associations loaded from GAME.DTZ and must remain available during map import.
+
+
 IMG_VISIBLE_PASS_NAMES_DEFAULT = {
     "UNDERWATER",
     "ROADS",
@@ -584,7 +556,7 @@ def calculate_object_local_bounding_sphere(obj) -> Optional[Tuple[float, float, 
     return (cx, cy, cz, radius)
 
 def is_game_dtz_2dfx_object(obj) -> bool:
-    """True for GAME.DTZ-owned helpers that must never be written to LVZ/IMG."""
+
     if obj is None:
         return False
     try:
@@ -610,9 +582,8 @@ def collect_lvz_img_export_objects(context, selected_only: bool) -> List[bpy.typ
             continue
         if is_game_dtz_2dfx_object(obj):
             continue
-        # Export only real placed IMG rows. Parser templates also carry a
-        # resource index, but have no placement identity and must never rewrite
-        # the first matching row at their identity transform.
+
+
         is_placed = bool(obj.get("blds_visible_placement_instance", False))
         has_exact_row = "blds_img_cont" in obj and "blds_img_rel_off" in obj
         if not is_placed and not has_exact_row:
@@ -1166,8 +1137,8 @@ def write_lvz_img_scene_archive(
     written_row_offsets = set()
     bounds_by_mesh = {}
     for obj in objects:
-        # Defense in depth: even a caller-supplied or incorrectly stamped
-        # GAME.DTZ helper cannot reach the LVZ texture or IMG placement writer.
+
+
         if is_game_dtz_2dfx_object(obj):
             skipped_objects.append((obj.name, -1, "GAME.DTZ 2DFX is not stored in LVZ/IMG"))
             continue
@@ -1381,6 +1352,89 @@ class MDLStripGroup:
     bytes_read: int
     start_off: int
     end_off: int
+
+def nativeWorldUvModes(format_flags: int) -> Tuple[int, int]:
+
+    flags = int(format_flags)
+    return (flags >> 8) & 3, (flags >> 10) & 3
+
+
+def nativeWorldUvOffset(format_flags: int, phase: float) -> Tuple[float, float]:
+
+    modes = nativeWorldUvModes(format_flags)
+    if 3 in modes:
+        return 0.0, 0.0
+    phase = float(phase) % 1.0
+    if not math.isfinite(phase):
+        raise ValueError("native world UV phase must be finite")
+    offsets = [phase if mode == 1 else round(phase * 2.0) * 0.25 if mode == 2 else 0.0
+               for mode in modes]
+    return offsets[0], offsets[1]
+
+
+def configureNativeWorldUvAnimation(material, format_flags: int, game_hint: str,
+                                    frame_start: int = 1, v_flipped: bool = False) -> bool:
+
+    if str(game_hint).lower() != "vcs" or int(format_flags) & 0xF000 != 0xC000:
+        return False
+    u_mode, v_mode = nativeWorldUvModes(format_flags)
+    material["bleeds_uv_source"] = "VCS_PS2_WORLD"
+    material["bleeds_uv_mode_u"] = u_mode
+    material["bleeds_uv_mode_v"] = v_mode
+    material["bleeds_uv_brightness_effect"] = 3 in (u_mode, v_mode)
+    if 3 in (u_mode, v_mode) or (u_mode, v_mode) == (0, 0):
+        return False
+    tree = getattr(material, "node_tree", None)
+    if tree is None:
+        return False
+    texture_nodes = [node for node in tree.nodes if node.type == 'TEX_IMAGE']
+    if not texture_nodes:
+        return False
+
+
+    material["bleeds_uv_phase_step"] = 0.05
+    material["bleeds_uv_frame_start"] = int(frame_start)
+
+    for name in ("Leeds World UV", "Leeds UV Offset", "Leeds Animated UV"):
+        previous = tree.nodes.get(name)
+        if previous is not None:
+            if previous.type == 'COMBXYZ':
+                for socket in previous.inputs:
+                    socket.driver_remove("default_value")
+            tree.nodes.remove(previous)
+    coordinates = tree.nodes.new("ShaderNodeTexCoord")
+    coordinates.name = "Leeds World UV"
+    coordinates.location = (-900, 0)
+    offset = tree.nodes.new("ShaderNodeCombineXYZ")
+    offset.name = "Leeds UV Offset"
+    offset.label = "Native scrolling"
+    offset.location = (-900, -200)
+    addition = tree.nodes.new("ShaderNodeVectorMath")
+    addition.operation = 'ADD'
+    addition.name = "Leeds Animated UV"
+    addition.location = (-600, 0)
+    tree.links.new(coordinates.outputs['UV'], addition.inputs[0])
+    tree.links.new(offset.outputs['Vector'], addition.inputs[1])
+    advance = f"((frame-({int(frame_start)}))*0.05)"
+    phase = f"({advance}-floor({advance}))"
+    for axis, mode in enumerate((u_mode, v_mode)):
+        if mode == 0:
+            continue
+        expression = phase
+        if mode == 2:
+
+
+            expression = f"(0.0 if {phase}==0.25 else floor(2.0*{phase}+0.5)*0.25)"
+        if axis == 1 and v_flipped:
+            expression = f"-({expression})"
+        curve = offset.inputs[axis].driver_add("default_value")
+        curve.driver.type = 'SCRIPTED'
+        curve.driver.expression = expression
+    for texture_node in texture_nodes:
+        texture_node.extension = 'REPEAT'
+        tree.links.new(addition.outputs['Vector'], texture_node.inputs['Vector'])
+    return True
+
 
 class read_lvz:
     UNPACK = 0x6C018000
@@ -1685,10 +1739,7 @@ class read_lvz:
         if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr + 8 > n:
             return None
 
-        # Resource-table cursors in the IMG sometimes point at a tiny resource
-        # header before the material descriptor table.  Do not scan for UNPACK
-        # from that cursor.  First locate the descriptor table, then let the
-        # descriptor's own packet sizes bound the VIF stream.
+
         preferred_deltas = (
             0,
             4, 8, 12, 16, 20, 24, 28, 32,
@@ -1877,8 +1928,10 @@ class read_lvz:
             return False
 
         low_flag = format_flags & 0x00FF
-        high_flag = format_flags & 0xFF00
-        if low_flag not in (0x25, 0x45) or high_flag not in (0xC000, 0xCF00):
+
+
+        high_flag = format_flags & 0xF000
+        if low_flag not in (0x25, 0x45) or high_flag != 0xC000:
             return False
         if data_pointer not in (addr + LVZ_DIRECT_TEXTURE_HEADER_BYTES, 0):
             if not (addr < data_pointer < n and (data_pointer & 0x3) == 0):
@@ -1922,8 +1975,6 @@ class read_lvz:
         b32 = read_u32(lvz, addr + 4)
         info = {"u16_pair": (a16, b16), "u32_pair": (a32, b32)}
 
-        if self.looks_like_mdl_material_list_candidate(addr):
-            return (100, "MDL", info)
         if self.looks_like_direct_texture_candidate(addr):
             info["direct_texture"] = True
             info["width_half"] = read_u16(lvz, addr + 4)
@@ -1932,6 +1983,10 @@ class read_lvz:
             info["texture_meta"] = read_u32(lvz, addr + 12)
             info["raster_flags"] = read_u32(lvz, addr + 12)
             return (90, "TEX", info)
+
+
+        if self.looks_like_mdl_material_list_candidate(addr):
+            return (100, "MDL", info)
         if self.looks_like_texture_ref_candidate(addr):
             info["ref_addr"] = a32
             info["embedded_res_id"] = b32
@@ -2346,6 +2401,7 @@ class read_lvz:
             raise ValueError(f"unsupported direct texture raster flags 0x{raster_flags:08X}")
         return {
             "flags": int(raster_flags),
+            "format_flags": int(read_u16(blob, 6)),
             "width": int(1 << logw),
             "height": int(1 << logh),
             "depth": int(depth),
@@ -2484,7 +2540,7 @@ class read_lvz:
                     mat["blds_lvz_texture_direct"] = True
                     mat["blds_lvz_texture_header_len"] = int(LVZ_DIRECT_TEXTURE_HEADER_BYTES)
                     mat["blds_lvz_texture_width_half"] = int(row.get("width_half", 0) or 0)
-                    mat["blds_lvz_texture_flags"] = int(row.get("texture_flags", 0) or 0)
+                    mat["blds_lvz_texture_flags"] = int(raster_info["format_flags"])
                     mat["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
                     mat["blds_lvz_texture_depth"] = int(raster_info.get("depth", 0))
                     mat["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
@@ -2498,6 +2554,8 @@ class read_lvz:
                                 node.image["blds_lvz_texture_blob_len"] = int(blob_len)
                                 node.image["blds_lvz_texture_direct"] = True
                                 node.image["blds_lvz_texture_header_len"] = int(LVZ_DIRECT_TEXTURE_HEADER_BYTES)
+                                node.image["blds_lvz_texture_flags"] = int(raster_info["format_flags"])
+                                node.image["bleeds_uv_game_hint"] = self.master_game_hint
                                 node.image["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
                                 node.image["blds_lvz_texture_depth"] = int(raster_info.get("depth", 0))
                                 node.image["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
@@ -2505,6 +2563,10 @@ class read_lvz:
                                 break
                 except Exception:
                     pass
+                configureNativeWorldUvAnimation(
+                    mat, raster_info["format_flags"], self.master_game_hint,
+                    frame_start=int(bpy.context.scene.frame_start),
+                )
                 self.material_by_res_index[res_index] = mat
                 decoded += 1
                 if self.debug_print:
@@ -2611,10 +2673,10 @@ class read_lvz:
         x = read_i16(buf, off + 0); y = read_i16(buf, off + 2); z = read_i16(buf, off + 4)
         return (x / 32767.5, y / 32767.5, z / 32767.5)
 
-    def _read_uv_u8_div255(self, buf: bytes, off: int) -> Tuple[float,float]:
+    def readPackedWorldUv(self, buf: bytes, off: int) -> Tuple[float,float]:
         u = buf[off + 0]
         v = buf[off + 1]
-        return (u / 255.0, v / 255.0)
+        return (u / 128.0, v / 128.0)
 
     def _decode_rgba5551(self, v16: int) -> Tuple[int,int,int,int]:
         r = (v16 & 0x1F) * 255 // 0x1F
@@ -2665,17 +2727,7 @@ class read_lvz:
                 return False
             return (p & 3) == 0 and 0 <= p and p + 4 <= n and read_u32(buf, p) == self.UNPACK
 
-        # Some slave/overlay resource descriptors do not point straight at the
-        # VIF UNPACK word.  There are two common cases in beach:
-        #   * descriptor cursor lands 12 bytes after the real UNPACK header
-        #   * descriptor cursor lands at an 0x50-byte row/object header that stores
-        #     ids / placement-ish data, then the real UNPACK starts after it
-        # The old narrow scan produced false "UNPACK not found near ..." failures.
-        # Check the known descriptor deltas first, especially +0x50, then do a
-        # bounded aligned scan so we still don't jump to a random later object.
-        # For the next batch after MSCAL, callers must pass allow_backward=False.
-        # Otherwise the +0x50 descriptor fix can accidentally rediscover the same
-        # UNPACK from behind and loop until max_groups.
+
         preferred_deltas = (
             0,
             0x50, -0x50,
@@ -2703,8 +2755,8 @@ class read_lvz:
             if (p & 3) == 0 and p not in seen and valid_unpack(p):
                 aligned.append(p)
         if aligned:
-            # Prefer the closest aligned UNPACK.  Ties prefer the earlier header,
-            # because descriptor cursors most often land after the real header.
+
+
             p = sorted(aligned, key=lambda q: (abs(q - requested), q))[0]
             self._log_unpack_alignment(requested, p)
             return p
@@ -2897,7 +2949,7 @@ class read_lvz:
         uvs: List[Tuple[float,float]] = []
         for i in range(nvert_eff):
             off = w + i * 2
-            uvs.append(self._read_uv_u8_div255(buf, off))
+            uvs.append(self.readPackedWorldUv(buf, off))
         w += need_bytes_uv
         w = align_up4(w)
 
@@ -3036,14 +3088,13 @@ class read_lvz:
             cols_rgba: List[Tuple[int, int, int, int]] = []
             for vi in range(vertex_count):
                 voff = off + vi * 10
-                u = buf[voff + 0] / 255.0
-                v = buf[voff + 1] / 255.0
+                u, v = self.readPackedWorldUv(buf, voff)
                 color = read_u16(buf, voff + 2)
                 x = read_i16(buf, voff + 4) / 32768.0
                 y = read_i16(buf, voff + 6) / 32768.0
                 z = read_i16(buf, voff + 8) / 32768.0
                 verts.append((x, y, z))
-                uvs.append((u * (material.u_scale if material.u_scale != 0.0 else 1.0), v * (material.v_scale if material.v_scale != 0.0 else 1.0)))
+                uvs.append((u * material.u_scale, v * material.v_scale))
                 cols_raw_u16.append(color)
                 cols_rgba.append(self._decode_rgba5551(color))
 
@@ -3074,6 +3125,10 @@ class read_lvz:
     def assign_materials_by_strip_bytes(self, mlist: MDLMaterialList, groups: List[MDLStripGroup]):
 
         if not mlist.materials or not groups:
+            return
+
+
+        if str(getattr(mlist, "format_tag", "")).startswith("psp_wrld"):
             return
 
         flat: List[Tuple[TriStrip, int, int]] = []
@@ -3107,8 +3162,8 @@ class read_lvz:
                 break
 
             s.material_res_index = m.texture_id
-            s.u_scale = m.u_scale if m.u_scale != 0.0 else 1.0
-            s.v_scale = m.v_scale if m.v_scale != 0.0 else 1.0
+            s.u_scale = m.u_scale
+            s.v_scale = m.v_scale
             if s.uvs:
                 s.uvs = [(u * s.u_scale, v * s.v_scale) for (u, v) in s.uvs]
             acc_len += batch_len
@@ -3293,19 +3348,7 @@ class read_img:
         return self._img_mdl_parser.parse_mdl_geometry_after_list(material_list, max_end=max_end)
 
     def wrldtool_img_offset_by_lvz_addr(self) -> Dict[int, int]:
-        """
-        V65: use the WRLDTool-style IMG offset field directly.
 
-        The companion IMG does not store the 32-byte DLRW/xet preface bytes, so
-        V63/V64's preface matching correctly returned zero.  The value at LVZ
-        header +0x18 is the contIMG / IMG data offset used by the older working
-        importer logs.
-
-        Important:
-          - This is the IMG data base, not a place to add another +0x20.
-          - file_size includes the 0x20 LVZ DLRW preface, so the IMG data span is
-            [contIMG, contIMG + file_size - 0x20).
-        """
         if self._wrldtool_img_offset_by_lvz_addr is not None:
             return self._wrldtool_img_offset_by_lvz_addr
 
@@ -3362,7 +3405,7 @@ class read_img:
             except Exception:
                 pass
 
-        # Master group chain first.
+
         cursor = 0x24
         while cursor + 8 <= n:
             addr = read_u32(lvz, cursor + 0)
@@ -3378,7 +3421,7 @@ class read_img:
                 add(addr + child * 0x20)
             cursor += 8
 
-        # Fallback scan for triggered/AREA headers.
+
         pos = 0
         while True:
             pos = lvz.find(b"DLRW", pos)
@@ -3397,7 +3440,7 @@ class read_img:
         if cont_img is None:
             cont_img = int(fallback_global_rel)
 
-        # contIMG is already the IMG data base. Do NOT add +0x20 here.
+
         data_base = int(cont_img)
         data_end = min(len(self.img_bytes), data_base + max(0, int(file_size) - 0x20))
         used_direct_contimg = 0 <= data_base < len(self.img_bytes)
@@ -3600,21 +3643,7 @@ class read_img:
             if raw_ptr < 0:
                 return
 
-            # V74: exact Slave WRLD resource table recovery.
-            #
-            # The WRLD article says slave Resource[] rows are:
-            #   4b resource id
-            #   4b offset to resource
-            #
-            # In the file data we see multiple pointer states depending on the
-            # table/FAT/global-section path:
-            #   - WRLD-local including the missing 0x20 DLRW preface: cont + ptr - 0x20
-            #   - continuation-local after the 0x20 preface was stripped: cont + ptr
-            #   - already absolute IMG offset: ptr
-            #   - already absolute but still preface-based: ptr - 0x20
-            #
-            # Old builds only tried cont + ptr - 0x20.  That makes real resources
-            # look absent, then the importer falls into fake WRLD sparse ranges.
+
             candidates = []
             def push(label, off):
                 try:
@@ -3626,10 +3655,7 @@ class read_img:
 
             push("", int(raw_off))
 
-            # Only broaden pointer interpretations when this is a targeted exact
-            # resource search.  This avoids creating random false positives during
-            # the broad first pass, but lets missing ids such as beach1881 be
-            # resolved from the real slave Resource[] row.
+
             if wanted is not None and int(res_id) in wanted:
                 push(":ptr_cont_minus20", int(cont) + int(raw_ptr) - 0x20)
                 push(":ptr_cont", int(cont) + int(raw_ptr))
@@ -3640,9 +3666,8 @@ class read_img:
                 if raw_ptr < 0x20 and suffix in ("", ":ptr_cont_minus20"):
                     continue
                 if cand_off < cont or cand_off + 4 > end:
-                    # Absolute IMG offsets can legitimately be outside this
-                    # expanded container; accept them if they point inside file
-                    # and the caller is doing a targeted exact-res lookup.
+
+
                     if not (wanted is not None and int(res_id) in wanted and 0 <= cand_off + 4 <= len(img)):
                         continue
                 if cand_off < 0 or cand_off + 4 > len(img):
@@ -3714,8 +3739,7 @@ class read_img:
 
             self.last_overlay_resource_stats["containers"] += 1
 
-            # Old LCS/WRLD style:
-            #   s32 resource_id, u32 payload_pointer
+
             if list_start + num_resources * 8 <= end:
                 for resource_index in range(num_resources):
                     row_off = list_start + resource_index * 8
@@ -3726,8 +3750,7 @@ class read_img:
                     if len(overlays) != before:
                         self.last_overlay_resource_stats["rows_8_id_ptr"] += 1
 
-            # VCS/PS2 slave WRLD can mirror the master Resource[] 12-byte shape:
-            #   u32 payload_pointer, u32 unused/flags, u32 resource_id
+
             if list_start + num_resources * 12 <= end:
                 for resource_index in range(num_resources):
                     row_off = list_start + resource_index * 12
@@ -3740,9 +3763,7 @@ class read_img:
                     if len(overlays) != before:
                         self.last_overlay_resource_stats["rows_12_ptr_id"] += 1
 
-                    # Extra 12-byte interpretations are only used for targeted missing IDs.
-                    # Running them globally creates false positive city slabs, but some VCS
-                    # beach/mainla IPL models live in these variants.
+
                     if include_alt_12_layouts:
                         before = len(overlays)
                         add_overlay(sector, resource_index, int(b), int(a), cont + int(a) - 0x20, row_off, 12, "ptr_id_unused", cont, end)
@@ -3759,13 +3780,7 @@ class read_img:
                         if len(overlays) != before:
                             self.last_overlay_resource_stats["rows_12_id_ptr_unused"] += 1
 
-        # V81: only real-looking MDL resource starts are allowed to tighten the
-        # bound of another resource.  V80 used every Resource[] interpretation as
-        # a hard end.  That was too aggressive because the broad pass reads both
-        # 8-byte and 12-byte resource-table layouts; the wrong 12-byte pass can
-        # point into the middle of an existing VIF payload.  Those false starts
-        # created short resource_end values and caused valid batches to stop with
-        # "Position/UV/Prelight payload truncated".
+
         def looks_like_mdl_resource_start_for_bounds(raw_off: int, sector_end: int) -> bool:
             try:
                 raw_off = int(raw_off)
@@ -3779,11 +3794,7 @@ class read_img:
             if img[raw_off:raw_off + 4] in (b"DLRW", b"xet\x00"):
                 return False
 
-            # Raw VIF UNPACK words are not valid resource starts for bounding.
-            # They are often internal batches inside the same MDL stream.  Treating
-            # them as next resources is what caused V80/V81 to clip valid MDLs at
-            # the second or third batch.  A resource bound must begin at a material
-            # descriptor table, not at an internal UNPACK.
+
             if read_u32(img, raw_off) == 0x6C018000:
                 return False
 
@@ -3866,23 +3877,13 @@ class read_img:
 
 
     def find_area_info_records_from_lvz(self) -> List[Dict[str, int]]:
-        """Return the master sLevelChunk AreaInfo[] rows backed by AERA chunks.
 
-        VCS stores an AreaInfo table in the master LVZ.  Each AreaInfo points to
-        an AERA relocatable chunk in the companion IMG.  This is distinct from a
-        Sector/WRLD overlay table: an Area contains ``AreaResource`` rows shaped
-        as ``s16 resourceId, s16 secondaryId, u32 dataPointer``.  Treating these
-        rows as Sector ``s32 id, u32 pointer`` records loses the exact high-number
-        resource IDs and is the reason models such as Beach1887 and Beach1725
-        were reported missing.
-        """
         lvz = self.lvz_bytes
         img = self.img_bytes
         if len(lvz) < 0x40 or len(img) < 0x40:
             return []
 
-        # Known VCS master offsets first.  The fallback scan keeps the reader
-        # usable with other regional builds without adding any importer option.
+
         pair_offsets = [0x2F0]
         scan_end = min(len(lvz) - 8, 0x500)
         for off in range(0x150, max(0x150, scan_end + 1), 4):
@@ -3923,9 +3924,8 @@ class read_img:
                 if area_resources < 0 or area_resources > 4096:
                     continue
                 if declared_resources >= 0 and area_resources != declared_resources:
-                    # Keep the chunk only when both counts are at least plausible;
-                    # a mismatch is useful diagnostic data but not a reason to
-                    # reinterpret unrelated bytes as AreaInfo.
+
+
                     if declared_resources > 4096:
                         continue
                 resource_table_off = int(file_offset) + int(resources_ptr)
@@ -3953,8 +3953,7 @@ class read_img:
                 })
                 valid += 1
 
-            # Require a strong table-level proof.  The real beach VCS table has
-            # every row backed by an AERA chunk; random master values do not.
+
             required = min(int(count), 3)
             if valid < required:
                 continue
@@ -3977,13 +3976,7 @@ class read_img:
                                wanted_res_ids: Optional[set] = None,
                                max_resource_id: Optional[int] = None,
                                progress_callback=None) -> List[Dict[str, int]]:
-        """Parse exact ``AreaResource`` rows from IMG AERA chunks.
 
-        The data pointer is relative to the beginning of the AERA chunk,
-        including its 0x20 relocatable header.  The resource array pointer uses
-        the same base.  Only rows whose pointer resolves to a valid Leeds MDL
-        material descriptor are returned.
-        """
         img = self.img_bytes
         if area_records is None:
             area_records = self.find_area_info_records_from_lvz()
@@ -4054,9 +4047,8 @@ class read_img:
                     resource_end = data_end
                 descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=resource_end)
                 if descriptor_off is None and resource_end < data_end:
-                    # A few rows share auxiliary blocks between payloads.  The
-                    # exact pointer is still authoritative, so allow the full
-                    # AERA data span before rejecting it as non-geometry.
+
+
                     descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=data_end)
                     if descriptor_off is not None:
                         resource_end = data_end
@@ -4103,17 +4095,7 @@ class read_img:
     def build_area_model_info_map(self, area_records: Optional[List[Dict[str, int]]] = None,
                                   wanted_res_ids: Optional[set] = None,
                                   max_resource_id: Optional[int] = None):
-        """Build the authoritative streamed RES -> GAME.DTZ model-info map.
 
-        In VCS ``AreaResource.id1`` is the streamed resource identity and
-        ``AreaResource.id2`` is the ``CBaseModelInfo`` index used by world
-        entities and GAME.DTZ.  This identity is carried by the AERA row
-        itself; it does not depend on the resource payload being geometry.
-
-        Every accepted row must still come from the master AreaInfo table, a
-        validated AERA chunk, and an in-bounds chunk-relative payload pointer.
-        Conflicting secondary IDs are omitted rather than synthesized.
-        """
         img = self.img_bytes
         if area_records is None:
             area_records = self.find_area_info_records_from_lvz()
@@ -4169,9 +4151,7 @@ class read_img:
                 if raw_ptr >= 0x20 and raw_off >= base + 0x20 and raw_off < data_end:
                     stats["valid_pointer_rows"] += 1
 
-                # Identity belongs to the validated AERA row itself.  Some
-                # AreaResource entries intentionally have no geometry payload,
-                # but their secondaryId still owns model metadata and 2DFX.
+
                 previous = by_res.get(res_id)
                 if previous is None:
                     by_res[res_id] = model_info_id
@@ -4199,7 +4179,6 @@ class read_img:
         }
         self.last_area_model_info_stats = stats
         return by_res, provenance, conflicts
-
 
 
     def enumerate_sector_details(self, max_resource_id: Optional[int] = None, include_lod: bool = False, dedupe_visible: bool = True, progress_callback=None):
@@ -4258,12 +4237,8 @@ class read_img:
                     sz = half_to_float(read_u16(img, off + 0x08))
                     sr = half_to_float(read_u16(img, off + 0x0A))
                     m = struct.unpack_from("<16f", img, off + 0x10)
-                    # The same static IPL row is copied into every sector block it
-                    # overlaps.  Sector-relative translation can differ by a tiny
-                    # floating-point amount after the sector origin is added, which
-                    # previously left near-identical .001 copies such as Beach4292.
-                    # The row sphere is stored in world coordinates and is stable
-                    # across those copies, so combine it with the full 3x3 basis.
+
+
                     dedupe_key = (
                         int(ipl_id), int(res_id), str(pass_name),
                         round(float(sx), 4), round(float(sy), 4),
@@ -4339,10 +4314,8 @@ class read_img:
             sector_x = 0
             sector_y = 0
             origin = (0.0, 0.0, 0.0)
-            # AREA/triggered containers are still attached to a WRLD group entry. Their
-            # instance rows are local to that group's grid cell, same as normal sector rows.
-            # V80 kept the rows but used origin 0,0,0, which shoved valid models into the
-            # wrong place and made the import look broken.
+
+
             if group_index >= 0 and 0 <= group_start_x < 256 and 0 <= child_index < 4096:
                 sector_x = group_start_x + child_index
                 sector_y = group_index
@@ -4381,9 +4354,8 @@ class read_img:
         if pass_count <= 1:
             return []
         pass_ptrs = [read_u32(img, cont + 0x08 + i * 4) for i in range(pass_count)]
-        # Extra AREA/triggered containers use the same IPL pass order as normal WRLD sector containers.
-        # Do not label these as AREA_PASS_N, because the visible-pass filter treats unknown pass names
-        # as non-model rows and drops the whole AREA/triggered placement table.
+
+
         pass_names = IMG_PASS_NAMES_LCS if str(container_record.get("game_hint", self.detect_sector_game_hint())) == "lcs" else IMG_PASS_NAMES_VCS
         spans = []
         total_rows = 0

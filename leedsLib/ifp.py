@@ -3,16 +3,6 @@
 # Years: 2025 - 2026
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""Manhunt ANCT/SEQU/SEQT IFP parser.
-
-BLeeds 1.2.0 keeps Manhunt IFP separate from GTA Stories ``.anim`` files.
-The parser is intentionally independent from Blender so files can be validated
-outside Blender and before any rig is modified.
-
-Manhunt 2 SEQT quaternions are stored as signed int16 XYZW values originating
-from 3ds Max row-vector local transforms.  The parser preserves those source
-values; Blender-space conversion is performed by ``ops.ifp_importer``.
-"""
 
 import io
 import math
@@ -217,8 +207,8 @@ def readManhuntTrack(stream, expected_sequence: Optional[str] = None) -> Manhunt
     start_time_offset = stream.tell()
     start_time = readU16(stream)
     if frame_type < 3 and start_time == 0:
-        # For variable-time frame type 1/2, the zero we just read is the first
-        # delta word, not a separate StartTime field.
+
+
         stream.seek(start_time_offset)
         start_time = 0
 
@@ -343,9 +333,7 @@ def decodeManhuntIfpBlob(raw: bytes):
         if decoded and decoded.startswith(b"ANCT"):
             return decoded, True, offset
 
-    # Some platform/archive variants place a short header before a zlib stream.
-    # Search only the beginning so a random compressed payload inside a file is
-    # not mistaken for the container itself.
+
     upper = min(len(raw) - 2, 128)
     for offset in range(max(0, upper)):
         cmf = raw[offset]

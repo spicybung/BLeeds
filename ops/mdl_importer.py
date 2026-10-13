@@ -26,34 +26,9 @@ from mathutils import Matrix, Vector
 
 from ..leedsLib import mdl as stories_mdl
 from ..leedsLib import lvz_img as embedded_mdl
+from ..data.bone_data import normalizePedSkinBoneName
 from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth, set_mesh_gouraud_shading, stamp_bleeds_entity_type
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for Stories .MDLs, the file format for actors & props            #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
-# • https://gtamods.com/wiki/Leeds_Engine (TODO: update stub)
-# • https://gtamods.com/wiki/MDL (TODO: update stub with more documentation in own words)
-# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h (ditto)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp (ditto)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (*Russian*)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (*ditto - by Alex/AK73 & good resource to start*)
-# • https://web.archive.org/web/20180714005051/https://www.gtamodding.ru/wiki/GTA_Stories_RAW_Editor (ditto)
-# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start w/out any other documentation)
-# - Mod resources/cool stuff:
-# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (GTA3xx .img: .mdls, textures, animations)
-# • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
-# • https://gtaforums.com/topic/285544-gtavcslcs-modding/
-# • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
-# • http://aap.papnet.eu/gta/RE/lcs_pipes.txt (a brief binary rundown of how bitflags work for PS2/PSP/Mobile Stories games)
-# • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
-# • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
-# • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
-# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .MDL's, .WRLD's, .BSP's... )
-# • https://www.gamedeveloper.com/programming/opinion-why-on-earth-would-we-write-our-own-game-engine- (Renderwares fate)
 
 @dataclass
 class StoriesImportContext:
@@ -88,8 +63,6 @@ class StoriesGouraudPartData:
     source_vertex_count: int = 0
     removed_degenerate_face_count: int = 0
     removed_duplicate_face_count: int = 0
-
-MATERIAL_CACHE: Dict[str, bpy.types.Material] = {}
 
 def convertStoriesPs2UvToBlender(u: float, v: float) -> Tuple[float, float]:
     return (float(u), 1.0 - float(v))
@@ -321,20 +294,6 @@ def writeMdlArmatureFrameMatrixArrays(owner: Any, arm_info: Any) -> None:
     owner["bleeds_mdl_frame_field_a0"] = frame_field_a0
     owner["bleeds_mdl_frame_field_a4"] = frame_field_a4
 
-def _material_cache_get_valid(key: str):
-    mat = MATERIAL_CACHE.get(key)
-    if mat is None:
-        return None
-    try:
-        _ = mat.name
-        return mat
-    except Exception:
-        try:
-            MATERIAL_CACHE.pop(key, None)
-        except Exception:
-            pass
-        return None
-
 def get_bone_name_list(import_type: int) -> List[str]:
     names: List[str] = []
 
@@ -424,7 +383,7 @@ def create_armature_from_context(
     for ptr, name in arm_info.frame_names.items():
         if ptr not in arm_info.frame_mats_world:
             continue
-        if mdl_type_u == "CUT" and not isCutsceneActorBodyBoneName(str(name)):
+        if mdl_type_u == "CUT" and stories_ctx.platform != 'PSP' and not isCutsceneActorBodyBoneName(str(name)):
             continue
 
         world_mat = arm_info.frame_mats_world[ptr]
@@ -450,6 +409,7 @@ def create_armature_from_context(
         if parent_name and parent_name in name_to_edit_bone:
             edit_bone.parent = name_to_edit_bone[parent_name]
 
+    arm_obj['bleeds_mdl_frame_bone_names'] = {str(ptr): bone.name for ptr, bone in ptr_to_edit_bone.items()}
     bpy.ops.object.mode_set(mode="OBJECT")
 
     try:
@@ -679,11 +639,20 @@ def writeMdlPartMatrixProperties(mesh_obj: bpy.types.Object, part_index: int) ->
 def get_or_create_material_for_stories(
     mat_desc: Any,
     index: int,
+    source_path: str = "",
 ) -> bpy.types.Material:
     key = getattr(mat_desc, "texture", "") or f"StoriesMat_{index:03d}"
-    cached = _material_cache_get_valid(key)
-    if cached is not None:
-        return cached
+    identity = repr((
+        os.path.normcase(os.path.abspath(source_path)) if source_path else "",
+        int(index),
+        int(getattr(mat_desc, "offset", 0)),
+        key,
+        int(getattr(mat_desc, "rgba", 0)),
+        float(getattr(mat_desc, "specular", 0.0)),
+    ))
+    for material in bpy.data.materials:
+        if material.get("bleeds_material_identity", "") == identity:
+            return material
 
     mat = bpy.data.materials.new(name=key)
     mat.use_nodes = True
@@ -710,7 +679,9 @@ def get_or_create_material_for_stories(
 
     bsdf.inputs["Base Color"].default_value = (r, g, b, a)
 
-    MATERIAL_CACHE[key] = mat
+    mat["bleeds_material_identity"] = identity
+    mat["bleeds_material_texture_name"] = key
+    mat["bleeds_mdl_texture_name"] = str(getattr(mat_desc, 'texture', '') or '')
     return mat
 
 CUTSCENE_BODY_BONE_NAMES = {
@@ -793,8 +764,7 @@ def getImportedHierarchyBoneNames(arm_obj: bpy.types.Object) -> List[str]:
     return names
 
 def normalizeMdlSkinBoneName(name: str) -> str:
-    text = str(name or "").strip().lower()
-    return "".join(ch for ch in text if ch.isalnum())
+    return normalizePedSkinBoneName(name)
 
 def getCanonicalPedSkinPaletteBoneIds(import_type: int) -> List[int]:
     if import_type in (0, 1):
@@ -847,7 +817,7 @@ def getCanonicalPedSkinPaletteBoneNames(import_type: int, arm_obj: bpy.types.Obj
             continue
 
         direct_id = getArmatureBoneDirectAnimId(bone)
-        if direct_id >= 0 and direct_id not in by_direct_id:
+        if 0 <= direct_id < 0xFF and direct_id not in by_direct_id:
             by_direct_id[direct_id] = bone_name
 
         normalized_name = normalizeMdlSkinBoneName(bone_name)
@@ -862,17 +832,24 @@ def getCanonicalPedSkinPaletteBoneNames(import_type: int, arm_obj: bpy.types.Obj
             pass
 
     canonical_ids = getCanonicalPedSkinPaletteBoneIds(import_type)
+    canonical_keys = {normalizeMdlSkinBoneName(name) for name in canonical_names}
     resolved_names: List[str] = []
     for palette_index, canonical_name in enumerate(canonical_names):
         resolved_name = ""
 
-        if palette_index < len(canonical_ids):
-            direct_id = int(canonical_ids[palette_index])
-            resolved_name = by_direct_id.get(direct_id, "")
-
+        normalized_canonical = normalizeMdlSkinBoneName(canonical_name)
+        resolved_name = by_normalized_name.get(normalized_canonical, "")
         if not resolved_name:
-            normalized_canonical = normalizeMdlSkinBoneName(canonical_name)
-            resolved_name = by_normalized_name.get(normalized_canonical, "")
+            canonicalized = normalizeMdlSkinBoneName(stories_mdl.canon_frame_name(canonical_name))
+            resolved_name = by_normalized_name.get(canonicalized, "")
+
+        if not resolved_name and palette_index < len(canonical_ids):
+            direct_id = int(canonical_ids[palette_index])
+            if 0 <= direct_id < 0xFF:
+                candidate_name = by_direct_id.get(direct_id, "")
+                candidate_key = normalizeMdlSkinBoneName(candidate_name)
+                if candidate_key not in canonical_keys or candidate_key == normalized_canonical:
+                    resolved_name = candidate_name
 
         if not resolved_name:
             resolved_name = canonical_name
@@ -921,7 +898,7 @@ def accumulateMdlVertexSkinWeight(
     except Exception:
         return
 
-    if vi < 0 or wf <= 0.0:
+    if vi < 0 or not math.isfinite(wf) or wf <= 0.0:
         return
 
     if 0 <= bi < len(bone_names):
@@ -970,20 +947,16 @@ def writeMdlVertexSkinAssignments(obj: bpy.types.Object, assignments: Dict[int, 
                 wf = float(weight)
             except Exception:
                 continue
-            if wf <= 0.0:
+            if not math.isfinite(wf) or wf <= 0.0:
                 continue
             clean_pairs.append((str(name), wf))
 
         if not clean_pairs:
             continue
 
-        total = sum(weight for _name, weight in clean_pairs)
-        if total <= 0.000001:
-            continue
-
         for name, weight in clean_pairs:
             vg = getVertexGroup(name)
-            vg.add([vi], float(weight) / float(total), "REPLACE")
+            vg.add([vi], float(weight), "REPLACE")
 
 def assign_ps2_skin_merged(
     obj: bpy.types.Object,
@@ -1443,7 +1416,7 @@ def createVehicleAtomicMeshObject(
     materials = list(getattr(geo, "materials", []) or [])
     if materials:
         for material_index, mat_desc in enumerate(materials):
-            mat = get_or_create_material_for_stories(mat_desc, material_index)
+            mat = get_or_create_material_for_stories(mat_desc, material_index, stories_ctx.filepath)
             if mat is not None:
                 me.materials.append(mat)
 
@@ -1703,7 +1676,7 @@ def build_ps2_cutscene_actor_mesh(
 
     if getattr(geo, "materials", None):
         for material_index, mat_desc in enumerate(list(geo.materials)):
-            mat = get_or_create_material_for_stories(mat_desc, material_index)
+            mat = get_or_create_material_for_stories(mat_desc, material_index, stories_ctx.filepath)
             if mat is not None:
                 obj.data.materials.append(mat)
 
@@ -1961,24 +1934,26 @@ def decodePs2PedSkinWordToNodeWeight(raw_value: int) -> Tuple[int, float]:
     return int(node_index), float(weight)
 
 def normalizeMdlSkinNodeWeights(nodes: List[int], weights: List[float]) -> Tuple[List[int], List[float]]:
-    pairs: List[Tuple[int, float]] = []
-    for node, weight in zip(list(nodes)[:4], list(weights)[:4]):
+
+    out_nodes: List[int] = []
+    out_weights: List[float] = []
+    for slot in range(4):
         try:
-            node_i = int(node)
-            weight_f = float(weight)
+            node_i = int(nodes[slot]) if slot < len(nodes) else 0
         except Exception:
-            continue
-        if node_i < 0 or weight_f <= 1.0e-8:
-            continue
-        pairs.append((node_i, weight_f))
-    pairs.sort(key=lambda item: item[1], reverse=True)
-    pairs = pairs[:4]
-    total = sum(w for _, w in pairs)
-    if total > 1.0e-8:
-        pairs = [(n, w / total) for n, w in pairs]
-    while len(pairs) < 4:
-        pairs.append((0, 0.0))
-    return [int(n) for n, _w in pairs[:4]], [float(w) for _n, w in pairs[:4]]
+            node_i = 0
+        try:
+            weight_f = float(weights[slot]) if slot < len(weights) else 0.0
+        except Exception:
+            weight_f = 0.0
+        if node_i < 0:
+            node_i = 0
+        if not math.isfinite(weight_f) or weight_f < 0.0:
+            weight_f = 0.0
+        out_nodes.append(node_i)
+        out_weights.append(weight_f)
+
+    return out_nodes, out_weights
 
 def buildPedHierarchyNodeOrder(arm_info: Any, filepath: str = "", hierarchy_ptr: int = 0) -> List[Tuple[int, str]]:
     frame_names = dict(getattr(arm_info, "frame_names", {}) or {})
@@ -2698,6 +2673,95 @@ def buildStoriesGouraudPartData(
 
     return result
 
+
+def buildStoriesExactPedPartData(part: Any) -> StoriesGouraudPartData:
+    source_verts = list(getattr(part, "verts", []) or [])
+    source_faces = list(getattr(part, "faces", []) or [])
+    source_uvs = list(getattr(part, "uvs", []) or [])
+    source_colors = list(getattr(part, "vertex_colors", None) or getattr(part, "loop_colors", None) or [])
+    source_normals = list(getattr(part, "normals", []) or [])
+    source_vertex_count = len(source_verts)
+
+    skin_indices, skin_weights, skin_raw_dwords = collectPs2PartSkinData(
+        part,
+        source_vertex_count,
+    )
+
+    result = StoriesGouraudPartData(source_vertex_count=source_vertex_count)
+
+    for vertex_index, source_vertex in enumerate(source_verts):
+        result.verts.append((
+            float(source_vertex[0]),
+            float(source_vertex[1]),
+            float(source_vertex[2]),
+        ))
+
+        if vertex_index < len(source_uvs):
+            uv_value = source_uvs[vertex_index]
+            result.representative_uvs.append((float(uv_value[0]), float(uv_value[1])))
+        else:
+            result.representative_uvs.append((0.0, 0.0))
+
+        if vertex_index < len(source_colors):
+            color_value = source_colors[vertex_index]
+            result.representative_colors.append((
+                int(color_value[0]),
+                int(color_value[1]),
+                int(color_value[2]),
+                int(color_value[3]),
+            ))
+        else:
+            result.representative_colors.append((255, 255, 255, 255))
+
+        if vertex_index < len(source_normals):
+            result.normals.append(normalizedStoriesGouraudNormal(source_normals[vertex_index]))
+        else:
+            result.normals.append((0.0, 0.0, 1.0))
+
+        node_values = list(skin_indices[vertex_index])[:4] if vertex_index < len(skin_indices) else [0, 0, 0, 0]
+        weight_values = list(skin_weights[vertex_index])[:4] if vertex_index < len(skin_weights) else [0.0, 0.0, 0.0, 0.0]
+        raw_values = list(skin_raw_dwords[vertex_index])[:4] if vertex_index < len(skin_raw_dwords) else [0, 0, 0, 0]
+        while len(node_values) < 4:
+            node_values.append(0)
+        while len(weight_values) < 4:
+            weight_values.append(0.0)
+        while len(raw_values) < 4:
+            raw_values.append(0)
+        result.skin_indices.append([int(value) for value in node_values[:4]])
+        result.skin_weights.append([float(value) for value in weight_values[:4]])
+        result.skin_raw_dwords.append([int(value) & 0xFFFFFFFF for value in raw_values[:4]])
+
+    for source_face in source_faces:
+        try:
+            a = int(source_face[0])
+            b = int(source_face[1])
+            c = int(source_face[2])
+        except Exception:
+            continue
+
+        if a < 0 or b < 0 or c < 0:
+            continue
+        if a >= source_vertex_count or b >= source_vertex_count or c >= source_vertex_count:
+            continue
+        if a == b or b == c or c == a:
+            result.removed_degenerate_face_count += 1
+            continue
+
+        result.faces.append((a, b, c))
+
+        face_uvs = []
+        face_colors = []
+        face_normals = []
+        for vertex_index in (a, b, c):
+            face_uvs.append(result.representative_uvs[vertex_index])
+            face_colors.append(result.representative_colors[vertex_index])
+            face_normals.append(result.normals[vertex_index])
+        result.face_uvs.append(face_uvs)
+        result.face_colors.append(face_colors)
+        result.face_normals.append(face_normals)
+
+    return result
+
 def vectorDot3(
     left: Tuple[float, float, float],
     right: Tuple[float, float, float],
@@ -3055,11 +3119,29 @@ def assign_ps2_skin(
 
     writeMdlVertexSkinAssignments(obj, assignments)
 
+def getPspSkinPaletteBoneNames(stories_ctx: Any, arm_obj: bpy.types.Object) -> List[str]:
+    arm_info = stories_ctx.atomic.armature
+    entries = list(getattr(arm_info, 'hierarchy_entries', []) or [])
+    frame_bones = arm_obj.get('bleeds_mdl_frame_bone_names', {})
+    if entries:
+        palette = [''] * (max(int(entry['node_index']) for entry in entries) + 1)
+        for entry in entries:
+            frame_ptr = int(entry.get('frame_ptr', 0))
+            name = str(frame_bones.get(str(frame_ptr), entry.get('frame_name', '')))
+            if name in arm_obj.data.bones:
+                palette[int(entry['node_index'])] = name
+        return palette
+    ordered = buildPedHierarchyNodeOrder(arm_info, stories_ctx.filepath,
+                                        int(stories_ctx.atomic.hierarchy_ptr))
+    return [str(frame_bones.get(str(pointer), name)) for pointer, name in ordered]
+
+
 def assign_psp_skin(
     obj: bpy.types.Object,
     mesh_data: Any,
     import_type: int,
     arm_obj: bpy.types.Object,
+    palette_names: List[str] = None,
 ) -> None:
     if arm_obj is None:
         return
@@ -3071,17 +3153,8 @@ def assign_psp_skin(
 
     obj.vertex_groups.clear()
 
-    bone_names = get_bone_name_list(import_type)
-    vg_by_index: Dict[int, bpy.types.VertexGroup] = {}
-
-    def get_vg(bone_index: int) -> bpy.types.VertexGroup:
-        if bone_index not in vg_by_index:
-            if 0 <= bone_index < len(bone_names):
-                name = bone_names[bone_index]
-            else:
-                name = f"bone_{bone_index:02d}"
-            vg_by_index[bone_index] = obj.vertex_groups.new(name=name)
-        return vg_by_index[bone_index]
+    bone_names = palette_names if palette_names is not None else getCanonicalPedSkinPaletteBoneNames(import_type, arm_obj)
+    assignments: Dict[int, Dict[str, float]] = {}
 
     if not getattr(mesh_data, "bone_indices", None) or not getattr(mesh_data, "bone_weights", None):
         return
@@ -3092,10 +3165,13 @@ def assign_psp_skin(
         indices = mesh_data.bone_indices[vert_index]
         weights = mesh_data.bone_weights[vert_index]
         for bone_index, weight in zip(indices, weights):
-            if weight <= 0.0:
-                continue
-            vg = get_vg(bone_index)
-            vg.add([vert_index], weight, "REPLACE")
+            if palette_names is not None and weight > 0 and (bone_index >= len(bone_names) or bone_index < 0 or
+                               not bone_names[bone_index] or bone_names[bone_index] not in arm_obj.data.bones):
+                raise ValueError("PSP mesh %s vertex %d references unmapped skin node %d" %
+                                 (obj.name, vert_index, bone_index))
+            accumulateMdlVertexSkinWeight(assignments, vert_index, bone_index, weight, bone_names)
+
+    writeMdlVertexSkinAssignments(obj, assignments)
 
 def build_ps2_meshes(
     context: bpy.types.Context,
@@ -3114,14 +3190,8 @@ def build_ps2_meshes(
 
     base_name = os.path.splitext(os.path.basename(stories_ctx.filepath))[0]
     parts_to_import = list(getattr(geo, "parts", []) or [])
-    # PED parts are runtime/editor part identities, not merely material buckets.
-    # Preserve every actual MDL PED part as its own Blender object even when
-    # multiple parts share the same texture/material.  This is required for
-    # artist-separated meshes (for example a hand split from the torso) to
-    # survive export -> import round trips.
-    #
-    # Cutscene actors keep the historical material grouping path because their
-    # packet layout is consumed as a material-oriented presentation mesh.
+
+
     if mdl_type_u == "CUT":
         original_packet_count = len(parts_to_import)
         parts_to_import = buildCutsceneActorPartsByMaterial(parts_to_import)
@@ -3147,13 +3217,20 @@ def build_ps2_meshes(
         else:
             name = f"{base_name}_ps2_p{part_index:02d}"
 
-        gouraud_part = buildStoriesGouraudPartData(part)
+        if mdl_type_u == "PED":
+            gouraud_part = buildStoriesExactPedPartData(part)
+        else:
+            gouraud_part = buildStoriesGouraudPartData(part)
         verts = list(gouraud_part.verts)
         faces = list(gouraud_part.faces)
 
         try:
             stories_ctx.log(
-                "✔ Stories topology Gouraud material {}: {} source vertices -> {} shared vertices, {} faces; removed {} strip-degenerate and {} duplicate faces.".format(
+                (
+                    "✔ PED exact topology material {}: {} source vertices -> {} Blender vertices, {} faces; removed {} strip-degenerate and {} duplicate faces."
+                    if mdl_type_u == "PED"
+                    else "✔ Stories topology Gouraud material {}: {} source vertices -> {} shared vertices, {} faces; removed {} strip-degenerate and {} duplicate faces."
+                ).format(
                     int(getattr(part, "material_id", 0) or 0),
                     int(gouraud_part.source_vertex_count),
                     len(verts),
@@ -3222,16 +3299,22 @@ def build_ps2_meshes(
 
         obj = bpy.data.objects.new(name, me)
         collection.objects.link(obj)
-        writeStoriesGouraudSemanticAttributes(
-            me,
-            gouraud_part,
-            part_index,
-            int(getattr(part, "material_id", 0) or 0),
-        )
+        if mdl_type_u == "PED":
+            writePs2MdlSemanticAttributes(me, part, part_index)
+        else:
+            writeStoriesGouraudSemanticAttributes(
+                me,
+                gouraud_part,
+                part_index,
+                int(getattr(part, "material_id", 0) or 0),
+            )
         try:
             me["bleeds_mdl_vertex_stream_attribute_rebuilt"] = 1
-            me["bleeds_mdl_gouraud_welded"] = True
-            me["bleeds_mdl_gouraud_weld_mode"] = "POSITION_SKIN_NORMAL_CLUSTER_LOOP_UV_CUSTOM_LOOP_NORMALS"
+            me["bleeds_mdl_gouraud_welded"] = bool(mdl_type_u != "PED")
+            me["bleeds_mdl_gouraud_weld_mode"] = (
+                "EXACT_SOURCE_VERTEX_IDENTITY" if mdl_type_u == "PED"
+                else "POSITION_SKIN_NORMAL_CLUSTER_LOOP_UV_CUSTOM_LOOP_NORMALS"
+            )
             me["bleeds_mdl_custom_loop_normals"] = bool(custom_loop_normals_applied)
             me["bleeds_mdl_custom_loop_normal_count"] = int(len(me.loops) if custom_loop_normals_applied else 0)
             me["bleeds_mdl_gouraud_source_vertex_count"] = int(gouraud_part.source_vertex_count)
@@ -3249,7 +3332,7 @@ def build_ps2_meshes(
                 me["bleeds_mdl_material_name"] = texture_name
             except Exception:
                 pass
-            mat = get_or_create_material_for_stories(mat_desc, part.material_id)
+            mat = get_or_create_material_for_stories(mat_desc, part.material_id, stories_ctx.filepath)
             if mat is not None:
                 if len(obj.data.materials) == 0:
                     obj.data.materials.append(mat)
@@ -3290,8 +3373,11 @@ def build_ps2_meshes(
         created_objects.append(obj)
 
         try:
-            obj["bleeds_mdl_gouraud_welded"] = True
-            obj["bleeds_mdl_gouraud_weld_mode"] = "POSITION_SKIN_NORMAL_CLUSTER_LOOP_UV_CUSTOM_LOOP_NORMALS"
+            obj["bleeds_mdl_gouraud_welded"] = bool(mdl_type_u != "PED")
+            obj["bleeds_mdl_gouraud_weld_mode"] = (
+                "EXACT_SOURCE_VERTEX_IDENTITY" if mdl_type_u == "PED"
+                else "POSITION_SKIN_NORMAL_CLUSTER_LOOP_UV_CUSTOM_LOOP_NORMALS"
+            )
             obj["bleeds_mdl_custom_loop_normals"] = bool(custom_loop_normals_applied)
             obj["bleeds_mdl_custom_loop_normal_count"] = int(len(me.loops) if custom_loop_normals_applied else 0)
             obj["bleeds_mdl_gouraud_source_vertex_count"] = int(gouraud_part.source_vertex_count)
@@ -3376,11 +3462,12 @@ def build_ps2_meshes(
 
     return created_objects
 
-def build_psp_meshes(
+def buildPspAtomicMeshes(
     context: bpy.types.Context,
     stories_ctx: Any,
     collection: bpy.types.Collection,
     arm_obj: bpy.types.Object,
+    atomic_index: int = 0,
 ) -> List[bpy.types.Object]:
     atomic = stories_ctx.atomic
     geo = atomic.psp_geometry
@@ -3389,7 +3476,7 @@ def build_psp_meshes(
     base_name = os.path.splitext(os.path.basename(stories_ctx.filepath))[0]
 
     for mesh_index, mesh_data in enumerate(geo.meshes):
-        name = f"{base_name}_psp_m{mesh_index:02d}"
+        name = f"{base_name}_psp_a{atomic_index:02d}_m{mesh_index:02d}"
 
         verts: List[Tuple[float, float, float]] = list(mesh_data.verts)
         faces: List[Tuple[int, int, int]] = list(mesh_data.faces)
@@ -3480,7 +3567,7 @@ def build_psp_meshes(
 
         if geo.materials and 0 <= mesh_data.mat_id < len(geo.materials):
             mat_desc = geo.materials[mesh_data.mat_id]
-            mat = get_or_create_material_for_stories(mat_desc, mesh_data.mat_id)
+            mat = get_or_create_material_for_stories(mat_desc, mesh_data.mat_id, stories_ctx.filepath)
             if mat is not None:
                 material_rgba = int(getattr(mat_desc, "rgba", 0) or 0) & 0xFFFFFFFF
                 allow_texture_alpha = material_rgba in {0x00000000, 0xFFFFFFFF}
@@ -3528,13 +3615,55 @@ def build_psp_meshes(
                 except Exception:
                     pass
 
-        if arm_obj is not None:
+        obj['bleeds_mdl_atomic_offset'] = int(getattr(atomic, 'atomic_offset', 0))
+        obj['bleeds_mdl_atomic_frame_ptr'] = int(atomic.frame_ptr)
+        obj['bleeds_mdl_geom_ptr'] = int(atomic.geom_ptr)
+        obj['bleeds_mdl_render_cb'] = int(atomic.render_cb)
+        obj['bleeds_mdl_vis_id_flag'] = int(atomic.vis_id_flag)
+        obj['bleeds_psp_bone_palette'] = list(mesh_data.bonemap)
+
+        if arm_obj is not None and mesh_data.bone_weights:
             match_mesh_to_armature_space(obj, stories_ctx, arm_obj)
-            assign_psp_skin(obj, mesh_data, stories_ctx.import_type, arm_obj)
+            palette_names = getPspSkinPaletteBoneNames(stories_ctx, arm_obj)
+            assign_psp_skin(obj, mesh_data, stories_ctx.import_type, arm_obj, palette_names)
             obj["bleeds_mdl_skin_binding"] = "PED_SKIN_STREAM_ARMATURE"
 
         created_objects.append(obj)
 
+    return created_objects
+
+
+def build_psp_meshes(
+    context: bpy.types.Context,
+    stories_ctx: Any,
+    collection: bpy.types.Collection,
+    arm_obj: bpy.types.Object,
+) -> List[bpy.types.Object]:
+    atomics = list(getattr(stories_ctx, 'atomics', []) or [stories_ctx.atomic])
+    created_objects = []
+    frame_objects = {}
+    if arm_obj is None and getattr(stories_ctx, 'clump_ptr', 0):
+        frame_helpers, frame_objects = createVehicleFrameObjects(stories_ctx, collection)
+        created_objects.extend(frame_helpers)
+    original_atomic = stories_ctx.atomic
+    try:
+        for atomic_index, atomic in enumerate(atomics):
+            stories_ctx.atomic = atomic
+            meshes = buildPspAtomicMeshes(context, stories_ctx, collection, arm_obj, atomic_index)
+            for obj in meshes:
+                if obj.parent is not None:
+                    continue
+                frame_ptr = int(atomic.frame_ptr)
+                frame = frame_objects.get(frame_ptr)
+                if frame is not None:
+                    obj.matrix_world = frame.matrix_world.copy()
+                    parent_object_keep_world(obj, frame)
+                else:
+                    obj.matrix_world = getArmatureFrameMatrix(atomic.armature, 'frame_mats_world',
+                                                              frame_ptr, Matrix.Identity(4)).copy()
+            created_objects.extend(meshes)
+    finally:
+        stories_ctx.atomic = original_atomic
     return created_objects
 
 def build_stories_armature_from_frame_mats(
@@ -3823,10 +3952,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
 
     for material_id in material_ids:
         mat_name = f"texRES_{material_id}" if material_id >= 0 else "texRES_none"
-        mat = MATERIAL_CACHE.get(mat_name)
-        if mat is None:
-            mat = bpy.data.materials.new(mat_name)
-            MATERIAL_CACHE[mat_name] = mat
+        mat = bpy.data.materials.new(mat_name)
         obj.data.materials.append(mat)
     for polygon_index, material_slot in enumerate(face_material_ids):
         if polygon_index < len(obj.data.polygons):
@@ -3936,6 +4062,12 @@ def probeStoriesMdlHeader(filepath: str) -> Dict[str, Any]:
 
     if len(data) < 0x28 or data[:4] != b"ldm\x00":
         raise ValueError("Invalid Stories MDL header")
+
+    resource = stories_mdl.probeStoriesResourceHeader(data)
+    if resource:
+        resource['ok'] = True
+        resource['allocated_memory'] = readU32FromBytes(data, 0x1C)
+        return resource
 
     if looksLikePrototypePspStoriesMdl(data):
         top_ptr = readU32FromBytes(data, 0x20)
@@ -4054,6 +4186,8 @@ def rankStoriesParseResult(ctx: Any, platform: str, mdl_type: str, probe: Dict[s
         score += 250
     if str(platform).upper().strip() == str(probe.get("platform", "") or "").upper().strip():
         score += 250
+    if mdl_type_u == probe.get('mdl_type_hint'):
+        score += 5000
 
     try:
         atomic = getattr(ctx, "atomic", None)
@@ -4351,7 +4485,7 @@ def import_stories_mdl(
     root_obj["bleeds_mdl_serialized_layout"] = str(getattr(stories_ctx, "serialized_layout", "UNKNOWN") or "UNKNOWN")
     root_obj["bleeds_runtime_model_info_hint"] = str(getattr(stories_ctx, "runtime_model_info_hint", "UNKNOWN") or "UNKNOWN")
     root_obj["bleeds_model_usage_hint"] = str(getattr(stories_ctx, "model_usage_hint", "UNKNOWN") or "UNKNOWN")
-    root_obj["bleeds_model_format_note"] = "Serialized MDL layout, runtime model-info class, and cutscene usage are separate fields."
+    root_obj["bleeds_model_format_note"] = "Leeds model"
     root_obj["bleeds_mdl_filepath"] = str(filepath)
     root_obj["bleeds_export_use_normals"] = True
     root_obj["bleeds_export_gouraud_shading"] = True
@@ -4486,7 +4620,9 @@ def import_stories_mdl(
         pass
 
     arm_obj: bpy.types.Object = None
-    if create_armature and str(mdl_type or "").upper().strip() in {"PED", "CUT"}:
+    psp_has_skin = any(mesh.bone_weights for candidate in (getattr(stories_ctx, 'atomics', []) or [atomic])
+                       for mesh in candidate.psp_geometry.meshes) if platform == 'PSP' else True
+    if create_armature and psp_has_skin and str(mdl_type or "").upper().strip() in {"PED", "CUT"}:
         arm_obj = create_armature_from_context(
             context=context,
             stories_ctx=stories_ctx,
@@ -4521,7 +4657,7 @@ def import_stories_mdl(
                     parent_object_keep_world(obj, root_obj)
         else:
             for obj in created_objects:
-                if obj is not None and obj.type == "MESH":
+                if obj is not None and obj.parent is None:
                     parent_object_keep_world(obj, root_obj)
 
     if arm_obj is not None:

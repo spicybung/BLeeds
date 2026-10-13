@@ -21,6 +21,7 @@ from typing import List, Dict, Tuple, Optional, Any, Iterable
 
 import numpy as np
 import bpy
+from ..leedsLib.lvz_img import configureNativeWorldUvAnimation
 
 from ..leedsLib.tex import (
     PspTexHeader,
@@ -32,6 +33,7 @@ from ..leedsLib.tex import (
     parse_ps2_header,
     validate_ps2_stories_runtime_container,
     decode_psp_texture,
+    getPspRasterLayout,
     decode_ps2_texture,
     is_mh2_tex_data,
     parse_mh2_tex_entries,
@@ -49,7 +51,7 @@ def normalize_leeds_texture_name(name: str) -> str:
 
 
 def leeds_texture_name_candidates(name: str) -> List[str]:
-    """Return normalized texture-name candidates including known Stories aliases."""
+
     normalized = normalize_leeds_texture_name(name)
     if not normalized:
         return []
@@ -93,7 +95,7 @@ def score_texture_header_candidate(header: object, data_size: int) -> int:
         return -1000
 
     score = 0
-    if 4 <= width <= 4096 and 4 <= height <= 4096:
+    if 1 <= width <= 4096 and 1 <= height <= 4096:
         score += 8
     else:
         score -= 32
@@ -145,6 +147,8 @@ def choose_texture_container_platform(
             ps2_valid += 1
             ps2_score += score
 
+    if psp_valid == 0 and ps2_valid == 0:
+        raise ValueError("No readable PSP or PS2 texture headers")
     if psp_valid != ps2_valid:
         return "psp" if psp_valid > ps2_valid else "ps2"
     if psp_score != ps2_score:
@@ -152,7 +156,8 @@ def choose_texture_container_platform(
     return "ps2"
 
 
-def find_existing_texture_image(source_path: str, texture_name: str) -> Optional[bpy.types.Image]:
+def find_existing_texture_image(source_path: str, texture_name: str,
+                                 header_offset: Optional[int] = None) -> Optional[bpy.types.Image]:
     source_key = os.path.normcase(os.path.abspath(str(source_path or "")))
     texture_key = normalize_leeds_texture_name(texture_name)
     for image in bpy.data.images:
@@ -162,6 +167,8 @@ def find_existing_texture_image(source_path: str, texture_name: str) -> Optional
         except Exception:
             continue
         if existing_source == source_key and existing_name == texture_key:
+            if header_offset is not None and image.get('bleeds_texture_header_offset') != header_offset:
+                continue
             return image
     return None
 
@@ -497,7 +504,8 @@ def configure_material_alpha_mode(
         pass
 
 
-def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image) -> bool:
+def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image,
+                            game_hint: str = "", v_flipped: bool = False) -> bool:
     if material is None or image is None:
         return False
 
@@ -574,6 +582,28 @@ def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image
     except Exception:
         pass
 
+    format_flags = int(image.get("bleeds_texture_native_format_flags",
+                                 image.get("blds_lvz_texture_flags", 0)))
+
+
+    if format_flags & 0xF000 == 0 and format_flags & 0xFF in (0x25, 0x45):
+        format_flags |= 0xC000
+    native_game = game_hint or str(image.get("bleeds_uv_game_hint", ""))
+
+
+    for name in ("Leeds World UV", "Leeds UV Offset", "Leeds Animated UV"):
+        node = nodes.get(name)
+        if node is not None and material.get("bleeds_uv_source") == "VCS_PS2_WORLD":
+            if node.type == 'COMBXYZ':
+                for socket in node.inputs:
+                    socket.driver_remove("default_value")
+            nodes.remove(node)
+    for key in ("bleeds_uv_source", "bleeds_uv_mode_u", "bleeds_uv_mode_v",
+                "bleeds_uv_brightness_effect", "bleeds_uv_phase_step", "bleeds_uv_frame_start"):
+        if key in material:
+            del material[key]
+    configureNativeWorldUvAnimation(material, format_flags, native_game,
+                                    bpy.context.scene.frame_start, v_flipped=v_flipped)
     return True
 
 def texture_names_for_material(material: bpy.types.Material) -> List[str]:
@@ -583,6 +613,7 @@ def texture_names_for_material(material: bpy.types.Material) -> List[str]:
 
     for key in (
         "bleeds_mdl_texture_name",
+        "bleeds_material_texture_name",
         "bleeds_mdl_part_texture_name",
         "bleeds_mdl_material_name",
         "bleeds_texture_texture_name",
@@ -666,7 +697,11 @@ def apply_images_to_imported_mdl_materials(
                         missing_names.append(lookup_key)
                 continue
 
-            if apply_image_to_material(material, image):
+            game_hint = str(obj.get("bleeds_mdl_detected_game", obj.get("bleeds_model_game", "")))
+            if str(obj.get("bleeds_mdl_detected_platform", "")).upper() == 'PSP':
+                game_hint = 'unknown'
+            v_flipped = not bool(obj.get("bleeds_mdl_raw_embedded", False))
+            if apply_image_to_material(material, image, game_hint=game_hint, v_flipped=v_flipped):
                 matched_materials += 1
                 visited_materials.add(material_key)
                 try:
@@ -800,6 +835,8 @@ def decode_chk_to_blender_images(
         return decode_mh2_tex_to_blender_images(input_path, prefix=prefix)
     if len(data) < 0x30:
         raise ValueError("Leeds texture container header is truncated")
+    if data[:4] != b'xet\x00':
+        raise ValueError("Not a Leeds texture dictionary")
 
     container_format = describe_texture_container_format(input_path, data)
     hdr = {
@@ -815,8 +852,14 @@ def decode_chk_to_blender_images(
         'last_slot': read_u32(data, 0x2C),
     }
 
+    native_links = data[0x20] == 6
+    if native_links:
+        hdr['first_slot'], hdr['last_slot'] = hdr['last_slot'], hdr['first_slot']
+
     first_slot = int(hdr['first_slot'])
     last_slot = int(hdr['last_slot'])
+    if first_slot == last_slot == 0x28:
+        return []
     if first_slot <= 0:
         raise ValueError("Leeds texture container has no first texture slot")
 
@@ -825,7 +868,7 @@ def decode_chk_to_blender_images(
     container_bases: List[int] = []
     validation_messages: List[str] = []
     base = slot_base_from_slot_ptr(first_slot)
-    expected_previous_slot = 0
+    expected_previous_slot = 0x28 if native_links else 0
 
     while True:
         if base in visited:
@@ -840,8 +883,8 @@ def decode_chk_to_blender_images(
         container_bases.append(int(cinfo['base']))
         name = str(cinfo['name'] or '').strip()
         tex_off = int(cinfo['tex_off'])
-        next_slot = int(cinfo['next_slot'])
-        prev_slot = int(cinfo['prev_slot'])
+        next_slot = int(cinfo['prev_slot'] if native_links else cinfo['next_slot'])
+        prev_slot = int(cinfo['next_slot'] if native_links else cinfo['prev_slot'])
 
         if expected_previous_slot and prev_slot not in (0, expected_previous_slot):
             validation_messages.append(
@@ -860,7 +903,7 @@ def decode_chk_to_blender_images(
         else:
             validation_messages.append(f"slot 0x{base:X} has a non-ASCII texture name")
 
-        if next_slot == 0:
+        if next_slot in (0, 0x28):
             break
         next_base = slot_base_from_slot_ptr(next_slot)
         if next_base == base:
@@ -895,36 +938,29 @@ def decode_chk_to_blender_images(
     for name, tex_off, entry_base, _next_slot, psp_header, ps2_header in raw_entries:
         header_obj = psp_header if detected_platform == 'psp' else ps2_header
         if header_obj is None:
-            fallback = ps2_header if detected_platform == 'psp' else psp_header
-            if fallback is None:
-                validation_messages.append(
-                    f"texture {name!r} at 0x{tex_off:X} has no plausible {detected_platform.upper()} header"
-                )
-                continue
             validation_messages.append(
-                f"texture {name!r} does not match container platform {detected_platform.upper()}; using alternate header layout"
+                f"Texture {name!r} has no valid {detected_platform.upper()} header"
             )
-            header_obj = fallback
+            continue
         raster_offset = int(header_obj.raster_offset)
         if raster_offset <= 0 or raster_offset >= len(data):
             validation_messages.append(f"texture {name!r} has raster offset 0x{raster_offset:X} outside the file")
             continue
         textures.append((name, tex_off, entry_base, header_obj, raster_offset))
 
-    textures.sort(key=lambda item: int(item[4]))
-    raster_offsets = [int(item[4]) for item in textures]
+    raster_offsets = sorted({int(item[4]) for item in textures})
+    next_raster = {offset: raster_offsets[index + 1] for index, offset in enumerate(raster_offsets[:-1])}
     block_sizes: List[int] = []
-    for texture_index, start in enumerate(raster_offsets):
+    for texture in textures:
+        start = int(texture[4])
         structural_end = find_last_texture_raster_end(
             raster_offset=start,
             container_bases=container_bases,
-            global_offsets=(hdr['glob1'], hdr['glob2'], hdr['coll_size']),
+            global_offsets=(hdr['glob1'], hdr['glob2'], hdr['coll_size'],
+                            *(entry[1] for entry in raw_entries)),
             data_size=len(data),
         )
-        if texture_index + 1 < len(raster_offsets):
-            end = min(int(raster_offsets[texture_index + 1]), int(structural_end))
-        else:
-            end = int(structural_end)
+        end = min(next_raster.get(start, structural_end), structural_end)
         block_size = max(0, int(end) - int(start))
         if block_size <= 0:
             validation_messages.append(f"texture raster at 0x{start:X} has a zero-length structural range")
@@ -935,9 +971,16 @@ def decode_chk_to_blender_images(
 
     blender_images: List[bpy.types.Image] = []
     source_path = os.path.abspath(input_path)
+    texture_errors = []
     for ((name, tex_off, entry_base, header, raster_offset), block_size) in zip(textures, block_sizes):
         if isinstance(header, PspTexHeader):
-            rgba = decode_psp_texture(data, header, block_size, palette_override=None)
+            try:
+                rgba = decode_psp_texture(data, header, block_size, palette_override=None)
+            except ValueError as error:
+                message = "Texture %s: %s" % (name, error)
+                texture_errors.append(message)
+                print(message)
+                continue
             actual_platform = 'psp'
             swizzled = bool(header.swizzle_width)
             mip_count = int(header.mip_count)
@@ -956,16 +999,14 @@ def decode_chk_to_blender_images(
             continue
 
         h, w, _ = rgba.shape
-        # Leeds decode returns conventional top-to-bottom raster rows. Blender's
-        # generated Image.pixels buffer is addressed from the bottom row, unlike
-        # loading an ordinary PNG through Blender. Flip rows only at the Blender
-        # upload boundary so XTX/CHK sidecars line up with the same UVs as PNGs.
+
+
         blender_rgba = np.flipud(rgba)
         rgba_flat = np.ascontiguousarray(blender_rgba.reshape((-1, 4)), dtype=np.float32)
         rgba_flat *= (1.0 / 255.0)
 
         image_name = f"{prefix}{name}"
-        img = find_existing_texture_image(source_path, name)
+        img = find_existing_texture_image(source_path, name, header_offset=tex_off)
         if img is None:
             img = bpy.data.images.new(name=image_name, width=w, height=h, alpha=True)
         elif int(img.size[0]) != int(w) or int(img.size[1]) != int(h):
@@ -1004,7 +1045,15 @@ def decode_chk_to_blender_images(
             img["bleeds_texture_alpha_max"] = alpha_max
             img["bleeds_texture_has_meaningful_alpha"] = has_meaningful_alpha
             img["bleeds_texture_blender_row_flip"] = True
-            img["bleeds_texture_format_note"] = "Leeds texture container entry; separate from CModelInfo runtime classes"
+            img["bleeds_texture_format_note"] = "Leeds texture"
+            if isinstance(header, PspTexHeader):
+                layout = getPspRasterLayout(header)
+                img['bleeds_texture_palette_offset'] = int(layout['palette_offset'])
+                img['bleeds_texture_buffer_stride'] = int(header.swizzle_width)
+            if isinstance(header, Ps2TexHeader):
+
+
+                img["bleeds_texture_native_format_flags"] = int((header.reserved1 >> 16) & 0xFFFF)
         except Exception:
             pass
 
@@ -1017,6 +1066,8 @@ def decode_chk_to_blender_images(
         except Exception:
             pass
         blender_images.append(img)
+    if not blender_images and texture_errors:
+        raise ValueError(texture_errors[0])
     return blender_images
 
 def import_mh2_sidecar_texture_for_mdl(

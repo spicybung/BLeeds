@@ -183,7 +183,7 @@ class OBJECT_PT_BLeeds_2DFX(bpy.types.Panel):
 
 
 class DATA_PT_BLeeds_2DFX_Light(bpy.types.Panel):
-    """Show the exact GAME.DTZ entry beside Blender's native Point settings."""
+
     bl_idname = "DATA_PT_BLeeds_2DFX_Light"
     bl_label = "BLeeds - 2DFX"
     bl_space_type = "PROPERTIES"

@@ -180,9 +180,7 @@ def sourceQuaternionToBlender(rotation_xyzw):
     else:
         source_quaternion.normalize()
 
-    # Manhunt 2 IFP is authored by MaxScript as row-vector local transforms.
-    # Blender uses column vectors, so row -> column is the inverse quaternion.
-    # Use the exact +90 degree X coordinate basis used by the MH2 MDL importer.
+
     source_column = source_quaternion.inverted()
     axis = Quaternion((math.cos(math.pi / 4.0), math.sin(math.pi / 4.0), 0.0, 0.0))
     converted = axis @ source_column @ axis.inverted()
@@ -219,10 +217,8 @@ def matrixFromFlatProperty(value):
 
 
 def getMh2RestLocalMatrix(armature_object, pose_bone):
-    # matrix_basis is defined against Blender's actual rest hierarchy.  Use
-    # that exact basis first; the preserved source local matrix remains useful
-    # for diagnostics and as a fallback only.  This is the same destination-
-    # local rule that fixed MH2 in DemonFF v22.
+
+
     blender_rest = getBlenderRestLocalMatrix(armature_object, pose_bone)
     if blender_rest is not None:
         return blender_rest, "live Blender bone.matrix_local"
@@ -443,7 +439,7 @@ def buildIfpImportSummary(
     mapping_lines: Optional[List[str]] = None,
 ) -> str:
     lines = [
-        "BLeeds 1.2.0 Manhunt IFP Import",
+        "BLeeds: Manhunt IFP import",
         "Source: {}".format(source_path),
         "Game: {}".format(ifp_file.game),
         "Container: {}".format(ifp_file.container),

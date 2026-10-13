@@ -25,6 +25,7 @@ import struct
 from mathutils import Vector, Matrix
 
 from ..leedsLib import mdl as mdl_lib
+from ..data.bone_data import normalizePedSkinBoneName
 from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute
 
 def natural_sort_key(name: str) -> List[object]:
@@ -77,9 +78,7 @@ def create_mdl_root_for_export(context: bpy.types.Context) -> bpy.types.Object:
         except Exception:
             pass
 
-    # Preserve a custom model's existing hierarchy instead of forcing the user
-    # to transplant meshes into an imported retail ROOT. Include ancestors and
-    # sibling/child model pieces connected to the selected hierarchy.
+
     hierarchy_seeds = list(export_objects)
     for obj in hierarchy_seeds:
         parent = getattr(obj, "parent", None)
@@ -209,15 +208,7 @@ def gather_mesh_parts(context: bpy.types.Context, root: bpy.types.Object) -> Lis
 
 
 def normalizeSeparatedPedPartMetadata(meshes: List[bpy.types.Object]) -> int:
-    """Turn Blender-separated imported PED subsets into complete new MDL parts.
 
-    Blender Separate copies object ID properties and mesh attributes verbatim.
-    A separated subset therefore inherits the source part index, texture/material
-    identity, packet/strip metadata and source emit ordinals.  Merely assigning a
-    new part index leaves a hybrid part: new topology with stale imported packet
-    metadata.  Normalize every semantic field that is topology/part specific,
-    while preserving the actual mesh coordinates, UVs and skin weights.
-    """
     if not meshes:
         return 0
 
@@ -264,9 +255,7 @@ def normalizeSeparatedPedPartMetadata(meshes: List[bpy.types.Object]) -> int:
             except Exception:
                 pass
 
-        # Resolve the material identity from the *actual separated subset* now,
-        # before touching copied Leeds metadata.  This prevents an empty or stale
-        # inherited material name from poisoning the new part descriptor.
+
         slots = list(getattr(obj, "material_slots", []) or [])
         material_usage = {}
         try:
@@ -289,7 +278,7 @@ def normalizeSeparatedPedPartMetadata(meshes: List[bpy.types.Object]) -> int:
                 except Exception:
                     texture_name = ""
         if not texture_name:
-            # Preserve imported archive identity only as a fallback.
+
             for owner in (obj, mesh):
                 for key in ("bleeds_mdl_part_texture_name", "bleeds_mdl_material_name", "bleeds_texture_name"):
                     try:
@@ -304,7 +293,7 @@ def normalizeSeparatedPedPartMetadata(meshes: List[bpy.types.Object]) -> int:
         if not texture_name:
             texture_name = "default"
 
-        # Object-level part identity.
+
         try:
             obj["bleeds_mdl_part_index"] = new_index
             obj["bleeds_mdl_source_part_index"] = new_index
@@ -324,7 +313,7 @@ def normalizeSeparatedPedPartMetadata(meshes: List[bpy.types.Object]) -> int:
         except Exception:
             pass
 
-        # Mesh-level semantic identity and current topology sizes.
+
         try:
             mesh["bleeds_mdl_semantic_attributes_version"] = 3
             mesh["bleeds_mdl_semantic_attributes_origin"] = "EDITED_IMPORTED_PS2"
@@ -340,7 +329,7 @@ def normalizeSeparatedPedPartMetadata(meshes: List[bpy.types.Object]) -> int:
             mesh["bleeds_mdl_source_part_vertex_count"] = int(len(mesh.vertices))
             mesh["bleeds_mdl_source_part_face_count"] = int(len(mesh.polygons))
             mesh["bleeds_mdl_source_loop_count"] = int(len(mesh.loops))
-            # Strip/packet metadata from the pre-separation part is invalid.
+
             mesh["bleeds_mdl_source_strip_count"] = 0
             mesh["bleeds_mdl_source_strip_counts"] = []
             mesh["bleeds_mdl_source_strip_dma_counts"] = []
@@ -355,8 +344,7 @@ def normalizeSeparatedPedPartMetadata(meshes: List[bpy.types.Object]) -> int:
         except Exception:
             pass
 
-        # Rebuild the semantic topology attributes so there are no stale
-        # source-part/strip ordinals left over from the pre-separation mesh.
+
         try:
             face_part = ensureMdlIntAttribute(mesh, "bleeds_mdl_part_index", 'FACE')
             face_material = ensureMdlIntAttribute(mesh, "bleeds_mdl_material_index", 'FACE')
@@ -418,12 +406,7 @@ def resolve_texture_name(mat) -> str:
     if mat is None:
         return "default"
 
-    # Stories runtime material descriptors must contain the actual texture
-    # name stored in the companion XTX/CHK archive.  Blender material/image
-    # datablock names are presentation names and can differ (for example a
-    # material named ``shoes`` bound to the archive texture ``sneaker``).
-    # The texture importer preserves the archive identity in
-    # ``bleeds_texture_name``; always prefer that over the Blender name.
+
     if hasattr(mat, "use_nodes") and mat.use_nodes and mat.node_tree:
         for node in mat.node_tree.nodes:
             if node.type == "TEX_IMAGE" and getattr(node, "image", None):
@@ -438,8 +421,7 @@ def resolve_texture_name(mat) -> str:
                 if name:
                     return name.rsplit(".", 1)[0]
 
-    # Importers also stamp the original archive texture identity on the
-    # material.  Use it when the image node is unavailable.
+
     for key in ("bleeds_texture_texture_name", "bleeds_txd_texture_name", "bleeds_texture_name"):
         try:
             value = str(mat.get(key, "") or "").strip()
@@ -458,13 +440,7 @@ def collect_material_names_in_slot_order(mesh_obj):
     return names
 
 def resolve_mesh_export_texture_name(mesh_obj) -> str:
-    """Resolve the Leeds texture identity for one emitted mesh part.
 
-    The current Blender polygon material is authoritative when it exists.
-    Imported part metadata is retained only as a fallback because Separate, Join,
-    reassignment, or replacement geometry can leave the original part texture
-    property stale even though the live material slot is correct.
-    """
     if mesh_obj is None:
         return "default"
 
@@ -719,10 +695,7 @@ MDL_EXPLICIT_NON_NATIVE_ORIGINS = {
     "DRAGONFF",
 }
 
-# Geometry produced by Blender Edit-Mode Separate still contains the exact same
-# imported Leeds-space vertex coordinates.  It is a new *part identity*, not a
-# new coordinate system.  Keep this list central so export-position and skin
-# policy cannot disagree about separated imported PED subsets.
+
 MDL_NATIVE_IMPORTED_ORIGINS = {
     "IMPORTED_PS2",
     "EDITED_IMPORTED_PS2",
@@ -782,12 +755,7 @@ def mdlMatricesNear(a: Matrix, b: Matrix, epsilon: float = 1.0e-5) -> bool:
         return False
 
 def hasUnchangedImportedMdlObjectBasis(mesh_obj: Optional[bpy.types.Object]) -> bool:
-    """
-    Return True when this object still uses the same object/world basis that was
-    recorded by the Stories importer.  Blender Separate legitimately changes
-    topology/vertex count while preserving this basis, so topology equality is
-    not a requirement for native-coordinate export.
-    """
+
     if mesh_obj is None or getattr(mesh_obj, "type", None) != 'MESH':
         return False
     try:
@@ -835,24 +803,13 @@ def hasStrongImportedMdlTopologyProof(mesh_obj: Optional[bpy.types.Object]) -> b
     return False
 
 def isMdlNativeCoordinateSpaceMesh(mesh_obj: Optional[bpy.types.Object]) -> bool:
-    """Return True for geometry that is still stored in imported Leeds part space.
 
-    Important: Blender Edit-Mode Separate changes topology/object identity but not
-    the local coordinates of the copied vertices.  Therefore topology equality is
-    NOT a condition for preserving imported MDL coordinate space.  Imported
-    provenance is the authority; only an explicit non-native/custom origin opts a
-    mesh out of the identity/native path.
-    """
     if mesh_obj is None or getattr(mesh_obj, "type", None) != 'MESH':
         return False
 
     mesh = getattr(mesh_obj, "data", None)
 
-    # A part created by Blender Edit-Mode Separate is still imported Leeds
-    # geometry. Older 1.4.7 builds could accidentally stamp its mesh origin as
-    # DERIVED_EXPORT during preflight, so recover from that stale stamp using
-    # the dedicated separated-part provenance flag. This also makes already-
-    # saved .blend files self-healing on the next export.
+
     separated_imported_part = False
     for owner in (mesh_obj, mesh):
         if owner is None:
@@ -881,7 +838,7 @@ def isMdlNativeCoordinateSpaceMesh(mesh_obj: Optional[bpy.types.Object]) -> bool
             pass
         return True
 
-    # Explicit custom/authored origin always wins.
+
     for _owner, origin in getMdlSemanticOriginOwners(mesh_obj):
         if origin in MDL_EXPLICIT_NON_NATIVE_ORIGINS or (origin and origin not in MDL_NATIVE_IMPORTED_ORIGINS):
             try:
@@ -890,7 +847,7 @@ def isMdlNativeCoordinateSpaceMesh(mesh_obj: Optional[bpy.types.Object]) -> bool
                 pass
             return False
 
-    # Imported provenance survives Edit-Mode Separate and should remain native.
+
     for _owner, origin in getMdlSemanticOriginOwners(mesh_obj):
         if origin in MDL_NATIVE_IMPORTED_ORIGINS:
             try:
@@ -908,8 +865,8 @@ def isMdlNativeCoordinateSpaceMesh(mesh_obj: Optional[bpy.types.Object]) -> bool
                 return True
         except Exception:
             pass
-        # These properties are written only by the Stories importer and are
-        # copied by Blender Separate.  Their presence is sufficient provenance.
+
+
         for key in (
             "bleeds_mdl_part_matrix_export_basis",
             "bleeds_mdl_part_matrix_world",
@@ -1328,29 +1285,12 @@ def armatureRestPoseMatchesImportedMdl(arm_obj: Optional[bpy.types.Object], epsi
         except Exception:
             return False
 
-    # Do not claim an exact imported rest pose from one stray property. A normal
-    # Stories PED has enough standard bones that six comparisons is a useful
-    # minimum before preserving the original frame/bind palette byte-for-byte.
+
     return compared >= 6
 
 
 def resolveImportedMdlNativeBasisDelta(mesh_obj: Optional[bpy.types.Object]) -> Tuple[Matrix, str]:
-    """
-    Convert the object's current local coordinates back into the imported Leeds
-    part basis.
 
-    Blender Edit-Mode Separate normally preserves the source object's basis,
-    but depending on parenting/origin state the new object can acquire a
-    different matrix_world while retaining the original local vertex values.
-    Returning Identity in that case serializes those vertices in the wrong
-    space.  The correct native-space conversion is:
-
-        imported_basis^-1 @ current_world
-
-    For untouched imported parts these matrices are equal and the result is
-    Identity.  For a separated object whose basis changed, the delta restores
-    the exact coordinate system used by its source part.
-    """
     if mesh_obj is None:
         return Matrix.Identity(4), "NO_OBJECT"
 
@@ -1359,8 +1299,7 @@ def resolveImportedMdlNativeBasisDelta(mesh_obj: Optional[bpy.types.Object]) -> 
     except Exception:
         current_world = Matrix.Identity(4)
 
-    # Prefer the export basis captured by the importer. Blender Separate copies
-    # ID properties onto the new object/mesh, so this remains the source basis.
+
     for owner_name, owner in (
         ("object", mesh_obj),
         ("mesh_data", getattr(mesh_obj, "data", None)),
@@ -1396,13 +1335,8 @@ def resolveMdlPartExportMatrix(mesh_obj: bpy.types.Object, root_obj: Optional[bp
     imported_ped_root = isImportedPedRootForMdlExport(root_obj)
 
     if native_mdl_part_space:
-        # Native imported geometry must be serialized in the *stored imported
-        # part basis*, not blindly in the current object's local basis.
-        #
-        # For untouched parts this is Identity. For Blender-separated parts
-        # whose object basis/origin changed, bake only the basis delta so the
-        # vertices land in exactly the same Leeds coordinate space as their
-        # source torso part.
+
+
         export_matrix, basis_source = resolveImportedMdlNativeBasisDelta(mesh_obj)
         is_identity_delta = mdlMatricesNear(export_matrix, Matrix.Identity(4))
         space_name = (
@@ -1434,11 +1368,7 @@ def resolveMdlPartExportMatrix(mesh_obj: bpy.types.Object, root_obj: Optional[bp
         atomic_anchor_name = ""
         atomic_anchor_world = None
 
-        # A custom skinned replacement is authored in the deform armature's
-        # object space. Normalize there first. Reusing the imported Atomic frame
-        # as the primary anchor injects the retail helper/root transform into
-        # newly-authored geometry and is what causes otherwise-correct rigs to
-        # be exported offset/rotated.
+
         if arm_obj is not None:
             try:
                 has_direct_armature_binding = any(
@@ -1508,6 +1438,36 @@ def resolveMdlPartExportMatrix(mesh_obj: bpy.types.Object, root_obj: Optional[bp
                 mesh["bleeds_mdl_export_position_space"] = space_name
                 if atomic_anchor_world is not None:
                     mesh["bleeds_mdl_export_atomic_frame_anchor"] = str(atomic_anchor_name)
+        except Exception:
+            pass
+        return export_matrix
+
+    custom_simplemodel_cm_scale = False
+    try:
+        custom_simplemodel_cm_scale = bool(
+            readMdlAnyProperty(root_obj, "bleeds_mdl_export_force_simplemodel_cm_scale", False)
+        )
+    except Exception:
+        custom_simplemodel_cm_scale = False
+
+    if custom_simplemodel_cm_scale:
+
+
+        game_unit_scale = Matrix.Scale(0.01, 4)
+        export_matrix = game_unit_scale @ current_world
+        space_name = "AUTHORING_OBJECT_SPACE_BAKED_CM_TO_GAME"
+
+        try:
+            mesh_obj["bleeds_mdl_export_position_space"] = space_name
+            mesh_obj["bleeds_mdl_export_authoring_unit_scale"] = 0.01
+            mesh_obj["bleeds_mdl_export_matrix"] = [float(v) for row in export_matrix for v in row]
+        except Exception:
+            pass
+        try:
+            mesh = getattr(mesh_obj, "data", None)
+            if mesh is not None:
+                mesh["bleeds_mdl_export_position_space"] = space_name
+                mesh["bleeds_mdl_export_authoring_unit_scale"] = 0.01
         except Exception:
             pass
         return export_matrix
@@ -1754,9 +1714,7 @@ def shouldTransferMdlSkinFromNativeParts(mesh_obj: Optional[bpy.types.Object], r
         pass
     owners.append(mesh_obj)
 
-    # A rigged replacement is authored data. Never silently replace its weights
-    # with nearest-surface weights from the retail mesh. Native transfer is an
-    # explicit recovery/conversion mode only.
+
     for owner in owners:
         try:
             if bool(readIdProp(owner, "bleeds_mdl_trust_custom_skin_weights", False)):
@@ -2009,10 +1967,8 @@ def writeMdlSemanticDefaultsForExport(mesh_obj: bpy.types.Object, export_part_in
             setMdlIntAttributeValue(point_strip_vertex, vertex_index, vertex_index)
 
         try:
-            # Rebuilding strip/face metadata does not turn an imported,
-            # separated PED subset into custom coordinate-space geometry.
-            # Keep its imported/native provenance so later position export does
-            # not take the custom armature-local bake path.
+
+
             if separated_new_part:
                 mesh["bleeds_mdl_semantic_attributes_origin"] = "EDITED_IMPORTED_PS2"
                 mesh_obj["bleeds_mdl_semantic_attributes_origin"] = "EDITED_IMPORTED_PS2"
@@ -2174,9 +2130,8 @@ def getMdlSourceStripCounts(mesh_obj: bpy.types.Object) -> List[int]:
         return []
 
 def buildPedWriterMaterialNames(root_cache: Dict[str, Any], part_names: List[str], part_headers: List[Dict[str, object]]) -> List[str]:
-    # tex_id is an index into the PED material descriptor table, not an index
-    # into the emitted geometry-part list. One material can span multiple DMA
-    # parts, so part_names must never shift the descriptor names.
+
+
     max_tex_id = -1
     for header in list(part_headers or []):
         if isinstance(header, dict):
@@ -2189,9 +2144,7 @@ def buildPedWriterMaterialNames(root_cache: Dict[str, Any], part_names: List[str
 
     names = [""] * (max_tex_id + 1)
 
-    # Imported PED material_names already use the same index space as tex_id.
-    # Preserve that mapping first. This is what keeps 0=torso, 1=jeans,
-    # 2=head, 3=shoes even when torso is split across more than one DMA part.
+
     root_names = []
     try:
         root_names = [str(n or "").strip() for n in list((root_cache or {}).get("material_names") or [])]
@@ -2202,8 +2155,7 @@ def buildPedWriterMaterialNames(root_cache: Dict[str, Any], part_names: List[str
         if tex_id < len(root_names) and root_names[tex_id]:
             names[tex_id] = root_names[tex_id]
 
-    # Only synthesize a name from the emitted part when this is a genuinely
-    # new texture id that did not exist in the imported descriptor table.
+
     for part_index, header in enumerate(list(part_headers or [])):
         if not isinstance(header, dict):
             continue
@@ -2492,10 +2444,8 @@ def buildMdlCanonicalPedAnimIdByName(import_type: Optional[int] = None) -> Dict[
             ("r_thigh", 51), ("r_calf", 52), ("r_foot", 53), ("r_toe0", 0xFF),
         ]
     else:
-        # VCS PS2 retail PLR/PED HAnim IDs. These are semantic runtime IDs,
-        # not compact hierarchy node indices. Preserve the real Stories mapping
-        # instead of the older SA-style/custom mapping that made a replacement
-        # PED enter the animation path with the wrong bone identities.
+
+
         raw_pairs = [
             ("root", 0x00), ("pelvis", 0x01), ("spine", 0x02), ("spine1", 0x03),
             ("neck", 0x04), ("head", 0x05), ("jaw", 0x06),
@@ -2595,7 +2545,7 @@ def prepareMdlPedArmatureForExport(arm_obj: Optional[bpy.types.Object], import_t
         bone = matches[0]
         marker = id(bone)
         if marker in used_bones:
-            ambiguous.append(f"{expected_name} -> {getattr(bone, 'name', '<unnamed>')} is already used by another canonical node")
+            ambiguous.append(f"{expected_name} -> {getattr(bone, 'name', '<unnamed>')} is already assigned to another skin node")
             canonical_bones.append(None)
             continue
         used_bones.add(marker)
@@ -2604,11 +2554,11 @@ def prepareMdlPedArmatureForExport(arm_obj: Optional[bpy.types.Object], import_t
     if missing or ambiguous:
         problems: List[str] = []
         if missing:
-            problems.append("missing canonical PED bones: " + ", ".join(missing))
+            problems.append("missing PED bones: " + ", ".join(missing))
         if ambiguous:
-            problems.append("ambiguous canonical PED bones: " + "; ".join(ambiguous))
+            problems.append("duplicate PED bone assignments: " + "; ".join(ambiguous))
         raise RuntimeError(
-            "PED armature properization failed; refusing to export a hierarchy whose compact skin-node order can shift:\n  - "
+            "Cannot export this PED armature:\n  - "
             + "\n  - ".join(problems)
         )
 
@@ -2617,8 +2567,7 @@ def prepareMdlPedArmatureForExport(arm_obj: Optional[bpy.types.Object], import_t
         if bone is None:
             continue
 
-        # Compact hierarchy node indices are what the 0x6C PED skin stream
-        # references. They are deliberately separate from semantic HAnim IDs.
+
         for key in (
             "bleeds_mdl_hierarchy_node_index",
             "hierarchy_node_index",
@@ -2676,9 +2625,7 @@ def prepareMdlPedArmatureForExport(arm_obj: Optional[bpy.types.Object], import_t
                     anim_id = None
                 break
 
-        # 0xFF is a runtime hierarchy sentinel for terminal helpers, not a
-        # useful semantic animation identity. Preserve any imported raw
-        # hierarchy ID properties; only repair the semantic-ID namespace.
+
         if anim_id is not None and anim_id != 0xFF:
             for key in (
                 "BoneID",
@@ -2963,17 +2910,15 @@ def buildMdlHierarchyNameToNodeIndex(mesh_obj: bpy.types.Object, root_obj: Optio
     if not chosen_map:
         return canonical_map
 
-    # Standard PED names have a fixed compact node ordering. An imported map can
-    # add aliases/extras, but it must not remap spine/arms/legs to semantic
-    # BoneIDs or to stale Blender bone-list positions.
+
     stable_map = dict(chosen_map)
     for name, node_index in canonical_map.items():
         stable_map[name] = int(node_index)
     return stable_map
 
 def buildMdlCanonicalNameToBoneIndex(import_type: Optional[int]) -> Dict[str, int]:
-    # Historical name retained for callers. The skin stream stores compact
-    # hierarchy node indices, not HAnim/ANIM semantic bone IDs such as 21/31/41.
+
+
     prefer_vcs = import_type not in (0, 1)
     return buildMdlCanonicalCompactNameToNodeIndex(import_type, prefer_vcs=prefer_vcs)
 
@@ -2989,6 +2934,14 @@ def resolveMdlVertexGroupBoneIndex(
         return None
 
     names_to_try = expandMdlVertexGroupNameVariants(name)
+
+    normalized_canonical = buildNormalizedMdlNameLookup(canonical_name_to_bone)
+    for candidate in names_to_try:
+        if candidate in canonical_name_to_bone:
+            return int(canonical_name_to_bone[candidate])
+        key = normalizeMdlVertexGroupLookupKey(candidate)
+        if key in normalized_canonical:
+            return int(normalized_canonical[key])
 
     armature_node_index = readMdlArmatureBoneHierarchyNodeIndex(arm_obj, name)
     if armature_node_index is not None:
@@ -3021,17 +2974,6 @@ def resolveMdlVertexGroupBoneIndex(
                         return int(arm_bone[key])
                 except Exception:
                     pass
-
-    # canonical_name_to_bone is deliberately a compact node map. Never fall
-    # back to BoneID/bleeds_hanim_bone_id here: those are semantic animation
-    # IDs and are a different namespace from PED skin palette node indices.
-    normalized_canonical = buildNormalizedMdlNameLookup(canonical_name_to_bone)
-    for candidate in names_to_try:
-        if candidate in canonical_name_to_bone:
-            return int(canonical_name_to_bone[candidate])
-        key = normalizeMdlVertexGroupLookupKey(candidate)
-        if key in normalized_canonical:
-            return int(normalized_canonical[key])
 
     return None
 
@@ -3248,30 +3190,7 @@ def readImportedSkinRawDwordsFromPointAttributes(mesh: bpy.types.Mesh) -> List[T
     return out
 
 def chooseImportedSkinRawDwords(mesh_obj: bpy.types.Object, mesh: bpy.types.Mesh) -> List[Tuple[int, int, int, int]]:
-    allow_roundtrip = False
-    try:
-        if bool(readIdProp(mesh_obj, "bleeds_mdl_allow_imported_skin_raw_roundtrip", False)):
-            allow_roundtrip = True
-    except Exception:
-        pass
-    try:
-        if mesh is not None and bool(readIdProp(mesh, "bleeds_mdl_allow_imported_skin_raw_roundtrip", False)):
-            allow_roundtrip = True
-    except Exception:
-        pass
 
-    if not allow_roundtrip:
-        try:
-            if mesh_obj is not None:
-                mesh_obj["bleeds_mdl_export_skin_source"] = "LIVE_VERTEX_GROUPS_NO_RAW_ROUNDTRIP"
-        except Exception:
-            pass
-        try:
-            if mesh is not None:
-                mesh["bleeds_mdl_export_skin_source"] = "LIVE_VERTEX_GROUPS_NO_RAW_ROUNDTRIP"
-        except Exception:
-            pass
-        return []
 
     try:
         source_mesh = getattr(mesh_obj, "data", None)
@@ -3292,7 +3211,7 @@ def chooseImportedSkinRawDwords(mesh_obj: bpy.types.Object, mesh: bpy.types.Mesh
             from_attributes = []
     if from_attributes:
         try:
-            mesh_obj["bleeds_mdl_export_skin_source"] = "EXPLICIT_RAW_ROUNDTRIP_POINT_ATTRIBUTES"
+            mesh_obj["bleeds_mdl_export_skin_source"] = "AUTO_RAW_ROUNDTRIP_POINT_ATTRIBUTES"
         except Exception:
             pass
         return from_attributes
@@ -3302,7 +3221,7 @@ def chooseImportedSkinRawDwords(mesh_obj: bpy.types.Object, mesh: bpy.types.Mesh
         flat_raw = readImportedSkinRawDwords(mesh)
     if flat_raw:
         try:
-            mesh_obj["bleeds_mdl_export_skin_source"] = "EXPLICIT_RAW_ROUNDTRIP_FLAT_PROPERTY"
+            mesh_obj["bleeds_mdl_export_skin_source"] = "AUTO_RAW_ROUNDTRIP_FLAT_PROPERTY"
         except Exception:
             pass
         return flat_raw
@@ -3402,9 +3321,9 @@ def readMdlSkinPairsFromAttributes(mesh: bpy.types.Mesh, vertex_index: int) -> L
             weight = float(weight_attrs[slot].data[vi].value)
         except Exception:
             continue
-        if weight > 1.0e-8:
+        if node_index >= 0 and math.isfinite(weight) and weight > 0.0:
             pairs.append((node_index, weight))
-    return normalizeMdlSkinPairs(pairs) if pairs else []
+    return pairs
 
 def readMdlSkinPairsFromVertexGroups(
     mesh_obj: bpy.types.Object,
@@ -3421,7 +3340,7 @@ def readMdlSkinPairsFromVertexGroups(
     except Exception:
         return []
 
-    pairs: List[Tuple[int, float]] = []
+    merged: Dict[int, float] = {}
     try:
         vertex = mesh.vertices[vi]
         for group_ref in vertex.groups:
@@ -3429,14 +3348,16 @@ def readMdlSkinPairsFromVertexGroups(
             if node_index is None:
                 continue
             weight = float(group_ref.weight)
-            if weight <= 1.0e-8:
+            if not math.isfinite(weight) or weight <= 0.0:
                 continue
-            pairs.append((int(node_index), weight))
+            node_i = int(node_index)
+            merged[node_i] = merged.get(node_i, 0.0) + weight
     except Exception:
         return []
-    return normalizeMdlSkinPairs(pairs) if pairs else []
 
-def writeMdlSkinPairsToAttributes(mesh: bpy.types.Mesh, vertex_index: int, pairs: List[Tuple[int, float]], source: str, confidence: float = 1.0) -> None:
+    return [(node_i, weight) for node_i, weight in merged.items() if weight > 0.0]
+
+def writeMdlSkinPairsToAttributes(mesh: bpy.types.Mesh, vertex_index: int, pairs: List[Tuple[int, float]], source: str, confidence: float = 1.0, preserve_weights: bool = False) -> None:
     if mesh is None:
         return
     try:
@@ -3446,7 +3367,21 @@ def writeMdlSkinPairsToAttributes(mesh: bpy.types.Mesh, vertex_index: int, pairs
     except Exception:
         return
 
-    pairs = normalizeMdlSkinPairs(pairs)
+    if preserve_weights:
+        clean_pairs: List[Tuple[int, float]] = []
+        for node_index, weight in list(pairs or []):
+            try:
+                node_i = int(node_index)
+                weight_f = float(weight)
+            except Exception:
+                continue
+            if node_i < 0 or not math.isfinite(weight_f) or weight_f <= 1.0e-8:
+                continue
+            clean_pairs.append((node_i, weight_f))
+        clean_pairs.sort(key=lambda item: item[1], reverse=True)
+        pairs = clean_pairs[:4]
+    else:
+        pairs = normalizeMdlSkinPairs(pairs)
     node_attrs = [getMdlPointIntAttribute(mesh, name) for name in SKIN_NODE_ATTRIBUTE_NAMES]
     weight_attrs = [getMdlPointFloatAttribute(mesh, name) for name in SKIN_WEIGHT_ATTRIBUTE_NAMES]
     for slot in range(4):
@@ -3538,20 +3473,7 @@ def filterMdlSkinPairsForAllowedNodes(pairs: List[Tuple[int, float]], allowed_no
     return normalizeMdlSkinPairs(filtered)
 
 def normalizeMdlVertexGroupLookupKey(name: str) -> str:
-    text = str(name or "").strip().lower()
-    if not text:
-        return ""
-    try:
-        text = str(mdl_lib.canon_frame_name(text)).strip().lower()
-    except Exception:
-        pass
-    text = text.replace("bip01 ", "bip01_")
-    text = text.replace("bip01-", "bip01_")
-    text = text.replace("bip01.", "bip01_")
-    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
-    text = text.replace("left_", "l_").replace("right_", "r_")
-    text = text.replace("_left_", "_l_").replace("_right_", "_r_")
-    return text
+    return normalizePedSkinBoneName(name)
 
 def expandMdlVertexGroupNameVariants(name: str) -> List[str]:
     base = str(name or "").strip()
@@ -3609,11 +3531,13 @@ def expandMdlVertexGroupNameVariants(name: str) -> List[str]:
         "bip01_l_foot": "l_foot",
         "bip01_l_toe0": "l_toe0",
         "bip01_l_toe": "l_toe0",
+        "l_toe": "l_toe0",
         "bip01_r_thigh": "r_thigh",
         "bip01_r_calf": "r_calf",
         "bip01_r_foot": "r_foot",
         "bip01_r_toe0": "r_toe0",
         "bip01_r_toe": "r_toe0",
+        "r_toe": "r_toe0",
     }
     alias = dff_aliases.get(key)
     if alias:
@@ -3879,6 +3803,113 @@ def nearestMdlSkinPairsFromOtherParts(root_obj: Optional[bpy.types.Object], mesh
             continue
     return normalizeMdlSkinPairs(best_pairs) if best_pairs else []
 
+def decodeMdlRawSkinPairs(raw_words: List[int], valid_nodes: set) -> List[Tuple[int, float]]:
+    merged: Dict[int, float] = {}
+    for value in raw_words:
+        word = int(value) & 0xFFFFFFFF
+        node = (word & 0xFF) // 4
+        weight = struct.unpack('<f', struct.pack('<I', word & 0xFFFFFF00))[0]
+        if node not in valid_nodes or not math.isfinite(weight) or weight < 0.0:
+            return []
+        if weight > 0.0:
+            merged[node] = merged.get(node, 0.0) + weight
+    return list(merged.items())
+
+
+def buildMdlSkinPairsForMeshExport(
+    mesh_obj: bpy.types.Object,
+    mesh: bpy.types.Mesh,
+    vgroup_to_bone: Dict[int, int],
+    root_obj: Optional[bpy.types.Object] = None,
+) -> Tuple[List[List[Tuple[int, float]]], List[str]]:
+    import heapq
+
+    valid_nodes = set(buildMdlNodeIndexToHierarchyName(mesh_obj, root_obj).keys())
+    count = len(mesh.vertices)
+    result: List[List[Tuple[int, float]]] = [[] for vertex in mesh.vertices]
+    sources = ['missing' for vertex in mesh.vertices]
+    raw_names = [f'bleeds_mdl_point_skin_raw{slot}' for slot in range(4)]
+    raw_attributes = [get_mesh_attribute(mesh, name) for name in raw_names]
+    have_raw = all(
+        attribute is not None and getattr(attribute, 'domain', 'POINT') == 'POINT'
+        and len(attribute.data) == count for attribute in raw_attributes
+    )
+
+    for vertex in mesh.vertices:
+        index = int(vertex.index)
+        pairs = readMdlSkinPairsFromVertexGroups(mesh_obj, mesh, index, vgroup_to_bone)
+        if pairs:
+            prepareMdlSkinPairsForOutput(pairs, mesh_obj, index)
+            result[index] = pairs
+            sources[index] = 'vertex_groups_authority'
+            continue
+        if have_raw:
+            words = [int(attribute.data[index].value) for attribute in raw_attributes]
+            pairs = decodeMdlRawSkinPairs(words, valid_nodes)
+        if not pairs:
+            candidate = readMdlSkinPairsFromAttributes(mesh, index)
+            if candidate and all(node in valid_nodes for node, weight in candidate):
+                pairs = candidate
+        if pairs:
+            result[index] = pairs
+            sources[index] = 'preserved_vertex_metadata'
+
+    positions: Dict[Tuple[float, float, float], List[int]] = {}
+    for vertex in mesh.vertices:
+        index = int(vertex.index)
+        if result[index]:
+            key = tuple(float(vertex.co[axis]) for axis in range(3))
+            positions.setdefault(key, []).append(index)
+    for vertex in mesh.vertices:
+        index = int(vertex.index)
+        if result[index]:
+            continue
+        key = tuple(float(vertex.co[axis]) for axis in range(3))
+        matches = positions.get(key, [])
+        if not matches:
+            continue
+        reference = dict(result[matches[0]])
+        agree = all(
+            set(dict(result[other])) == set(reference)
+            and all(abs(dict(result[other])[node] - weight) <= 1.0e-6 for node, weight in reference.items())
+            for other in matches
+        )
+        if agree:
+            result[index] = list(result[matches[0]])
+            sources[index] = 'coincident_vertex_recovery'
+
+    adjacency: List[List[Tuple[int, float]]] = [[] for vertex in mesh.vertices]
+    for edge in getattr(mesh, 'edges', []):
+        first, second = (int(value) for value in edge.vertices)
+        distance = math.sqrt(sum(
+            (float(mesh.vertices[first].co[axis]) - float(mesh.vertices[second].co[axis])) ** 2
+            for axis in range(3)
+        ))
+        adjacency[first].append((second, distance))
+        adjacency[second].append((first, distance))
+
+    best = [(math.inf, count) for vertex in mesh.vertices]
+    pending = []
+    for index, pairs in enumerate(result):
+        if pairs:
+            best[index] = (0.0, index)
+            heapq.heappush(pending, (0.0, index, index))
+    while pending:
+        distance, donor, index = heapq.heappop(pending)
+        if best[index] != (distance, donor):
+            continue
+        for neighbor, edge_distance in adjacency[index]:
+            candidate = (distance + edge_distance, donor)
+            if candidate < best[neighbor]:
+                best[neighbor] = candidate
+                heapq.heappush(pending, (candidate[0], donor, neighbor))
+    for index, pairs in enumerate(result):
+        if not pairs and best[index][1] < count:
+            result[index] = list(result[best[index][1]])
+            sources[index] = 'connected_vertex_recovery'
+    return result, sources
+
+
 def ensureMdlLiveSkinAttributesForMesh(
     mesh_obj: bpy.types.Object,
     mesh: bpy.types.Mesh,
@@ -3909,6 +3940,15 @@ def ensureMdlLiveSkinAttributesForMesh(
     custom_mesh = isCustomPedMeshUnderImportedRootForMdlExport(mesh_obj, root_obj)
     vertex_groups_authoritative = custom_mesh or shouldUseMdlVertexGroupsAsSkinAuthority(mesh_obj, vgroup_to_bone)
 
+    prepared_pairs, prepared_sources = buildMdlSkinPairsForMeshExport(
+        mesh_obj, mesh, vgroup_to_bone, root_obj
+    ) if vertex_groups_authoritative else ([], [])
+    used_vertices = {int(index) for polygon in getattr(mesh, 'polygons', []) for index in polygon.vertices}
+    limited_influence_vertices = sum(len(pairs) > 4 for pairs in prepared_pairs)
+    recovered_metadata = 0
+    recovered_connected = 0
+    recovered_coincident = 0
+
     filled_from_groups = 0
     filled_from_nearest = 0
     filled_from_default = 0
@@ -3924,30 +3964,38 @@ def ensureMdlLiveSkinAttributesForMesh(
                 filled_from_nearest += 1
                 continue
 
-        # For custom/re-rigged meshes, Blender vertex groups are the artist's
-        # authoritative rig. Material-name/part-number heuristics must never
-        # reject these weights.
-        if vertex_groups_authoritative:
-            pairs = readMdlSkinPairsFromVertexGroups(mesh_obj, mesh, vi, vgroup_to_bone)
-            if pairs:
-                writeMdlSkinPairsToAttributes(mesh, vi, normalizeMdlSkinPairs(pairs), "vertex_groups_authority", 1.0)
-                filled_from_groups += 1
-                continue
 
-        # Preserve raw imported weights only when the user has no active mapped
-        # vertex groups (or explicitly requests raw-stream preservation).
+        if vertex_groups_authoritative:
+            pairs = prepared_pairs[vi]
+            if pairs:
+                source = prepared_sources[vi]
+                writeMdlSkinPairsToAttributes(mesh, vi, pairs, source, 1.0, preserve_weights=True)
+                if source == 'vertex_groups_authority':
+                    filled_from_groups += 1
+                else:
+                    preserved_attributes += 1
+                    recovered_metadata += int(source == 'preserved_vertex_metadata')
+                    recovered_connected += int(source == 'connected_vertex_recovery')
+                    recovered_coincident += int(source == 'coincident_vertex_recovery')
+                continue
+            if vi not in used_vertices:
+                continue
+            raise RuntimeError(
+                f"{mesh_obj.name}: connected mesh island containing vertex {vi} has no skin data "
+                "or weighted donor. Bind that island to the armature before export."
+            )
+
+
         existing = readMdlSkinPairsFromAttributes(mesh, vi) if not vertex_groups_authoritative else []
         if existing:
-            writeMdlSkinPairsToAttributes(mesh, vi, normalizeMdlSkinPairs(existing), "preserved_skin_attributes", 1.0)
+            writeMdlSkinPairsToAttributes(mesh, vi, existing, "preserved_skin_attributes", 1.0, preserve_weights=True)
             preserved_attributes += 1
             continue
 
-        # Imported meshes with missing attributes or custom vertices without a
-        # weight on this specific vertex may still use named groups before any
-        # geometric inference.
+
         pairs = readMdlSkinPairsFromVertexGroups(mesh_obj, mesh, vi, vgroup_to_bone)
         if pairs:
-            writeMdlSkinPairsToAttributes(mesh, vi, normalizeMdlSkinPairs(pairs), "vertex_groups", 1.0)
+            writeMdlSkinPairsToAttributes(mesh, vi, pairs, "vertex_groups", 1.0, preserve_weights=True)
             filled_from_groups += 1
             continue
 
@@ -3968,15 +4016,30 @@ def ensureMdlLiveSkinAttributesForMesh(
         writeMdlSkinPairsToAttributes(mesh, vi, normalizeMdlSkinPairs(pairs), "default_fallback", 0.20)
         filled_from_default += 1
 
+    if limited_influence_vertices:
+        print(
+            f"[BLeeds] {mesh_obj.name}: {limited_influence_vertices} vertices have more than "
+            "four skin influences; strongest four normalized for PS2 output only. "
+            "Blender groups and weights are unchanged."
+        )
+
+    if recovered_metadata or recovered_connected or recovered_coincident:
+        print(
+            f"[BLeeds] {mesh_obj.name}: recovered missing export skin weights "
+            f"(vertex metadata={recovered_metadata}, coincident vertices={recovered_coincident}, "
+            f"connected vertices={recovered_connected}); authored vertex groups preserved."
+        )
+
     source_policy = (
         "EXPLICIT_NATIVE_TRANSFER"
         if transfer_from_native
-        else "VERTEX_GROUPS_AUTHORITY_THEN_SAFE_FALLBACK"
+        else "VERTEX_GROUPS_THEN_VERTEX_METADATA_THEN_CONNECTED_PART"
         if vertex_groups_authoritative
         else "SOURCE_ATTRIBUTES_AUTHORITY_THEN_GROUPS_THEN_SAFE_FALLBACK"
     )
     try:
         for owner in (mesh, mesh_obj):
+            owner["bleeds_mdl_export_limited_influence_vertex_count"] = limited_influence_vertices
             owner["bleeds_mdl_skin_attribute_schema"] = "RSLTANIM_NODE_FLOAT_POINT_V3_COMPACT_NODE_AUTHORITY"
             owner["bleeds_mdl_export_skin_source_policy"] = source_policy
             owner["bleeds_mdl_live_skin_attribute_valid_count"] = int(preserved_attributes + filled_from_groups + filled_from_nearest)
@@ -3984,7 +4047,10 @@ def ensureMdlLiveSkinAttributesForMesh(
             owner["bleeds_mdl_live_skin_attribute_preserved"] = int(preserved_attributes)
             owner["bleeds_mdl_live_skin_attribute_filled_from_nearest"] = int(filled_from_nearest)
             owner["bleeds_mdl_live_skin_attribute_filled_from_default"] = int(filled_from_default)
-            owner["bleeds_mdl_live_skin_attribute_region_repaired"] = 0
+            owner["bleeds_mdl_live_skin_attribute_recovered_metadata"] = recovered_metadata
+            owner["bleeds_mdl_live_skin_attribute_recovered_connected"] = recovered_connected
+            owner["bleeds_mdl_live_skin_attribute_recovered_coincident"] = recovered_coincident
+            owner["bleeds_mdl_live_skin_attribute_region_repaired"] = recovered_connected + recovered_coincident
             owner["bleeds_mdl_live_skin_attribute_rejected_node_count"] = 0
             if allowed_nodes:
                 owner["bleeds_mdl_live_skin_allowed_nodes"] = [int(v) for v in sorted(allowed_nodes)]
@@ -4006,8 +4072,7 @@ def shouldRewriteMdlCustomPedVertexGroupsForExport(mesh_obj: Optional[bpy.types.
         pass
     owners.append(mesh_obj)
 
-    # Export must be non-destructive by default. Rebuilding Blender vertex
-    # groups is only allowed when the artist explicitly requests it.
+
     for owner in owners:
         try:
             if bool(readIdProp(owner, "bleeds_mdl_preserve_custom_vertex_groups", False)):
@@ -4146,43 +4211,30 @@ def normalizeMdlCustomPedVertexGroupsForExport(
     *,
     mesh: Optional[bpy.types.Mesh] = None,
 ) -> int:
-    if mesh_obj is None or getattr(mesh_obj, "type", None) != 'MESH':
-        return 0
-    if root_obj is None:
-        root_obj = find_mdl_root_from_object(mesh_obj)
-    if not shouldRewriteMdlCustomPedVertexGroupsForExport(mesh_obj, root_obj):
-        return 0
-    if mesh is None:
-        mesh = getattr(mesh_obj, "data", None)
-    if mesh is None:
-        return 0
 
-    vgroup_to_bone = buildMdlVertexGroupBoneMap(mesh_obj, root_obj=root_obj)
-    ensureMdlLiveSkinAttributesForMesh(mesh_obj, mesh, vgroup_to_bone, root_obj)
 
-    pairs_by_vertex: List[List[Tuple[int, float]]] = []
-    try:
-        vertices = list(mesh.vertices)
-    except Exception:
-        vertices = []
-    for vertex in vertices:
-        vi = int(getattr(vertex, "index", len(pairs_by_vertex)))
-        pairs = getMdlLiveSkinPairsForVertex(mesh_obj, mesh, vi, vgroup_to_bone, root_obj)
-        pairs = normalizeMdlSkinPairs(pairs)
-        pairs_by_vertex.append(pairs)
+    return 0
 
-    if not pairs_by_vertex:
-        return 0
 
-    assigned = rebuildMdlVertexGroupsFromSkinPairs(mesh_obj, mesh, pairs_by_vertex, root_obj)
-    try:
-        mesh_obj["bleeds_mdl_custom_ped_group_source"] = "NATIVE_TRANSFER_THEN_CANONICAL_GROUPS_THEN_REST_INFER"
-        mesh["bleeds_mdl_custom_ped_group_source"] = "NATIVE_TRANSFER_THEN_CANONICAL_GROUPS_THEN_REST_INFER"
-        mesh_obj["bleeds_mdl_custom_group_fallback_disabled"] = False
-        mesh["bleeds_mdl_custom_group_fallback_disabled"] = False
-    except Exception:
-        pass
-    return assigned
+def prepareMdlSkinPairsForOutput(
+    pairs: List[Tuple[int, float]],
+    mesh_obj: bpy.types.Object,
+    vertex_index: int,
+) -> List[Tuple[int, float]]:
+    object_name = str(getattr(mesh_obj, "name", "<mesh>"))
+    if not pairs:
+        raise RuntimeError(f"{object_name}: vertex {vertex_index} has no usable skin weights.")
+    output_pairs = list(pairs)
+    if len(output_pairs) > 4:
+        output_pairs.sort(key=lambda item: float(item[1]), reverse=True)
+        output_pairs = output_pairs[:4]
+    total = sum(float(weight) for node, weight in output_pairs)
+    if not math.isfinite(total) or total <= 0.0:
+        raise RuntimeError(f"{object_name}: vertex {vertex_index} has invalid skin weights.")
+    if abs(total - 1.0) <= 1.0e-6:
+        return output_pairs
+    return [(int(node), float(weight) / total) for node, weight in output_pairs]
+
 
 def shouldUseMdlVertexGroupsAsSkinAuthority(
     mesh_obj: Optional[bpy.types.Object],
@@ -4198,9 +4250,8 @@ def shouldUseMdlVertexGroupsAsSkinAuthority(
                 return False
         except Exception:
             pass
-    # Blender vertex groups are editable user data. Once a valid Leeds bone
-    # group exists, exporting stale imported point attributes instead would
-    # silently discard weight edits such as adding l_forearm.
+
+
     return True
 
 def getMdlLiveSkinPairsForVertex(
@@ -4238,23 +4289,33 @@ def getMdlLiveSkinPairsForVertex(
     if vertex_groups_authoritative:
         pairs = readMdlSkinPairsFromVertexGroups(mesh_obj, mesh, vertex_index, vgroup_to_bone)
         if pairs:
-            pairs = normalizeMdlSkinPairs(pairs)
             try:
-                writeMdlSkinPairsToAttributes(mesh, vertex_index, pairs, "vertex_groups_authority", 1.0)
+                writeMdlSkinPairsToAttributes(mesh, vertex_index, pairs, "vertex_groups_authority", 1.0, preserve_weights=True)
             except Exception:
                 pass
             return pairs
 
+        pairs = readMdlSkinPairsFromAttributes(mesh, vertex_index)
+        if pairs:
+            return pairs
+        prepared_pairs, prepared_sources = buildMdlSkinPairsForMeshExport(
+            mesh_obj, mesh, vgroup_to_bone, root_obj
+        )
+        if 0 <= int(vertex_index) < len(prepared_pairs) and prepared_pairs[int(vertex_index)]:
+            return prepared_pairs[int(vertex_index)]
+        raise RuntimeError(
+            f"{mesh_obj.name}: emitted vertex {vertex_index} has no skin data in its mesh island."
+        )
+
     if not vertex_groups_authoritative:
         pairs = readMdlSkinPairsFromAttributes(mesh, vertex_index)
         if pairs:
-            return normalizeMdlSkinPairs(pairs)
+            return pairs
 
     pairs = readMdlSkinPairsFromVertexGroups(mesh_obj, mesh, vertex_index, vgroup_to_bone)
     if pairs:
-        pairs = normalizeMdlSkinPairs(pairs)
         try:
-            writeMdlSkinPairsToAttributes(mesh, vertex_index, pairs, "vertex_groups", 1.0)
+            writeMdlSkinPairsToAttributes(mesh, vertex_index, pairs, "vertex_groups", 1.0, preserve_weights=True)
         except Exception:
             pass
         return pairs
@@ -4312,7 +4373,7 @@ def buildMdlNodeIndexToHierarchyName(mesh_obj: Optional[bpy.types.Object], root_
         for bone in list(getattr(getattr(arm_obj, "data", None), "bones", []) or []):
             try:
                 node_index = readMdlArmatureBoneHierarchyNodeIndex(arm_obj, str(getattr(bone, "name", "") or ""))
-                if node_index is not None:
+                if node_index is not None and int(node_index) not in out:
                     out[int(node_index)] = str(getattr(bone, "name", "") or out.get(int(node_index), f"node_{int(node_index)}"))
             except Exception:
                 pass
@@ -4340,7 +4401,8 @@ def buildMdlNodeIndexToHierarchyName(mesh_obj: Optional[bpy.types.Object], root_
         node_indices = readMdlIntListProp(owner, "bleeds_mdl_hierarchy_node_indices")
         for i, name in enumerate(names):
             node_index = int(node_indices[i]) if i < len(node_indices) else int(i)
-            out[int(node_index)] = str(name)
+            if int(node_index) not in out:
+                out[int(node_index)] = str(name)
         return out
     return out
 
@@ -4380,9 +4442,8 @@ def buildMdlPedSkinExportStats(
         if abs(weight_sum - 1.0) > 0.01:
             not_normalized_vertices += 1
         for node, weight in nonzero:
-            # The 0x6C PED skin stream stores compact hierarchy node indices,
-            # not semantic HAnim/ANIM IDs. Values such as 31/41/53 are only
-            # valid here when an actual exported hierarchy node exists there.
+
+
             if node < 0 or node > 255 or (valid_node_indices and int(node) not in valid_node_indices):
                 invalid_node_vertices += 1
                 continue
@@ -4457,10 +4518,7 @@ def hasAuthoritativeMdlPointSourceStream(mesh_obj: bpy.types.Object) -> bool:
     if mesh is None:
         return False
 
-    # A Blender-separated imported PED object is a new logical part. Its copied
-    # POINT/source-strip metadata belongs to the pre-separation object and must
-    # never be replayed as authoritative. Positions still remain in native MDL
-    # coordinate space; only the strip topology authority is invalidated.
+
     if bool(readIdProp(mesh_obj, "bleeds_mdl_force_rebuild_strip_topology", False)) or bool(readIdProp(mesh, "bleeds_mdl_force_rebuild_strip_topology", False)):
         return False
 
@@ -4520,9 +4578,7 @@ def hasAuthoritativeMdlPointSourceStream(mesh_obj: bpy.types.Object) -> bool:
     if source_vertex_count is not None and int(source_vertex_count) != vertex_count:
         return False
 
-    # Counts alone do not prove the imported emit order is still valid.
-    # Blender can preserve POINT attributes across joins/material regrouping
-    # while face adjacency changes. Verify the stream against current topology.
+
     if imported_origin or (source_counts and source_count_sum == vertex_count):
         return mdlSourcePointStreamMatchesCurrentTopology(mesh_obj)
 
@@ -4530,14 +4586,7 @@ def hasAuthoritativeMdlPointSourceStream(mesh_obj: bpy.types.Object) -> bool:
 
 
 def mdlSourcePointStreamMatchesCurrentTopology(mesh_obj: bpy.types.Object) -> bool:
-    """
-    Validate imported PS2 point-stream metadata against the mesh topology that
-    is actually being exported.
 
-    Blender mesh joins/material regrouping can preserve custom POINT attributes
-    after face adjacency changes. Replaying that stale emit order produces
-    legal DMA/VIF packets with invalid triangle-strip connectivity.
-    """
     if mesh_obj is None or getattr(mesh_obj, "type", None) != 'MESH':
         return False
     mesh = getattr(mesh_obj, "data", None)
@@ -4604,13 +4653,7 @@ def mdlSourcePointStreamMatchesCurrentTopology(mesh_obj: bpy.types.Object) -> bo
 
 
 def getMdlExportUvLayer(mesh):
-    """Return the UV layer Blender actually uses for rendering.
 
-    Blender can keep a different edit-active UV map and render-active UV map.
-    Image textures use the render-active layer when no explicit UV Map node is
-    connected, so Stories export must prefer active_render to match the
-    viewport/material result.
-    """
     if mesh is None:
         return None
     layers = getattr(mesh, "uv_layers", None)
@@ -4771,10 +4814,14 @@ def build_source_point_vertices_world(
             "bip01_l_calf": "l_calf",
             "bip01_l_foot": "l_foot",
             "bip01_l_toe0": "l_toe0",
+            "bip01_l_toe": "l_toe0",
+            "l_toe": "l_toe0",
             "bip01_r_thigh": "r_thigh",
             "bip01_r_calf": "r_calf",
             "bip01_r_foot": "r_foot",
             "bip01_r_toe0": "r_toe0",
+            "bip01_r_toe": "r_toe0",
+            "r_toe": "r_toe0",
         }
         for alias_name, canon_target in alias_to_canon.items():
             try:
@@ -4860,10 +4907,7 @@ def build_source_point_vertices_world(
                     u = 0.0
                     vv = 0.0
 
-            # The Blender UV layer is the authoritative editable representation.
-            # Do not overwrite it with the importer-time representative UV cache.
-            # The PS2 packet writer converts Blender V to the Leeds/VCS raster
-            # orientation only when serializing the final VIF UV bytes.
+
             if not uv_from_blender and vertex_index < len(imported_uvs):
                 u, vv = imported_uvs[int(vertex_index)]
                 vv = 1.0 - float(vv)
@@ -4899,6 +4943,7 @@ def build_source_point_vertices_world(
                         ri = gi = bi = ai = 255
 
             skin_pairs = getMdlLiveSkinPairsForVertex(mesh_obj, mesh, int(vertex_index), vgroup_to_bone, resolved_root)
+            skin_pairs = prepareMdlSkinPairsForOutput(skin_pairs, mesh_obj, int(vertex_index))
 
             bone_indices = [0, 0, 0, 0]
             bone_weights = [0.0, 0.0, 0.0, 0.0]
@@ -5032,10 +5077,14 @@ def build_source_corner_vertices_world(
             "bip01_l_calf": "l_calf",
             "bip01_l_foot": "l_foot",
             "bip01_l_toe0": "l_toe0",
+            "bip01_l_toe": "l_toe0",
+            "l_toe": "l_toe0",
             "bip01_r_thigh": "r_thigh",
             "bip01_r_calf": "r_calf",
             "bip01_r_foot": "r_foot",
             "bip01_r_toe0": "r_toe0",
+            "bip01_r_toe": "r_toe0",
+            "r_toe": "r_toe0",
         }
         for alias_name, canon_target in alias_to_canon.items():
             try:
@@ -5146,6 +5195,7 @@ def build_source_corner_vertices_world(
                     ri = gi = bi = ai = 255
 
             skin_pairs = getMdlLiveSkinPairsForVertex(mesh_obj, src_mesh, int(vi), vgroup_to_bone, resolved_root)
+            skin_pairs = prepareMdlSkinPairsForOutput(skin_pairs, mesh_obj, int(vi))
 
             bone_idx_out = [0, 0, 0, 0]
             bone_wt_out = [0.0, 0.0, 0.0, 0.0]
@@ -5438,13 +5488,8 @@ def build_strip_vertices_world(
         key_to_vertex: dict = {}
 
         def get_corner_key(loop_index: int, vert_index: int):
-            # Evaluated meshes can have topology that no longer matches an
-            # original UV/color layer one-for-one (modifiers, split normals,
-            # custom-model cleanup, etc.).  Blender raises
-            # bpy_prop_collection[index] when an index is exactly at/above the
-            # collection size, so validate every evaluated collection before
-            # indexing it.  Returning None lets the caller reject only the bad
-            # triangle instead of aborting the whole MDL export.
+
+
             try:
                 li = int(loop_index)
                 vi = int(vert_index)
@@ -5502,6 +5547,8 @@ def build_strip_vertices_world(
             ai = clamp_u8(int(round(a * 255.0)))
 
             skin_pairs = getMdlLiveSkinPairsForVertex(mesh_obj, src_mesh, vi, vgroup_to_bone, resolved_root) if enable_skin_export else []
+            if enable_skin_export:
+                skin_pairs = prepareMdlSkinPairsForOutput(skin_pairs, mesh_obj, int(vi))
 
             bone_indices = [0, 0, 0, 0]
             bone_weights = [0.0, 0.0, 0.0, 0.0]
@@ -5803,6 +5850,8 @@ def build_simple_vertices_world(
                         pass
 
             skin_pairs = getMdlLiveSkinPairsForVertex(mesh_obj, src_mesh, int(vi), vgroup_to_bone, resolved_root) if enable_skin_export else []
+            if enable_skin_export:
+                skin_pairs = prepareMdlSkinPairsForOutput(skin_pairs, mesh_obj, int(vi))
 
             bone_idx_out = [0, 0, 0, 0]
             bone_wt_out = [0.0, 0.0, 0.0, 0.0]
@@ -5866,6 +5915,15 @@ def export_stories_mdl_ps2(
     if normalized_root_type in ("PED", "CUT") and normalized_req_type == "SIM":
         mdl_type = "PED"
 
+
+    try:
+        if root is not None:
+            root["bleeds_mdl_export_force_simplemodel_cm_scale"] = (
+                str(mdl_type or "SIM").upper().strip() == "SIM"
+            )
+    except Exception:
+        pass
+
     root_export_normals = None
     try:
         if hasattr(root, "bleeds_export_use_normals"):
@@ -5915,8 +5973,8 @@ def export_stories_mdl_ps2(
     if live_logical_ped_compile:
         normalized_new_parts = normalizeSeparatedPedPartMetadata(meshes)
         if normalized_new_parts:
-            # Re-sort after assigning unique logical part indices so export order
-            # is deterministic and the new parts remain stable on later exports.
+
+
             meshes.sort(key=lambda o: (int(readIdProp(o, "bleeds_mdl_part_index", 0) or 0), natural_sort_key(o.name)))
             try:
                 root["bleeds_mdl_export_normalized_separated_parts"] = int(normalized_new_parts)
@@ -6297,10 +6355,7 @@ def export_stories_mdl_ps2(
             except Exception:
                 logical_part_index = int(old_index)
 
-            # Blender Separate intentionally creates a new editable PED part, but
-            # the new object inherits the imported bleeds_mdl_part_index.  Do not
-            # collapse distinct Blender objects back into the original logical part.
-            # Only packet fragments emitted from the SAME object are eligible to merge.
+
             source_object_key = str(header.get("source_object_key", "") or "")
             merge_key = (int(logical_part_index), source_object_key)
 
@@ -6319,9 +6374,7 @@ def export_stories_mdl_ps2(
                     )
                     continue
 
-                # Only keep a fragment separate if merging would exceed the
-                # real 16-bit DMA QWC limit. Normal PED material parts must not
-                # be split merely because they cross 0x0FFF QWC.
+
                 compact_dma.append(bytearray(packet))
                 compact_names.append(name)
                 compact_headers.append(header)
@@ -6587,9 +6640,7 @@ def export_stories_mdl_ps2(
                 pass
             continue
 
-        # Resolve from the mesh/face material itself.  Part-list position is not
-        # material identity: Blender Separate can insert a new packet in the
-        # middle without changing any of the later meshes' materials.
+
         base_mat_name = resolve_mesh_export_texture_name(mesh_obj)
         texture_names.append(base_mat_name)
 
@@ -6668,12 +6719,13 @@ def export_stories_mdl_ps2(
                     overlap=2,
                 )
 
-        # A PED geometry part is a logical material/mesh part, not an arbitrary
-        # 0x0FFF-QWC chunk. The DMA tag QWC field is 16-bit, so keep all VIF
-        # sub-strips for one Blender/Leeds part together unless the actual DMA
-        # limit would be exceeded. Splitting a single material part at 0x0FFF
-        # created a bogus extra PED part and shifted every later material.
+
         ped_runtime_qwc_cap = 0xFFFF
+        source_uv_scale = readMdlSequenceProperty(mesh_obj, "bleeds_mdl_part_uv_scale")
+        uv_scale = mdl_lib.choosePs2UvScale(
+            [(float(vertex.u), 1.0 - float(vertex.v)) for sub in sub_strips for vertex in sub],
+            source_uv_scale,
+        )
         payload_groups: List[Tuple[bytearray, List[List[mdl_lib.Ps2Vertex]]]] = []
         current_vif = bytearray()
         current_subs: List[List[mdl_lib.Ps2Vertex]] = []
@@ -6692,6 +6744,7 @@ def export_stories_mdl_ps2(
                 rounding_mode=rounding_mode,
                 vif_profile=("PED" if mdl_type_u_for_split == "PED" else "SIM"),
                 include_split_header=(mdl_type_u_for_split == "PED"),
+                uv_scale_override=uv_scale,
             )
 
             if mdl_type_u_for_split == "PED":
@@ -6742,7 +6795,41 @@ def export_stories_mdl_ps2(
 
             strip_vertex_count = int(sum(len(_sub) for _sub in packet_sub_strips if len(_sub) >= 3))
             emitted_sub_strip_count = int(sum(1 for _sub in packet_sub_strips if len(_sub) >= 3))
-            emitted_runtime_vertex_count = int(strip_vertex_count)
+            if mdl_type_u_for_split == "PED":
+                emitted_runtime_vertex_count = int(strip_vertex_count)
+                header_strip_vertex_count = int(strip_vertex_count)
+            else:
+
+
+                def same_sim_vertex(a, b):
+                    try:
+                        return (
+                            float(a.x) == float(b.x) and float(a.y) == float(b.y) and float(a.z) == float(b.z)
+                            and float(a.u) == float(b.u) and float(a.v) == float(b.v)
+                            and int(a.r) == int(b.r) and int(a.g) == int(b.g)
+                            and int(a.b) == int(b.b) and int(a.a) == int(b.a)
+                        )
+                    except Exception:
+                        return a is b
+
+                logical_vertices = 0
+                logical_triangles = 0
+                previous_sub = None
+                for current_sub in packet_sub_strips:
+                    if len(current_sub) < 3:
+                        continue
+                    logical_triangles += len(current_sub) - 2
+                    continuation = False
+                    if previous_sub is not None and len(previous_sub) >= 2 and len(current_sub) >= 2:
+                        continuation = (
+                            same_sim_vertex(previous_sub[-2], current_sub[0])
+                            and same_sim_vertex(previous_sub[-1], current_sub[1])
+                        )
+                    logical_vertices += len(current_sub) - (2 if continuation else 0)
+                    previous_sub = current_sub
+
+                emitted_runtime_vertex_count = int(logical_vertices)
+                header_strip_vertex_count = int(logical_triangles)
             packet_vertices = [v for _sub in packet_sub_strips for v in _sub]
 
             source_had_part_index = bool(is_imported_part)
@@ -6764,8 +6851,8 @@ def export_stories_mdl_ps2(
             header_entry = {
                 "part_index": int(logical_part_index),
                 "source_had_part_index": bool(source_had_part_index),
-                # Distinguish artist-separated Blender objects that inherited the
-                # same imported logical part index.  They are separate output parts.
+
+
                 "source_object_key": str(getattr(mesh_obj, "name", "") or ""),
                 "runtime_packet_split": bool(len(payload_groups) > 1),
                 "runtime_packet_group_index": int(packet_group_index),
@@ -6776,10 +6863,10 @@ def export_stories_mdl_ps2(
                 ),
                 "skin_export_stats": skin_export_stats,
                 "sphere": compute_sphere_from_vertices(packet_vertices),
-                "uv_scale_u": 1.0,
-                "uv_scale_v": 1.0,
-                "flags": 0x10,
-                "strip_vertex_count": strip_vertex_count,
+                "uv_scale_u": float(uv_scale[0]),
+                "uv_scale_v": float(uv_scale[1]),
+                "flags": (0x10 if mdl_type_u_for_split == "PED" else 0x19),
+                "strip_vertex_count": header_strip_vertex_count,
                 "runtime_vertex_count": int(emitted_runtime_vertex_count),
                 "emitted_runtime_vertex_count": int(emitted_runtime_vertex_count),
                 "emitted_sub_strip_count": int(emitted_sub_strip_count),
@@ -6807,11 +6894,7 @@ def export_stories_mdl_ps2(
             imported_indexed_meshes_present,
         )
 
-        # Never silently write a PED whose skin had to be guessed after the
-        # artist finished rigging. Retail/native meshes may preserve decoded
-        # skin attributes, but a custom rig must resolve every emitted vertex
-        # from its actual vertex groups. A hard export error is preferable to a
-        # valid-looking MDL that explodes when animated.
+
         ped_skin_errors: List[str] = []
         for part_index, header in enumerate(part_leeds_headers):
             stats = dict(header.get("skin_export_stats", {}) or {})
@@ -6834,14 +6917,10 @@ def export_stories_mdl_ps2(
                 )
             if not_normalized_vertices:
                 ped_skin_errors.append(
-                    f"{object_name}: {not_normalized_vertices} emitted skin vertices are not normalized"
+                    f"{object_name}: {not_normalized_vertices} regenerated skin vertices are not normalized"
                 )
-            # A nearest-neighbour repair can be a legitimate cleanup for a tiny
-            # number of emitted vertices created by topology/strip rebuilding.
-            # Judge the final emitted skin stream, not the provenance counter:
-            # if every emitted vertex has valid, normalized weights in the
-            # exported hierarchy, nearest-only repair is safe to serialize.
-            # Falling back to an arbitrary default bone is still unsafe.
+
+
             if bool(header.get("custom_rigged_mesh", False)) and default_fallback:
                 ped_skin_errors.append(
                     f"{object_name}: custom rig required default skin-weight fallback "
@@ -6850,7 +6929,7 @@ def export_stories_mdl_ps2(
 
         if ped_skin_errors:
             raise RuntimeError(
-                "PED skin export preflight failed; refusing to write a contorted MDL:\n  - "
+                "Cannot export PED skin:\n  - "
                 + "\n  - ".join(ped_skin_errors)
             )
 
@@ -6968,17 +7047,8 @@ def export_stories_mdl_ps2(
             custom_ped_weight_meshes_present = False
 
         if custom_ped_weight_meshes_present:
-            # Imported Stories PED rigs already carry the exact PS2 frame basis and
-            # inverse bind palette that the runtime skin stream expects.  Do not
-            # silently rebuild those matrices from Blender's display/rest basis
-            # merely because a custom/replacement mesh is being exported.  That
-            # mixes coordinate spaces and produces the classic exploded/contorted
-            # PED even when every emitted weight is normalized and references a
-            # valid compact hierarchy node.
-            #
-            # Preserve imported frame/bind data whenever it is available.  Artists
-            # who intentionally changed the armature rest pose can explicitly opt
-            # into a live rebuild with one of the force-live properties below.
+
+
             force_live_rest = False
             for _owner in (root, ped_armature, getattr(ped_armature, "data", None)):
                 if _owner is None:
@@ -7049,11 +7119,8 @@ def export_stories_mdl_ps2(
                 except Exception:
                     pass
             else:
-                # The artist changed the armature rest pose (or there is not
-                # enough imported-rest metadata to prove it is unchanged). Build
-                # both frame matrices and the inverse bind palette from the live
-                # Blender armature instead of mixing old retail bind data with a
-                # new rig.
+
+
                 ped_atomic_meta_export["frame_matrix_authority"] = "LIVE_BLENDER_ARMATURE_REST"
                 ped_atomic_meta_export["bind_matrix_authority"] = "LIVE_BLENDER_ARMATURE_REST_REBUILT"
 
@@ -7154,6 +7221,10 @@ def export_stories_mdl_ps2(
         kwargs = {}
         if "hash_key" in root_cache:
             kwargs["atomic_hash_key"] = int(root_cache["hash_key"])
+        if "model_info_id" in ped_atomic_meta:
+            kwargs["model_info_id"] = int(ped_atomic_meta["model_info_id"])
+        if "vis_id_flag" in ped_atomic_meta:
+            kwargs["vis_id_flag"] = int(ped_atomic_meta["vis_id_flag"])
         if "material_vcols" in root_cache and root_cache["material_vcols"]:
 
             vcols = list(root_cache["material_vcols"])
@@ -7164,14 +7235,12 @@ def export_stories_mdl_ps2(
             kwargs["bounds"] = tuple(float(x) for x in root_cache["bounds"])
         if "unknown_geom_ints" in root_cache:
             kwargs["unknown_geom_ints"] = [int(x) for x in root_cache["unknown_geom_ints"]]
-        if "geom_block" in root_cache and root_cache["geom_block"]:
-            kwargs["geom_block_override"] = root_cache["geom_block"]
         mdl_lib.write_simplemodel_ps2_prop_mdl(
             filepath,
             scale_pos=scale_pos,
             dma_packets=dma_packets,
             material_names=texture_names,
             part_headers=part_leeds_headers,
-            vertex_section_flags=(7 if use_normals else 3),
+            vertex_section_flags=0x0D,
             **kwargs,
         )

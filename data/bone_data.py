@@ -17,9 +17,6 @@
 
 from typing import List, Dict, Tuple
 
-#######################################################
-# These are interesting... it seems AK73 was working on Stories animation rigging
-# === LCS Bone Arrays ===
 
 commonBoneOrder: Tuple[str, ...] = (
     "Root", "Pelvis", "Spine", "Spine1", "Neck", "Head",
@@ -249,6 +246,12 @@ def normalizeAnimBoneName(name: str) -> str:
     text = text.replace("lowerarm", "forearm")
     text = text.replace("shin", "calf")
     return text.strip("_")
+
+def normalizePedSkinBoneName(name: str) -> str:
+    text = normalizeAnimBoneName(str(name or "").replace("~", "_"))
+    if text in ("l_toe", "r_toe"):
+        text += "0"
+    return "".join(character for character in text if character.isalnum())
 
 def buildNormalizedNameToDirectId() -> Dict[str, int]:
     out: Dict[str, int] = {}

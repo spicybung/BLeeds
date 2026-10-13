@@ -365,7 +365,7 @@ def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
 
 
 def _source_stem(path: str) -> str:
-    """Use a stable source name without browser-copy suffixes such as '(1)'."""
+
     stem = Path(path).stem.strip()
     cleaned = re.sub(r"\s*\(\d+\)$", "", stem).strip()
     return cleaned or stem or "WorldLevel"
@@ -946,7 +946,6 @@ def _import_wrld(path: str, decode_textures: bool = True, write_log: bool = True
             print(f"[log] failed to write '{out_path}': {exc}")
 
 
-
 def log_and_import(
     path: str,
     decode_textures: bool = True,
@@ -957,8 +956,8 @@ def log_and_import(
     suffix = source.suffix.lower()
     magic = source.read_bytes()[:4]
     if suffix == ".bsp" or magic == bsp.Z2HM_MAGIC:
-        # Z2HM can wrap more than one Leeds resource type. Confirm the
-        # decompressed payload before routing it to the BSP reader.
+
+
         if suffix == ".bsp":
             return import_psp_bsp(path, decode_textures, write_log, build_models)
         try:

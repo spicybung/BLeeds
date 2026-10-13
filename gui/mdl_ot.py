@@ -118,13 +118,13 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
     mdl_type: EnumProperty(
         name="Model Type",
-        description="Serialized Leeds MDL layout. Runtime model-info class and on-disk layout are separate concepts.",
+        description="Type of model to import",
         items=(
-            ("AUTO", "Determine layout", "Determine the serialized MDL layout from the file structure"),
-            ("SIM", "Atomic / Simple layout", "Atomic-oriented prop/simple serialized MDL layout; commonly consumed by CSimpleModelInfo"),
-            ("PED", "Skinned Clump / Ped layout", "Skinned actor/ped Clump serialization with hierarchy and skin streams; commonly consumed by CPedModelInfo"),
-            ("CUT", "Actor Clump layout", "Actor/cutscene Clump serialization. Cutscene is a usage context, not a runtime model-info class"),
-            ("VEH", "Vehicle Clump layout", "Vehicle-oriented Clump serialization profile; commonly consumed by CVehicleModelInfo"),
+            ("AUTO", "Auto", "Read the model type from the file"),
+            ("SIM", "SimpleModel", "Object or weapon model"),
+            ("PED", "PedModel", "Character model with skin weights"),
+            ("CUT", "ClumpModel (Cutscene)", "Cutscene character or object"),
+            ("VEH", "VehicleModel", "Vehicle parts and frame hierarchy"),
         ),
         default="AUTO",
         options={"HIDDEN"},
@@ -154,7 +154,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
             (
                 "PC_RETAIL",
                 "Retail PC PMLC",
-                "Prefer the retail PC PMLC structure and accept another validated structure only when the retail structure does not fit",
+                "Read the PC model first, then try the other supported layouts",
             ),
             (
                 "PSP_BETA",
@@ -181,22 +181,22 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
     )
 
     create_armature: BoolProperty(
-        name="Internal Armature Import",
-        description="Internal: imports frame data as an armature when appropriate",
+        name="Import Armature",
+        description="Create an armature for a skinned model",
         default=True,
         options={"HIDDEN"},
     )
 
     link_to_scene: BoolProperty(
-        name="Internal Collection Link",
-        description="Internal: links the imported collection to the active scene",
+        name="Link Collection",
+        description="Link the imported collection to the active scene",
         default=True,
         options={"HIDDEN"},
     )
 
     collection_name: StringProperty(
-        name="Internal Collection",
-        description="Internal: optional collection override",
+        name="Collection",
+        description="Collection for imported objects",
         default="",
         maxlen=1024,
         options={"HIDDEN"},
@@ -373,6 +373,10 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
             except Exception:
                 pass
 
+        if imported_count:
+            from ..ops.uv_playback import requestNativeUvPlayback
+            requestNativeUvPlayback(context)
+
         if failed:
             first_path, first_error = failed[0]
             if imported_count > 0:
@@ -442,8 +446,8 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     )
 
     rounding_mode: EnumProperty(
-        name="Internal Quantize",
-        description="Internal fixed quantization mode for Stories PS2 position encoding.",
+        name="Rounding",
+        description="Round positions to PS2 integer coordinates",
         items=(("ROUND", "Round", "round()"),),
         default="ROUND",
         options={"HIDDEN"},
@@ -455,10 +459,26 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         default=True,
     )
 
+    simple_model_info_id: StringProperty(
+        name="Model Info ID",
+        description=(
+            "Use the imported model ID, or enter a replacement ID"
+        ),
+        default="",
+    )
+
+    simple_atomic_hash_key: StringProperty(
+        name="Atomic Hash",
+        description=(
+            "Use the imported Atomic hash, or enter a replacement hash"
+        ),
+        default="",
+    )
+
     imported_export_mode: EnumProperty(
-        name="Internal PED Rebuild",
-        description="Internal: imported PEDs are always rebuilt from calculated live data",
-        items=(("REBUILD", "Rebuild", "Rebuild from calculated pointers, live geometry, and ped_atomic_bind basis"),),
+        name="Rebuild Imported Model",
+        description="Export the current geometry and skin weights",
+        items=(("REBUILD", "Rebuild", "Use the current geometry and skin weights"),),
         default="REBUILD",
         options={"HIDDEN"},
     )
@@ -493,6 +513,25 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     self.export_game = str(root.bleeds_model_game or self.export_game)
                 elif "bleeds_model_game" in root:
                     self.export_game = str(root.get("bleeds_model_game", self.export_game))
+        except Exception:
+            pass
+
+        try:
+            if root is not None:
+                model_info_value = None
+                hash_value = None
+                if hasattr(root, "bleeds_mdl_model_info_id"):
+                    model_info_value = int(root.bleeds_mdl_model_info_id)
+                elif "bleeds_mdl_model_info_id" in root:
+                    model_info_value = int(root["bleeds_mdl_model_info_id"])
+                if hasattr(root, "bleeds_mdl_atomic_hash_key"):
+                    hash_value = int(root.bleeds_mdl_atomic_hash_key)
+                elif "bleeds_mdl_atomic_hash_key" in root:
+                    hash_value = int(root["bleeds_mdl_atomic_hash_key"])
+                if model_info_value is not None and 0 <= model_info_value <= 0xFFFF:
+                    self.simple_model_info_id = f"0x{model_info_value:X}"
+                if hash_value is not None and 0 <= hash_value <= 0xFFFFFFFF:
+                    self.simple_atomic_hash_key = f"0x{hash_value:X}"
         except Exception:
             pass
 
@@ -566,7 +605,53 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     pass
 
             if self.platform == "PSP":
-                raise RuntimeError("PSP MDL serialization is not implemented by the current BLeeds writer; choose PlayStation 2 for MDL export.")
+                raise RuntimeError("PSP MDL export is not supported. Choose PlayStation 2.")
+
+            if requested_model_format == "SIMPLE":
+                def parse_runtime_integer(text, field_name, maximum):
+                    value_text = str(text or "").strip()
+                    if not value_text:
+                        return None
+                    try:
+                        value = int(value_text, 0)
+                    except Exception as exc:
+                        raise RuntimeError(f"{field_name} must be a decimal value or 0x-prefixed hexadecimal value.") from exc
+                    if value < 0 or value > maximum:
+                        raise RuntimeError(f"{field_name} is outside the valid range 0..0x{maximum:X}.")
+                    return value
+
+                explicit_model_info_id = parse_runtime_integer(self.simple_model_info_id, "Model Info ID", 0xFFFF)
+                explicit_hash_key = parse_runtime_integer(self.simple_atomic_hash_key, "Atomic Hash", 0xFFFFFFFF)
+
+                existing_model_info_id = None
+                if root is not None:
+                    try:
+                        if hasattr(root, "bleeds_mdl_model_info_id"):
+                            existing_model_info_id = int(root.bleeds_mdl_model_info_id)
+                        elif "bleeds_mdl_model_info_id" in root:
+                            existing_model_info_id = int(root["bleeds_mdl_model_info_id"])
+                    except Exception:
+                        existing_model_info_id = None
+
+
+                if explicit_model_info_id is not None:
+                    root["bleeds_mdl_model_info_id"] = int(explicit_model_info_id)
+                elif existing_model_info_id is None or existing_model_info_id < 0 or existing_model_info_id > 0xFFFF:
+                    root["bleeds_mdl_model_info_id"] = -1
+
+                if explicit_hash_key is not None:
+                    root["bleeds_mdl_atomic_hash_key"] = int(explicit_hash_key)
+                else:
+                    existing_hash = None
+                    try:
+                        if hasattr(root, "bleeds_mdl_atomic_hash_key"):
+                            existing_hash = int(root.bleeds_mdl_atomic_hash_key)
+                        elif "bleeds_mdl_atomic_hash_key" in root:
+                            existing_hash = int(root["bleeds_mdl_atomic_hash_key"])
+                    except Exception:
+                        existing_hash = None
+                    if existing_hash is None:
+                        root["bleeds_mdl_atomic_hash_key"] = 0
 
             mdl_exporter.export_stories_mdl_ps2(
                 context=context,

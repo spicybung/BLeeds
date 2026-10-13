@@ -152,10 +152,7 @@ def findPoseBoneForAnimBone(
         if pose_bone is not None:
             return pose_bone, f"{resolved_reason} -> name fallback"
 
-    # A direct/hashed PED identity must never silently fall through to raw pose
-    # list position. Blender bone order is not the Leeds HAnim identity space.
-    # Table-index fallback is reserved for tracks that truly have no semantic
-    # identity and for armatures carrying an explicit hierarchy-node table.
+
     has_semantic_identity = (
         bone.direct_bone_id is not None
         or resolved_direct_id is not None
@@ -253,9 +250,8 @@ def findSelectedArmature(context):
         candidates.append(candidate)
 
     if active is not None:
-        # The Armature modifier is the authoritative deform relationship. Prefer
-        # it over object parenting because imported MDL roots can contain more
-        # than one armature or helper hierarchy.
+
+
         try:
             for modifier in active.modifiers:
                 if getattr(modifier, "type", None) == "ARMATURE":
@@ -595,8 +591,7 @@ def getImportedMdlRestGlobalMatrix(armature_object, pose_bone):
     if matrix is not None:
         return matrix, source
 
-    # Do not inject a canned VCS skeleton basis into arbitrary/custom/LCS rigs.
-    # The fallback remains available only as an explicit diagnostic opt-in.
+
     allow_default_vcs_basis = False
     for owner in (armature_object, getattr(armature_object, "data", None)):
         if owner is None:
@@ -734,11 +729,7 @@ def getImportedBlenderRestLocalMatrix(armature_object, pose_bone):
             stored_matrix = matrix
             stored_source = source
 
-    # The stored Blender matrix describes the rest pose at import time. If the
-    # artist edited the armature in Edit Mode after importing, matrix_local is
-    # now the correct target rest basis for animation retargeting. Reusing the
-    # stale import-time target basis makes otherwise-valid Leeds absolute-local
-    # animation deltas contort the edited rig.
+
     if live_rest is not None and stored_matrix is not None:
         diff = matrixRestDifferenceScore(live_rest, stored_matrix)
         if diff > 1.0e-4:
@@ -859,9 +850,8 @@ def finalizeImportedAnimActionCurves(action, start_frame: float, end_frame: floa
             if frame_value < lo or frame_value > hi:
                 continue
             try:
-                # Leeds skeletal keys are sampled/interpolated by the game;
-                # Blender's default Bezier handles can overshoot quaternion
-                # components and visibly contort an otherwise-correct rig.
+
+
                 keyframe.interpolation = 'LINEAR'
                 changed += 1
             except Exception:
@@ -1238,13 +1228,11 @@ def applyPoseFrameAnimReferenceDelta(
         if current_rotation is None:
             current_rotation = Quaternion((1.0, 0.0, 0.0, 0.0))
 
-        # Leeds weapon/layer clips use current * inverse(reference).
-        # The opposite order rotates around the wrong local axes.
+
         source_delta = current_rotation @ reference_rotation.inverted()
         source_delta_matrix = source_delta.to_matrix().to_4x4()
 
-        # The first ANIM key is the reference pose, not the source axis basis.
-        # Rebase through the actual imported MDL rest-local basis.
+
         mdl_rest_local, _mdl_rest_source = getImportedMdlRestLocalMatrix(armature_object, pose_bone)
         if mdl_rest_local is None:
             mdl_rest_local = getBlenderRestLocalMatrix(armature_object, pose_bone) or Matrix.Identity(4)
@@ -1814,9 +1802,7 @@ def shouldAutoUseSafePedWeaponAnimMode(armature_object, entry: AnimEntry, reques
     if not isPedWeaponAnimationEntry(entry):
         return False
 
-    # A BLeeds-imported Leeds MDL already carries the source MDL local/rest basis.
-    # Its ANIM tracks must be interpreted as absolute Leeds local poses relative to
-    # that imported rest basis. First-key normalization is only the cross-rig path.
+
     return not isNativeLeedsMdlArmature(armature_object)
 
 def shouldLogPedWeaponAbsoluteLocalMode(armature_object, entry: AnimEntry, requested_mode: str) -> bool:

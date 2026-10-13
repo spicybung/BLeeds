@@ -26,10 +26,6 @@ import numpy as np
 
 from . import tex as leeds_tex
 
-# - Script resources:
-# •
-# - Mod resources/cool stuff:
-# •
 
 Z2HM_MAGIC = b"Z2HM"
 DLRW_MAGIC = b"DLRW"
@@ -64,7 +60,7 @@ def read_cstr(data: bytes, offset: int, max_length: int = 256) -> str:
 
 
 def unwrap_z2hm(data: bytes) -> Tuple[bytes, bool, int]:
-    """Return decompressed data, wrapper flag, and declared unpacked size."""
+
     if len(data) < 8 or data[:4] != Z2HM_MAGIC:
         return data, False, len(data)
     declared_size = read_u32(data, 4)
@@ -295,8 +291,8 @@ def _geometry_header_at(data: bytes, offset: int) -> Optional[BSPGeometryBlock]:
             return None
         if not math.isfinite(uv_scale_u):
             return None
-        # The beta PSP files use one encoded UV scale.  A zero second value
-        # means the same scale is used for both axes.
+
+
         if not math.isfinite(uv_scale_v) or abs(uv_scale_v) < 1.0e-30:
             uv_scale_v = uv_scale_u
         strips.append(
@@ -370,8 +366,8 @@ def _geometry_header_at(data: bytes, offset: int) -> Optional[BSPGeometryBlock]:
 def scan_psp_render_geometry(data: bytes) -> List[BSPGeometryBlock]:
     geometry: List[BSPGeometryBlock] = []
     seen_ranges: List[Tuple[int, int]] = []
-    # Headers are four-byte aligned in the supplied PSP beta files.  The
-    # strict size/strip/vertex validation makes this scan deterministic.
+
+
     for offset in range(0x20, max(0x20, len(data) - 0x48 + 1), 4):
         block = _geometry_header_at(data, offset)
         if block is None:
@@ -495,9 +491,8 @@ def decode_tcdt_texture(dictionary: TCDTDictionary, texture: TCDTTextureRecord) 
         if texture.data_offset <= 0 or texture.data_offset + byte_count > len(data):
             raise ValueError("TCDT 4-bit pixel data is outside the file")
         raw = data[texture.data_offset:texture.data_offset + byte_count]
-        # The PSP TCDT raster is stored in 16x8 swizzled blocks.  The first
-        # beta header contains stale non-zero flag bytes, so format identity
-        # is more reliable than treating swizzle_mask as a boolean.
+
+
         raw = leeds_tex.unswizzle_psp_4bit(raw, width, height)
         packed = np.frombuffer(raw, dtype=np.uint8)
         indices = np.empty(width * height, dtype=np.uint8)
@@ -568,7 +563,7 @@ def find_best_companion_txd(
     bsp_path: str,
     material_names: List[str],
 ) -> Optional[Path]:
-    """Find a PSP TCDT silently, preferring exact stem then material overlap."""
+
     exact = find_companion_txd(bsp_path)
     if exact is not None:
         return exact

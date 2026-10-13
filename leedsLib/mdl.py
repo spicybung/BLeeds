@@ -23,34 +23,6 @@ from typing import List, Dict, Tuple, Any, Optional, Iterable
 
 from mathutils import Matrix, Vector
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for Stories .MDLs, the file format for actors & props            #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
-# • https://gtamods.com/wiki/Leeds_Engine (TODO: update stub)
-# • https://gtamods.com/wiki/MDL (TODO: update stub with more documentation in own words)
-# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h (ditto)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp (ditto)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL (*Russian*)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/MDL_importer (*ditto - by Alex/AK73 & good resource to start*)
-# • https://web.archive.org/web/20180714005051/https://www.gtamodding.ru/wiki/GTA_Stories_RAW_Editor (ditto)
-# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/MDL?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# • https://web-archive-org.translate.goog/web/20180725082416/http://gtamodding.ru/wiki/MDL_importer?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (by Alex/AK73 - good resource to start w/out any other documentation)
-# - Mod resources/cool stuff:
-# • https://developer.valvesoftware.com/wiki/MDL_(Quake) (Rockstar Leeds MDL is loosely based on Quake MDL)
-# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (GTA3xx .img: .mdls, textures, animations)
-# • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
-# • https://gtaforums.com/topic/285544-gtavcslcs-modding/
-# • https://thegtaplace.com/forums/topic/12002-gtavcslcs-modding/
-# • http://aap.papnet.eu/gta/RE/lcs_pipes.txt (a brief binary example of how bitflags work for PS2/PSP/Mobile Stories games)
-# • https://libertycity.net/articles/gta-vice-city-stories/6773-how-one-of-the-best-grand-theft-auto.html
-# • https://umdatabase.net/view.php?id=CB00495D (database collection of Grand Theft Auto prototypes)
-# • https://www.ign.com/articles/2005/09/10/gta-liberty-city-stories-2 ( ...it's IGN, but old IGN at least)
-# • https://lcsteam.net/community/forum/index.php/topic,337.msg9335.html#msg9335 (RW 3.7/4.0, .MDL's, .WRLD's, .BSP's... )
-# • https://www.gamedeveloper.com/programming/opinion-why-on-earth-would-we-write-our-own-game-engine- (Renderwares fate)
-# • https://vkvideo.ru/playlist/-76377865_3/video143954957_456239182?linked=1 ( *Russian* - VCS PSP MDL viewer by Daniil Sayanov)
 
 try:
     from ..data.bone_data import (
@@ -86,10 +58,7 @@ except Exception:
         kamBoneIndexVCS,
         commonBoneParentsVCS,
     )
-# Bone arrays and shared PED hierarchy constants live in BLeeds/data/bone_data.py.
 
-#######################################################
-# === Model Rendering Flags ===
 
 FLAG_DRAWLAST: int = 0x4 | 0x8
 FLAG_ADDITIVE: int = 0x8
@@ -614,7 +583,7 @@ def discoverVehicleAtomicOffsets(ctx: StoriesMDLContext, f) -> List[Tuple[int, s
                 f.seek(old_pos, 0)
             except Exception:
                 pass
-        if magic not in (0x01050001, 0x01000001, 0x0004AA01, 0x0000AA01, 0x00041601, 0x01F40400):
+        if magic & 0xFF != 1:
             return
         seen.add(atomic_start)
         offsets.append((atomic_start, source, int(link_offset or (atomic_start + 0x1C))))
@@ -682,7 +651,10 @@ def readVehicleAtomics(ctx: StoriesMDLContext, f, shared_arm: StoriesArmatureInf
 
             atomic_info.armature = arm
             if int(atomic_info.geom_ptr or 0) > 0:
-                atomic_info.ps2_geometry = read_ps2_geometry(ctx, f, int(atomic_info.geom_ptr))
+                if ctx.platform == 'PSP':
+                    atomic_info.psp_geometry = read_psp_geometry(ctx, f, int(atomic_info.geom_ptr))
+                else:
+                    atomic_info.ps2_geometry = read_ps2_geometry(ctx, f, int(atomic_info.geom_ptr))
             atomics.append(atomic_info)
 
             frame_name = ""
@@ -696,6 +668,8 @@ def readVehicleAtomics(ctx: StoriesMDLContext, f, shared_arm: StoriesArmatureInf
                 f"render_cb=0x{int(atomic_info.render_cb):X} parts={len(getattr(atomic_info.ps2_geometry, 'parts', []) or [])}"
             )
         except Exception as atomic_error:
+            if ctx.platform == 'PSP':
+                raise ValueError("PSP Clump atomic at 0x%X: %s" % (atomic_start, atomic_error)) from atomic_error
             ctx.log(f"VehicleModel: failed to parse atomic at 0x{int(atomic_start):X}: {atomic_error}")
 
     for atomic_info in atomics:
@@ -1291,7 +1265,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
             if len(hdr) < 4:
                 return None
             b0, b1, b2, b3 = hdr[0], hdr[1], hdr[2], hdr[3]
-            if require_b1_80 and b1 != 0x80:
+            if require_b1_80 and not (b1 & 0x80):
                 pos += step
                 continue
             if b3 == wanted_cmd:
@@ -1436,16 +1410,16 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                 f.seek(-4, 1)
 
             split_segment_start = marker_seek
-            is_ped_split_segment = (marker == 0x6C018000)
+            is_split_segment = (marker == 0x6C018000)
             dma_vertex_count = 0
             culling_disabled = False
             vif_destination = 0
-            if not is_ped_split_segment and (marker & 0x60000000) == 0x60000000:
+            if not is_split_segment and (marker & 0x60000000) == 0x60000000:
                 try:
                     _saved_probe = f.tell()
                     f.seek(marker_seek + 16, 0)
-                    is_ped_split_segment = (read_u32(f) == 0x6C018000)
-                    if is_ped_split_segment:
+                    is_split_segment = (read_u32(f) == 0x6C018000)
+                    if is_split_segment:
                         split_segment_start = marker_seek + 16
                     f.seek(_saved_probe, 0)
                 except Exception:
@@ -1463,7 +1437,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
             for _ in range(8):
                 f.read(4)
             _ = read_u16(f)
-            cur_strip_vert_count = read_u8(f)
+            cur_strip_vert_count = decodeVifNum(read_u8(f))
             pad_byte = read_u8(f)
             ctx.log(
                 f"    - curStripVertCount: {cur_strip_vert_count} (padByte={pad_byte}) at 0x{f.tell():X}"
@@ -1478,7 +1452,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                 f.seek(vertex_data_offset, 0)
             except Exception:
                 f.seek(vertex_data_offset, 0)
-            if is_ped_split_segment:
+            if is_split_segment:
                 try:
                     f.seek(split_segment_start + 16, 0)
                     split_count_word = read_u32(f)
@@ -1537,16 +1511,16 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                 if v0 != v1 and v1 != v2 and v2 != v0:
                     part.faces.append((v0, v1, v2))
 
-            ped_segment_parsed = False
+            split_segment_parsed = False
             vif_command_metadata: List[Dict[str, int]] = []
-            if is_ped_split_segment:
-
+            if is_split_segment:
+                stream_lengths = (len(part.uvs), len(part.vertex_colors), len(part.normals))
                 try:
                     align4 = f.tell() % 4
                     if align4:
                         pad_bytes = 4 - align4
                         f.read(pad_bytes)
-                        ctx.log(f"    🟦 PED align to dword after verts: {pad_bytes} bytes")
+                        ctx.log(f"    🟦 PS2 split align to dword after verts: {pad_bytes} bytes")
 
                     stmask_pos = f.tell()
                     stmask_word = read_u32(f)
@@ -1554,21 +1528,21 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     strow_word = read_u32(f)
                     strow_values = [read_u32(f), read_u32(f), read_u32(f), read_u32(f)]
                     ctx.log(
-                        f"    🧷 PED UV STMASK/STROW at 0x{stmask_pos:X}: "
+                        f"    🧷 PS2 split UV STMASK/STROW at 0x{stmask_pos:X}: "
                         f"0x{stmask_word:08X}, 0x{stmask_value:08X}, "
                         f"0x{strow_word:08X}, rows={strow_values}"
                     )
 
                     if stmask_word != 0x20000000 or strow_word != 0x30000000:
                         raise ValueError(
-                            f"unexpected PED UV STMASK/STROW block at 0x{stmask_pos:X}: "
+                            f"unexpected PS2 split UV STMASK/STROW block at 0x{stmask_pos:X}: "
                             f"0x{stmask_word:08X}/0x{strow_word:08X}"
                         )
 
                     uv_header_pos = f.tell()
                     uv_header = f.read(4)
                     if len(uv_header) < 4:
-                        raise EOFError("short read while reading PED UV header")
+                        raise EOFError("short read while reading PS2 split UV header")
                     b0, b1, b2, b3 = uv_header[0], uv_header[1], uv_header[2], uv_header[3]
                     if b3 != 0x76:
                         found = scan_for_vif_header(
@@ -1581,7 +1555,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                         )
                         if not found:
                             raise ValueError(
-                                f"PED UV header not found near 0x{uv_header_pos:X}; got {uv_header.hex()}"
+                                f"PS2 split UV header not found near 0x{uv_header_pos:X}; got {uv_header.hex()}"
                             )
                         uv_header_pos, uv_header = found
                         f.seek(uv_header_pos + 4, 0)
@@ -1590,12 +1564,12 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     cur_strip_tvert_count = decodeVifNum(b2)
                     if cur_strip_tvert_count > 0x100:
                         ctx.log(
-                            f"    ⚠ PED UV count b2={cur_strip_tvert_count} invalid; "
+                            f"    ⚠ PS2 split UV count b2={cur_strip_tvert_count} invalid; "
                             f"using curStripVertCount={cur_strip_vert_count}"
                         )
                         cur_strip_tvert_count = int(cur_strip_vert_count)
                     ctx.log(
-                        f"    ⬛ PED UV header at 0x{uv_header_pos:X}: "
+                        f"    ⬛ PS2 split UV header at 0x{uv_header_pos:X}: "
                         f"b0=0x{b0:02X}, b1=0x{b1:02X}, "
                         f"b2(count)={cur_strip_tvert_count}, b3=0x{b3:02X}"
                     )
@@ -1611,7 +1585,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     pad = (4 - ((cur_strip_tvert_count * 2) % 4)) % 4
                     if pad:
                         f.read(pad)
-                        ctx.log(f"    🟦 PED padding after UVs: {pad} bytes")
+                        ctx.log(f"    🟦 PS2 split padding after UVs: {pad} bytes")
 
                     attribute_header_pos = f.tell()
                     attribute_header = f.read(4)
@@ -1621,7 +1595,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     if attribute_header[3] == 0x6F:
                         color_count = decodeVifNum(attribute_header[2])
                         ctx.log(
-                            f"   >> PED color header: count={color_count} at 0x{attribute_header_pos:X}"
+                            f"   >> PS2 split color header: count={color_count} at 0x{attribute_header_pos:X}"
                         )
                         colors: List[Tuple[int, int, int, int]] = []
                         for _ in range(color_count):
@@ -1633,13 +1607,13 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                         attribute_header_pos = f.tell()
                         attribute_header = f.read(4)
                         if len(attribute_header) < 4:
-                            raise EOFError("short read after PED color stream")
+                            raise EOFError("short read after PS2 split color stream")
 
                     if attribute_header[3] == 0x6A:
                         nb0, nb1, nb2, nb3 = attribute_header
                         normal_count = decodeVifNum(nb2)
                         ctx.log(
-                            f"   >> PED normal header: b1={nb1:02X}, count={normal_count}, "
+                            f"   >> PS2 split normal header: b1={nb1:02X}, count={normal_count}, "
                             f"b3={nb3:02X} at 0x{attribute_header_pos:X}"
                         )
                         norms: List[Tuple[float, float, float]] = []
@@ -1655,45 +1629,50 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                         attribute_header_pos = f.tell()
                         attribute_header = f.read(4)
                         if len(attribute_header) < 4:
-                            raise EOFError("short read after PED normal stream")
+                            raise EOFError("short read after PS2 split normal stream")
 
                     skin_header_pos = attribute_header_pos
                     skin_header = attribute_header
-                    sb0, sb1, sb2, sb3 = skin_header[0], skin_header[1], skin_header[2], skin_header[3]
-                    if sb3 != 0x6C:
-                        raise ValueError(
-                            f"expected PED skin header 0x6C at 0x{skin_header_pos:X}, got {skin_header.hex()}"
+                    sb0, sb1, sb2, sb3 = skin_header
+                    if sb3 == 0x6C:
+                        skin_count = decodeVifNum(sb2)
+                        ctx.log(
+                            f"   >> PED skin header: b1={sb1:02X}, count={skin_count}, "
+                            f"b3={sb3:02X} at 0x{skin_header_pos:X}"
                         )
-                    skin_count = decodeVifNum(sb2)
-                    ctx.log(
-                        f"   >> PED skin header: b1={sb1:02X}, count={skin_count}, "
-                        f"b3={sb3:02X} at 0x{skin_header_pos:X}"
-                    )
-                    for i in range(skin_count):
-                        raw1 = read_u32(f)
-                        raw2 = read_u32(f)
-                        raw3 = read_u32(f)
-                        raw4 = read_u32(f)
+                        for i in range(skin_count):
+                            raw1 = read_u32(f)
+                            raw2 = read_u32(f)
+                            raw3 = read_u32(f)
+                            raw4 = read_u32(f)
 
-                        bone1, w1 = _decode_ps2_ped_skin_word(raw1)
-                        bone2, w2 = _decode_ps2_ped_skin_word(raw2)
-                        bone3, w3 = _decode_ps2_ped_skin_word(raw3)
-                        bone4, w4 = _decode_ps2_ped_skin_word(raw4)
+                            bone1, w1 = _decode_ps2_ped_skin_word(raw1)
+                            bone2, w2 = _decode_ps2_ped_skin_word(raw2)
+                            bone3, w3 = _decode_ps2_ped_skin_word(raw3)
+                            bone4, w4 = _decode_ps2_ped_skin_word(raw4)
 
-                        skin_indices.append([bone1, bone2, bone3, bone4])
-                        skin_weights.append([w1, w2, w3, w4])
-                        skin_raw_dwords.append([raw1 & 0xFFFFFFFF, raw2 & 0xFFFFFFFF, raw3 & 0xFFFFFFFF, raw4 & 0xFFFFFFFF])
+                            skin_indices.append([bone1, bone2, bone3, bone4])
+                            skin_weights.append([w1, w2, w3, w4])
+                            skin_raw_dwords.append([raw1 & 0xFFFFFFFF, raw2 & 0xFFFFFFFF, raw3 & 0xFFFFFFFF, raw4 & 0xFFFFFFFF])
+
+                    elif mdl_type_u != "PED" and struct.unpack('<I', skin_header)[0] == 0x14000006:
+
+                        f.seek(skin_header_pos, 0)
+                    else:
+                        raise ValueError(
+                            f"unexpected vertex attribute at 0x{skin_header_pos:X}: {skin_header.hex()}"
+                        )
 
                     mscal_pos = f.tell()
                     if mscal_pos + 4 <= next_part_addr:
                         mscal_word = read_u32(f)
                         if mscal_word != 0x14000006:
                             ctx.log(
-                                f"    ⚠ Expected PED MSCAL at 0x{mscal_pos:X}, got 0x{mscal_word:08X}; rewinding"
+                                f"    ⚠ Expected PS2 split MSCAL at 0x{mscal_pos:X}, got 0x{mscal_word:08X}; rewinding"
                             )
                             f.seek(mscal_pos, 0)
                         else:
-                            ctx.log(f"    ✔ PED MSCAL at 0x{mscal_pos:X}")
+                            ctx.log(f"    ✔ PS2 split MSCAL at 0x{mscal_pos:X}")
 
                             segment_end = f.tell()
                             saved_segment_pos = f.tell()
@@ -1727,12 +1706,18 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                         pad_bytes = 16 - rel_after_segment
                         if f.tell() + pad_bytes <= next_part_addr:
                             f.read(pad_bytes)
-                            ctx.log(f"    🟦 PED segment qword padding: {pad_bytes} bytes")
+                            ctx.log(f"    🟦 PS2 split segment qword padding: {pad_bytes} bytes")
 
-                    ped_segment_parsed = True
-                except Exception as ped_parse_error:
+                    split_segment_parsed = True
+                except Exception as split_parse_error:
+                    del part.uvs[stream_lengths[0]:]
+                    del part.vertex_colors[stream_lengths[1]:]
+                    del part.normals[stream_lengths[2]:]
+                    skin_indices.clear()
+                    skin_weights.clear()
+                    skin_raw_dwords.clear()
                     ctx.log(
-                        f"    ⚠ PED exact VIF parse failed at strip 0x{marker_seek:X}: {ped_parse_error}; "
+                        f"    ⚠ PS2 split VIF parse failed at strip 0x{marker_seek:X}: {split_parse_error}; "
                         f"falling back to generic scanner"
                     )
 
@@ -1741,7 +1726,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     if align4:
                         f.read(4 - align4)
 
-            if not ped_segment_parsed:
+            if not split_segment_parsed:
 
                 if (cur_strip_vert_count % 2) == 1:
                     pad_short_pos = f.tell()
@@ -1902,7 +1887,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                                 skin_raw_dwords.append([raw1 & 0xFFFFFFFF, raw2 & 0xFFFFFFFF, raw3 & 0xFFFFFFFF, raw4 & 0xFFFFFFFF])
                         continue
 
-            if len(skin_indices) != cur_strip_vert_count or len(skin_weights) != cur_strip_vert_count:
+            if (skin_indices or mdl_type_u == "PED") and (len(skin_indices) != cur_strip_vert_count or len(skin_weights) != cur_strip_vert_count):
                 ctx.log(
                     f"[WARN] strip verts={cur_strip_vert_count}, skin_idx={len(skin_indices)}, skin_wts={len(skin_weights)} — padding zeros to match"
                 )
@@ -1945,6 +1930,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
             _ph = g.leeds_part_headers[part_index]
             try:
                 part.uv_scale = (float(_ph.get("uv_scale_u", 1.0)), float(_ph.get("uv_scale_v", 1.0)))
+                part.uvs = [(u * part.uv_scale[0], v * part.uv_scale[1]) for u, v in part.uvs]
                 part.geom_flags = int(_ph.get("flags", 0))
                 part.strip_vertex_count_hint = int(_ph.get("strip_vertex_count", 0))
                 part.bbox_i16 = [int(v) for v in (_ph.get("bbox_i16", []) or [])[:6]]
@@ -1964,93 +1950,172 @@ def alignPspVertexMember(offset: int, alignment: int = 2) -> int:
     return (int(offset) + alignment - 1) & ~(alignment - 1)
 
 
-def buildPspVertexLayout(flags: int) -> Dict[str, Any]:
-    uv_format = int(flags) & 0x3
-    color_format = (int(flags) >> 2) & 0x7
-    normal_format = (int(flags) >> 5) & 0x3
-    position_format = (int(flags) >> 7) & 0x3
-    weight_format = (int(flags) >> 9) & 0x3
-    index_format = (int(flags) >> 11) & 0x3
-    weight_count = ((int(flags) >> 14) & 0x7) + 1
+def probePspGeometryHeader(data: bytes, geometry_ptr: int) -> Dict[str, Any]:
+    header = int(geometry_ptr) + 0x20
+    if geometry_ptr < 0x20 or header + 0x48 > len(data):
+        return {}
+    size, flags, strips = struct.unpack_from("<3I", data, header)
+    vertices = struct.unpack_from("<i", data, header + 0x2C)[0]
+    vertex_offset = struct.unpack_from("<I", data, header + 0x40)[0]
+    if flags & ~0x1C7FF or (flags >> 11) & 3 or not (flags >> 7) & 3:
+        return {}
+    if not 0 < strips <= 4096 or not 0 < vertices <= 1000000:
+        return {}
+    descriptor_end = 0x48 + strips * 0x30
+    if not descriptor_end <= vertex_offset <= size or header + size > len(data):
+        return {}
+    try:
+        layout = buildPspVertexLayout(flags)
+    except ValueError:
+        return {}
+    if vertices * layout['stride'] > size - vertex_offset:
+        return {}
+    vertex_total = 0
+    for index in range(strips):
+        descriptor = header + 0x48 + index * 0x30
+        offset, triangles = struct.unpack_from('<IH', data, descriptor)
+        vertex_total += triangles + 2
+        if offset + (triangles + 2) * layout['stride'] > size - vertex_offset:
+            return {}
+    if vertex_total != vertices:
+        return {}
+    return {'header_offset': header, 'flags': flags, 'strips': strips, 'vertices': vertices}
 
+
+def probeStoriesResourceHeader(data: bytes) -> Dict[str, Any]:
+    if len(data) < 0x30 or data[:4] != b'ldm\x00':
+        return {}
+    candidates = [(0x20, 0x20)]
+    for pointer_offset in (0x20, 0x24):
+        pointer = struct.unpack_from('<I', data, pointer_offset)[0]
+        if 0x30 <= pointer <= len(data) - 0x34:
+            candidates.append((pointer, pointer_offset))
+    for top, pointer_offset in candidates:
+        identifier = struct.unpack_from('<I', data, top)[0]
+        object_type = identifier & 0xFF
+        if object_type == 2:
+            root, first_link, last_link = struct.unpack_from('<3I', data, top + 4)
+            atomic = first_link - 0x1C
+            if not 0x20 <= root <= len(data) - 0xB0 or not 0x20 <= atomic <= len(data) - 0x34:
+                continue
+            if struct.unpack_from('<I', data, atomic)[0] & 0xFF != 1:
+                continue
+            if not 0x20 <= last_link - 0x1C <= len(data) - 0x34:
+                continue
+        elif object_type == 1:
+            atomic = top
+        else:
+            continue
+        frame = struct.unpack_from('<I', data, atomic + 4)[0]
+        geometry = struct.unpack_from('<I', data, atomic + 0x14)[0]
+        if not 0x20 <= frame <= len(data) - 0xB0 or not 0x20 <= geometry <= len(data) - 0x68:
+            continue
+        psp_header = probePspGeometryHeader(data, geometry)
+        if psp_header:
+            native_platform = 'PSP'
+            game = ''
+        elif identifier in (0x00000002, 0x0000AA02, 0x01050001, 0x01000001, 0x0004AA01, 0x0000AA01):
+            native_platform = 'PS2'
+            game = 'VCS' if identifier in (0x0000AA02, 0x0004AA01, 0x0000AA01) else 'LCS'
+        else:
+            continue
+        mdl_type_hint = 'SIM' if object_type == 1 else 'CUT' if top == 0x20 else 'PED'
+        if object_type == 2 and pointer_offset == 0x20 and top != 0x20:
+            extra_count, extra_array = struct.unpack_from('<2I', data, 0x24)
+            if (extra_count <= 128 and
+                    (extra_count == 0 and extra_array == 0 or
+                     extra_count > 0 and 0x30 <= extra_array <= len(data) - extra_count * 4)):
+                mdl_type_hint = 'VEH'
+        return {'top_level_ptr': top, 'top_identifier': identifier,
+                'atomic_offset': atomic, 'pointer_offset': pointer_offset,
+                'section_kind': 'CLUMP' if object_type == 2 else 'ATOMIC',
+                'mdl_type_hint': mdl_type_hint,
+                'platform': native_platform, 'game': game,
+                'psp_geometry_header': psp_header}
+    return {}
+
+
+def buildPspVertexLayout(flags: int) -> Dict[str, Any]:
+    flags = int(flags)
+    formats = {
+        "uv": flags & 3,
+        "color": (flags >> 2) & 7,
+        "normal": (flags >> 5) & 3,
+        "position": (flags >> 7) & 3,
+        "weights": (flags >> 9) & 3,
+    }
+    index_format = (flags >> 11) & 3
+    weight_count = ((flags >> 14) & 7) + 1
+    if flags & ~0x1DFFF:
+        raise ValueError("Unsupported PSP morph/transform flags: 0x%X" % flags)
+    if index_format == 3 or formats["position"] == 0:
+        raise ValueError("Invalid PSP vertex format: 0x%X" % flags)
+    if formats["color"] not in (0, 4, 5, 6, 7):
+        raise ValueError("Invalid PSP color format: %d" % formats["color"])
     offsets: Dict[str, int] = {}
     cursor = 0
-
-    if weight_format:
-        cursor = alignPspVertexMember(cursor)
-        offsets["weights"] = cursor
-        if weight_format == 1:
-            cursor += weight_count
-        elif weight_format == 2:
-            cursor += weight_count * 2
-        elif weight_format == 3:
-            cursor += weight_count * 4
+    alignment = 1
+    for member in ("weights", "uv", "color", "normal", "position"):
+        member_format = formats[member]
+        if member_format == 0:
+            continue
+        if member == "color":
+            component_size = 4 if member_format == 7 else 2
+            component_count = 1
         else:
-            raise ValueError(f"Unsupported PSP weight format: {weight_format}")
-
-    if uv_format:
-        cursor = alignPspVertexMember(cursor)
-        offsets["uv"] = cursor
-        if uv_format == 1:
-            cursor += 2
-        elif uv_format == 2:
-            cursor += 4
-        elif uv_format == 3:
-            cursor += 8
-        else:
-            raise ValueError(f"Unsupported PSP UV format: {uv_format}")
-
-    if color_format:
-        cursor = alignPspVertexMember(cursor)
-        offsets["color"] = cursor
-        if color_format in {4, 5, 6}:
-            cursor += 2
-        elif color_format == 7:
-            cursor += 4
-        else:
-            raise ValueError(f"Unsupported PSP color format: {color_format}")
-
-    if normal_format:
-        cursor = alignPspVertexMember(cursor)
-        offsets["normal"] = cursor
-        if normal_format == 1:
-            cursor += 3
-        elif normal_format == 2:
-            cursor += 6
-        elif normal_format == 3:
-            cursor += 12
-        else:
-            raise ValueError(f"Unsupported PSP normal format: {normal_format}")
-
-    if position_format:
-        cursor = alignPspVertexMember(cursor)
-        offsets["position"] = cursor
-        if position_format == 1:
-            cursor += 3
-        elif position_format == 2:
-            cursor += 6
-        elif position_format == 3:
-            cursor += 12
-        else:
-            raise ValueError(f"Unsupported PSP position format: {position_format}")
-
-    stride = alignPspVertexMember(cursor)
-    if stride <= 0:
-        raise ValueError(f"PSP vertex format 0x{int(flags):X} produced an empty vertex layout")
-
+            component_size = (1, 2, 4)[member_format - 1]
+            component_count = weight_count if member == "weights" else 2 if member == "uv" else 3
+        cursor = alignPspVertexMember(cursor, component_size)
+        offsets[member] = cursor
+        cursor += component_size * component_count
+        alignment = max(alignment, component_size)
+    stride = alignPspVertexMember(cursor, alignment)
     return {
-        "flags": int(flags),
-        "uv_format": uv_format,
-        "color_format": color_format,
-        "normal_format": normal_format,
-        "position_format": position_format,
-        "weight_format": weight_format,
+        "flags": flags,
+        "uv_format": formats["uv"],
+        "color_format": formats["color"],
+        "normal_format": formats["normal"],
+        "position_format": formats["position"],
+        "weight_format": formats["weights"],
         "index_format": index_format,
         "weight_count": weight_count,
         "offsets": offsets,
         "stride": stride,
     }
 
+
+def decodePspVector(vertex_data: bytes, offset: int, member_format: int,
+                    count: int, unsigned: bool = False) -> Tuple[float, ...]:
+    if member_format == 1:
+        values = struct.unpack_from('<' + ('B' if unsigned else 'b') * count, vertex_data, offset)
+        divisor = 128.0
+    elif member_format == 2:
+        values = struct.unpack_from('<' + ('H' if unsigned else 'h') * count, vertex_data, offset)
+        divisor = 32768.0
+    elif member_format == 3:
+        values = struct.unpack_from('<' + 'f' * count, vertex_data, offset)
+        divisor = 1.0
+    else:
+        raise ValueError("Invalid PSP component format: %d" % member_format)
+    decoded = tuple(float(value) / divisor for value in values)
+    if not all(math.isfinite(value) for value in decoded):
+        raise ValueError("PSP vertex contains a non-finite component")
+    return decoded
+
+
+def decodePspColor(vertex_data: bytes, offset: int, color_format: int) -> Tuple[int, int, int, int]:
+    if color_format == 7:
+        return struct.unpack_from('<4B', vertex_data, offset)
+    packed = struct.unpack_from('<H', vertex_data, offset)[0]
+    if color_format == 4:
+        return ((packed & 31) * 255 // 31, ((packed >> 5) & 63) * 255 // 63,
+                ((packed >> 11) & 31) * 255 // 31, 255)
+    if color_format == 5:
+        return ((packed & 31) * 255 // 31, ((packed >> 5) & 31) * 255 // 31,
+                ((packed >> 10) & 31) * 255 // 31, 255 if packed & 0x8000 else 0)
+    if color_format == 6:
+        return tuple(((packed >> (channel * 4)) & 15) * 17 for channel in range(4))
+    raise ValueError("Invalid PSP color format: %d" % color_format)
 
 def decodePspWeightValue(vertex_data: bytes, offset: int, weight_format: int) -> float:
     if weight_format == 1:
@@ -2192,6 +2257,15 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
         unk3,
     ) = struct.unpack("<4I4f3fi3fiIf", psp_header)
 
+    if not 0 < num_strips <= 4096 or not 0 < num_verts <= 1000000:
+        raise ValueError("Invalid PSP strip or vertex count")
+    if not 0x48 + num_strips * 0x30 <= offset <= size:
+        raise ValueError("PSP vertex data overlaps the mesh descriptors")
+    if psp_header_offset + size > ctx.file_len:
+        raise ValueError("PSP geometry extends beyond the MDL resource")
+    if not all(math.isfinite(value) for value in (scale_x, scale_y, scale_z, pos_x, pos_y, pos_z)):
+        raise ValueError("PSP geometry contains a non-finite scale or translation")
+
     vertex_layout = buildPspVertexLayout(flags)
     vertex_offsets = dict(vertex_layout["offsets"])
     vertex_stride = int(vertex_layout["stride"])
@@ -2219,64 +2293,9 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
     g.index_format = idxfmt
     g.num_weights_per_vertex = nwght
 
-    known_flag_formats = {0x120, 0x121, 0x115, 0x114, 0xA1, 0x1C321}
-    if flags not in known_flag_formats:
-        ctx.log(f"⚠️ Unknown PSP geometry flags format: 0x{flags:X}")
-        raise Exception(f"Unknown PSP geometry flags format: 0x{flags:X}")
-    else:
-        ctx.log(f"✔ Known PSP geometry flags format: 0x{flags:X}")
-
-    ctx.log("----- Flags Format Case Breakdown -----")
-
-    if uvfmt == 0:
-        ctx.log("  uvfmt   = 0: No UV coordinates (case 0) [OK]")
-    elif uvfmt == 1:
-        ctx.log("  uvfmt   = 1: U8 UVs (case 1) [OK]")
-    else:
-        ctx.log(f"  uvfmt   = {uvfmt}: Unsupported UV format! [ERROR]")
-        raise Exception(f"Unsupported tex coord format (uvfmt={uvfmt})")
-
-    if colfmt == 0:
-        ctx.log("  colfmt  = 0: No vertex color (case 0) [OK]")
-    elif colfmt == 5:
-        ctx.log("  colfmt  = 5: 16-bit RGBA5551 color (case 5) [OK]")
-    else:
-        ctx.log(f"  colfmt  = {colfmt}: Unsupported vertex color format! [ERROR]")
-        raise Exception(f"Unsupported color format (colfmt={colfmt})")
-
-    if normfmt == 0:
-        ctx.log("  normfmt = 0: No normals (case 0) [OK]")
-    elif normfmt == 1:
-        ctx.log("  normfmt = 1: S8 normals (case 1) [OK]")
-    else:
-        ctx.log(f"  normfmt = {normfmt}: Unsupported normal format! [ERROR]")
-        raise Exception(f"Unsupported normal format (normfmt={normfmt})")
-
-    if posfmt == 1:
-        ctx.log("  posfmt  = 1: S8 positions (case 1) [OK]")
-    elif posfmt == 2:
-        ctx.log("  posfmt  = 2: S16 positions (case 2) [OK]")
-    else:
-        ctx.log(f"  posfmt  = {posfmt}: Unsupported vertex position format! [ERROR]")
-        raise Exception(f"Unsupported vertex format (posfmt={posfmt})")
-
-    if wghtfmt == 0:
-        ctx.log("  wghtfmt = 0: No weights/skin [OK]")
-    elif wghtfmt == 1:
-        ctx.log("  wghtfmt = 1: U8 weights/skin [OK]")
-    else:
-        ctx.log(f"  wghtfmt = {wghtfmt}: Unsupported weights format! [ERROR]")
-        raise Exception(f"Unsupported weight format (wghtfmt={wghtfmt})")
-
-    if idxfmt == 0:
-        ctx.log("  idxfmt  = 0: No separate index stream [OK]")
-    else:
-        ctx.log(f"  idxfmt  = {idxfmt}: Unsupported/invalid index format! [ERROR]")
-        raise Exception(f"idxfmt must be 0 (got {idxfmt})")
-
-    ctx.log(f"  nwght   = {nwght}: Number of weights stored in each vertex")
-    ctx.log(f"  layout  = offsets={vertex_offsets}, stride={vertex_stride} bytes")
-    ctx.log("--------------------------------------")
+    if idxfmt:
+        raise ValueError("Leeds PSP mesh descriptors do not describe an indexed vertex stream")
+    ctx.log("PSP VTYPE 0x%X: offsets=%s, stride=%d" % (flags, vertex_offsets, vertex_stride))
 
     ctx.log("----- PSP Geometry Struct -----")
     ctx.log(f"  geometry struct offset  : 0x{geometry_struct_offset:X}")
@@ -2456,44 +2475,23 @@ def read_psp_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesPSPGeo
 
             u_val = 0.0
             v_val = 0.0
-            if uvfmt == 1:
-                uv_offset = int(vertex_offsets["uv"])
-                u_val = float(vertex_data[uv_offset]) / 128.0 * float(mesh["uvScale"][0])
-                v_val = float(vertex_data[uv_offset + 1]) / 128.0 * float(mesh["uvScale"][1])
+            if uvfmt:
+                u, v = decodePspVector(vertex_data, vertex_offsets['uv'], uvfmt, 2, unsigned=True)
+                u_val = u * mesh['uvScale'][0]
+                v_val = v * mesh['uvScale'][1]
                 m.uvs.append((u_val, v_val))
-
             col_val = None
-            if colfmt == 5:
-                color_offset = int(vertex_offsets["color"])
-                col = struct.unpack_from("<H", vertex_data, color_offset)[0]
-                r = (col & 0x1F) * 255 // 0x1F
-                g_c = ((col >> 5) & 0x1F) * 255 // 0x1F
-                b_c = ((col >> 10) & 0x1F) * 255 // 0x1F
-                a_c = 0xFF if (col & 0x8000) else 0
-                col_val = (r, g_c, b_c, a_c)
+            if colfmt:
+                col_val = decodePspColor(vertex_data, vertex_offsets['color'], colfmt)
                 m.colors.append(col_val)
-
             norm_val = None
-            if normfmt == 1:
-                normal_offset = int(vertex_offsets["normal"])
-                nx, ny, nz = struct.unpack_from("<3b", vertex_data, normal_offset)
-                norm_val = (float(nx) / 128.0, float(ny) / 128.0, float(nz) / 128.0)
+            if normfmt:
+                norm_val = decodePspVector(vertex_data, vertex_offsets['normal'], normfmt, 3)
                 m.normals.append(norm_val)
-
-            if posfmt == 1:
-                position_offset = int(vertex_offsets["position"])
-                px_raw, py_raw, pz_raw = struct.unpack_from("<3b", vertex_data, position_offset)
-                px = float(px_raw) / 128.0 * scale_x + pos_x
-                py = float(py_raw) / 128.0 * scale_y + pos_y
-                pz = float(pz_raw) / 128.0 * scale_z + pos_z
-            elif posfmt == 2:
-                position_offset = int(vertex_offsets["position"])
-                px_raw, py_raw, pz_raw = struct.unpack_from("<3h", vertex_data, position_offset)
-                px = float(px_raw) / 32768.0 * scale_x + pos_x
-                py = float(py_raw) / 32768.0 * scale_y + pos_y
-                pz = float(pz_raw) / 32768.0 * scale_z + pos_z
-            else:
-                raise Exception(f"Unsupported PSP position format: {posfmt}")
+            position = decodePspVector(vertex_data, vertex_offsets['position'], posfmt, 3)
+            px = position[0] * scale_x + pos_x
+            py = position[1] * scale_y + pos_y
+            pz = position[2] * scale_z + pos_z
 
             m.verts.append((px, py, pz))
 
@@ -2608,11 +2606,16 @@ class read_stories:
             ctx.local_num_table = read_u32(f)
             ctx.global_num_table = read_u32(f)
 
+            resource_position = f.tell()
+            f.seek(0)
+            resource_probe = probeStoriesResourceHeader(f.read())
+            f.seek(resource_position)
+            if resource_probe and resource_probe['platform'] != platform:
+                raise ValueError("MDL geometry identifies %s, requested %s" % (resource_probe['platform'], platform))
+
             is_psp = platform == "PSP"
 
-            # Early LCS Stories prototype/handheld MDLs use the normal Leeds relocation
-            # prefix but carry PSP-style geometry.  The archive samples consistently
-            # use allocMem=0x10000 at +0x1C and a valid top-level pointer at +0x20.
+
             header_pos = f.tell()
             raw_num_entries = read_u32(f)
             raw_ptr2_before_tex = read_u32(f)
@@ -2660,7 +2663,7 @@ class read_stories:
                 else:
                     f.seek(-4, 1)
                     ctx.num_entries = read_u32(f)
-                    ctx.log("✔ Alternate relocation-table shape detected; treating model class and serialized layout independently.")
+                    ctx.log("✔ Alternate relocation table")
                     if is_psp:
                         f.seek(4, 1)
 
@@ -2669,7 +2672,8 @@ class read_stories:
                 ctx.allocated_memory = read_u32(f)
                 next_ptr_offset = f.tell()
                 possible_ptr = read_u32(f)
-            if str(mdl_type or "").upper().strip() == "VEH" and next_ptr_offset == 0x20:
+            if (str(mdl_type or "").upper().strip() == "VEH" and next_ptr_offset == 0x20
+                    and (not resource_probe or resource_probe['section_kind'] == 'CLUMP')):
                 vehicle_header_pos = f.tell()
                 try:
                     ctx.vehicle_extra_count = read_u32(f)
@@ -2794,6 +2798,11 @@ class read_stories:
             ctx.log(f"Allocated memory: 0x{ctx.allocated_memory:X}")
             ctx.log(f"Top-level pointer or identifier: 0x{ctx.top_level_ptr:X}")
 
+            if resource_probe:
+                ctx.top_level_ptr = resource_probe['top_level_ptr']
+                ctx.inline_clump_header = (ctx.top_level_ptr == 0x20 and resource_probe['section_kind'] == 'CLUMP')
+                ctx.log("Resolved %s %s from referenced geometry at top-level 0x%X." %
+                        (resource_probe['platform'], resource_probe['section_kind'], ctx.top_level_ptr))
             f.seek(ctx.top_level_ptr)
             top_identifier = read_u32(f)
 
@@ -2810,7 +2819,7 @@ class read_stories:
             ctx.section_type = 0
             ctx.import_type = 0
 
-            if top_identifier in (LCSCLUMPPS2, VCSCLUMPPS2):
+            if top_identifier & 0xFF == 2:
                 ctx.section_type = 7
                 if is_psp:
                     if game_hint == "LCS":
@@ -2826,6 +2835,10 @@ class read_stories:
                 else:
                     ctx.import_type = 1 if top_identifier == LCSCLUMPPS2 else 2
                     ctx.game = "LCS" if ctx.import_type == 1 else "VCS"
+            elif is_psp and top_identifier & 0xFF == 1:
+                ctx.section_type = 2
+                ctx.import_type = 1 if game_hint == 'LCS' else 3 if game_hint == 'VCS' else 4
+                ctx.game = game_hint
             elif top_identifier in (LCSATOMIC1, LCSATOMIC2, VCSATOMIC1, VCSATOMIC2):
                 ctx.section_type = 2
                 ctx.import_type = 1 if top_identifier in (LCSATOMIC1, LCSATOMIC2) else 2
@@ -2869,15 +2882,15 @@ class read_stories:
             if ctx.section_type == 2:
                 ctx.log("✔ Detected Section Type: 2 (Atomic)")
 
-                atomic_start = f.tell()
+                atomic_start = f.tell() if atomic_from_clump else ctx.top_level_ptr
+                f.seek(atomic_start)
                 ctx.log(f"Atomic section begins at: 0x{atomic_start:X}")
 
                 if mdl_type == "SIM":
                     if atomic_from_clump:
                         ctx.log("MDL type is Prop: clump-derived atomic start detected, skipped f.seek(-4, 1).")
                     else:
-                        f.seek(-4, 1)
-                        ctx.log("MDL type is Prop: performed f.seek(-4, 1) before reading atomic_id.")
+                        ctx.log("Atomic header uses its resolved start for every model category.")
                 else:
                     ctx.log("MDL type is Ped: did NOT perform f.seek(-4, 1) before reading atomic_id.")
 
@@ -2919,6 +2932,8 @@ class read_stories:
                     ctx.log(f"material_ptr (peek): 0x{material_ptr:X}")
 
                 atomic_info.section_type = ctx.section_type
+                atomic_info.atomic_offset = atomic_start
+                atomic_info.atomic_list_link_offset = atomic_start + 0x1C
                 atomic_info.import_type = ctx.import_type
                 atomic_info.frame_ptr = frame_ptr
                 atomic_info.geom_ptr = geom_ptr
@@ -2929,7 +2944,7 @@ class read_stories:
                 atomic_info.hierarchy_ptr = hierarchy_ptr
 
                 frame_tree_ptr = int(frame_ptr or 0)
-                if str(mdl_type or "").upper().strip() in {"CUT", "VEH"} and int(getattr(ctx, "clump_root_frame_ptr", 0) or 0):
+                if (platform == 'PSP' or str(mdl_type or "").upper().strip() in {"CUT", "VEH"}) and int(getattr(ctx, "clump_root_frame_ptr", 0) or 0):
                     frame_tree_ptr = int(getattr(ctx, "clump_root_frame_ptr", 0) or 0)
                     if str(mdl_type or "").upper().strip() == "CUT":
                         ctx.log(f"Cutscene actor: walking frame tree from Clump.root_frame 0x{frame_tree_ptr:X} instead of Atomic.frame_ptr 0x{frame_ptr:X}.")
@@ -2970,7 +2985,7 @@ class read_stories:
                         ctx.prototype_psp_geometry_header = find_prototype_psp_geometry_header(f, int(ctx.file_len or 0))
                     atomic_info.psp_geometry = read_psp_geometry(ctx, f, geom_ptr)
 
-                if platform == "PS2" and str(mdl_type or "").upper().strip() == "VEH" and int(getattr(ctx, "clump_ptr", 0) or 0):
+                if (platform == 'PSP' or str(mdl_type or "").upper().strip() == "VEH") and int(getattr(ctx, "clump_ptr", 0) or 0):
                     try:
                         vehicle_atomics = readVehicleAtomics(ctx, f, atomic_info.armature)
                         if vehicle_atomics:
@@ -2978,6 +2993,8 @@ class read_stories:
                             ctx.atomic = vehicle_atomics[0]
                             atomic_info = ctx.atomic
                     except Exception as vehicle_error:
+                        if platform == 'PSP':
+                            raise
                         ctx.log(f"⚠ VehicleModel multi-atomic parse failed: {vehicle_error}")
 
                 try:
@@ -3804,11 +3821,8 @@ def trim_ps2_ped_dma_packet_to_byte_length(packet: bytes, target_byte_length: in
     return best
 
 def validate_ps2_dma_vif_payload(payload: bytes, *, vif_profile: str = "SIM") -> None:
-    # The caller's profile is authoritative. SIM and PED packets both begin
-    # with VIF_UNPACK == 0x6C018000 and share the same first 48 bytes, so the
-    # leading opcode cannot distinguish the layouts. Auto-promoting every
-    # 0x6C018000 packet to PED incorrectly rejects valid SIM/SimpleModel data
-    # whose UV UNPACK immediate is 0x808D instead of the PED 0xC055 form.
+
+
     requested_profile = str(vif_profile).upper().strip()
     profile = requested_profile if requested_profile in {"SIM", "PED"} else "SIM"
 
@@ -3818,13 +3832,7 @@ def validate_ps2_dma_vif_payload(payload: bytes, *, vif_profile: str = "SIM") ->
         if len(payload) < 16:
             raise ValueError("PS2 DMA/VIF payload is too short to contain a terminating MSCAL.")
 
-        # SIM packets are padded to a 16-byte DMA qword *after* MSCAL is
-        # emitted.  MSCAL therefore does not have to be the first word of
-        # the final qword; it can legally appear at +0, +4, +8, or +12.
-        # The old validator only checked len(payload)-16, which rejected
-        # untouched retail-compatible packets whenever stream sizes placed
-        # MSCAL later in the last qword.  Accept MSCAL anywhere in that last
-        # qword as long as every byte following it is zero padding.
+
         final_qword = payload[-16:]
         found_terminal_mscal = False
         for offset in range(0, 16, 4):
@@ -3998,9 +4006,31 @@ def validate_dma_ref_packet(packet: bytes, *, vif_profile: str = "SIM") -> None:
             f"DMA REF QWC mismatch: tag says {qwc}, payload needs {expected_qwc} qwords."
         )
 
-    # The payload validator is shape-authoritative and auto-detects Leeds PED
-    # split packets. Keep the caller hint only as a fallback for non-PED data.
+
     validate_ps2_dma_vif_payload(payload, vif_profile=vif_profile)
+
+def choosePs2UvScale(coordinates, source_scale=()):
+
+    result = []
+    for axis in range(2):
+        values = [float(uv[axis]) for uv in coordinates]
+        if any(not math.isfinite(value) for value in values):
+            raise ValueError("UV coordinates must be finite")
+        source = float(source_scale[axis]) if len(source_scale) > axis else 1.0
+        if not math.isfinite(source):
+            source = 1.0
+        if source == 0.0 and not any(values):
+            result.append(0.0)
+            continue
+        if source == 0.0:
+            source = 1.0
+        if values and all(value <= 0.0 for value in values) and any(value < 0.0 for value in values):
+            source = -abs(source)
+        elif values and all(value >= 0.0 for value in values):
+            source = abs(source)
+        extent = max((abs(value) for value in values), default=0.0) / 2.0
+        result.append(math.copysign(max(abs(source), extent), source))
+    return tuple(result)
 
 def build_ps2_dma_for_strip(
     verts: List[Ps2Vertex],
@@ -4014,6 +4044,7 @@ def build_ps2_dma_for_strip(
     vif_profile: str = "SIM",
 
     include_split_header: bool = False,
+    uv_scale_override: Tuple[float, float] = (1.0, 1.0),
 ) -> Tuple[bytearray, ScalePos]:
 
     if max_batch_verts <= 0:
@@ -4084,8 +4115,9 @@ def build_ps2_dma_for_strip(
 
     def encode_uv_bytes(u: float, v: float, flip_v: bool = False) -> bytes:
         export_v = (1.0 - v) if flip_v else v
-        uu = int(apply_round(u * 127.5))
-        vv = int(apply_round(export_v * 127.5))
+        uv_scale_u, uv_scale_v = uv_scale_override
+        uu = int(apply_round(u * 127.5 / uv_scale_u)) if uv_scale_u != 0.0 else 0
+        vv = int(apply_round(export_v * 127.5 / uv_scale_v)) if uv_scale_v != 0.0 else 0
         uu = max(0, min(255, uu))
         vv = max(0, min(255, vv))
         return struct.pack("<BB", uu, vv)
@@ -4102,13 +4134,10 @@ def build_ps2_dma_for_strip(
 
     seg_count = num_verts
     payload = bytearray()
-    # A split-header packet is, by definition in this writer, a Leeds PED
-    # packet.  Treat that as authoritative even if a stale/upstream caller
-    # accidentally passes the default SIM profile.  Mixing a PED split
-    # header with SIM UV/normal/skin UNPACK immediates creates hybrid packets
-    # such as 0x76xx808D, which retail PED parsing rejects.
+
+
     requested_profile = str(vif_profile).upper().strip()
-    is_ped = (requested_profile == "PED") or bool(include_split_header)
+    is_ped = (requested_profile == "PED")
     effective_profile = "PED" if is_ped else "SIM"
     emit_normals = bool(use_normals) or is_ped
 
@@ -4167,21 +4196,33 @@ def build_ps2_dma_for_strip(
     if is_ped:
         tex_header = (0x76 << 24) | ((seg_count & 0xFF) << 16) | 0xC055
     else:
-        tex_header = (0x76 << 24) | ((seg_count & 0xFF) << 16) | 0x808D
+        tex_header = (0x76 << 24) | ((seg_count & 0xFF) << 16) | 0xC048
     payload.extend(write_u32(tex_header))
     for v in verts:
         payload.extend(encode_uv_bytes(v.u, v.v, flip_v=True))
     pad_bytes_to(payload, 4)
 
-    if emit_normals:
-
-        if is_ped:
-            norm_header = (0x6A << 24) | ((seg_count & 0xFF) << 16) | 0x802B
-        else:
-            norm_header = (0x6A << 24) | ((seg_count & 0xFF) << 16) | 0x8047
+    if is_ped and emit_normals:
+        norm_header = (0x6A << 24) | ((seg_count & 0xFF) << 16) | 0x802B
         payload.extend(write_u32(norm_header))
         for v in verts:
             payload.extend(encode_norm_bytes(v.nx, v.ny, v.nz))
+        pad_bytes_to(payload, 4)
+
+    if not is_ped:
+        colour_header = (0x6F << 24) | ((seg_count & 0xFF) << 16) | 0x808F
+        payload.extend(write_u32(colour_header))
+        for v in verts:
+            r = max(0, min(255, int(getattr(v, 'r', 255))))
+            g = max(0, min(255, int(getattr(v, 'g', 255))))
+            b = max(0, min(255, int(getattr(v, 'b', 255))))
+            a = max(0, min(255, int(getattr(v, 'a', 255))))
+            r5 = max(0, min(31, int(round((float(r) / 255.0) * 31.0))))
+            g5 = max(0, min(31, int(round((float(g) / 255.0) * 31.0))))
+            b5 = max(0, min(31, int(round((float(b) / 255.0) * 31.0))))
+            a1 = 1 if a >= 128 else 0
+            packed_colour = (r5 | (g5 << 5) | (b5 << 10) | (a1 << 15)) & 0xFFFF
+            payload.extend(struct.pack('<H', packed_colour))
         pad_bytes_to(payload, 4)
 
     def _encode_skin_payload(v: Ps2Vertex) -> bytes:
@@ -4239,25 +4280,51 @@ def build_ps2_dma_for_strip(
         raw_fallback = raw_skin_bytes_or_none()
         meaningful_generated_weights = any(p[1] > 1.0e-8 for p in pairs)
 
-        generated_is_root_placeholder = False
-        if meaningful_generated_weights:
-            nonzero_pairs = [(bi, wt) for bi, wt in pairs if wt > 1.0e-8]
-            if len(nonzero_pairs) == 1 and int(nonzero_pairs[0][0]) == 0 and raw_fallback is not None:
-                generated_is_root_placeholder = True
 
-        if (not meaningful_generated_weights or generated_is_root_placeholder) and raw_fallback is not None:
+        if raw_fallback is not None and meaningful_generated_weights:
+            try:
+                raw_values = list(raw_dwords)[:4]
+                raw_accum = {}
+                for raw_value in raw_values:
+                    raw_node, raw_weight = _decode_ps2_ped_skin_word(int(raw_value))
+                    if raw_weight > 1.0e-8:
+                        raw_accum[int(raw_node)] = raw_accum.get(int(raw_node), 0.0) + float(raw_weight)
+
+                generated_accum = {}
+                for generated_node, generated_weight in pairs:
+                    if generated_weight > 1.0e-8:
+                        generated_accum[int(generated_node)] = generated_accum.get(int(generated_node), 0.0) + float(generated_weight)
+
+
+                raw_total = sum(raw_accum.values())
+                generated_total = sum(generated_accum.values())
+                if raw_total > 1.0e-8:
+                    raw_accum = {node: weight / raw_total for node, weight in raw_accum.items()}
+                if generated_total > 1.0e-8:
+                    generated_accum = {node: weight / generated_total for node, weight in generated_accum.items()}
+                same_nodes = set(raw_accum.keys()) == set(generated_accum.keys())
+                same_weights = same_nodes and all(
+                    abs(float(raw_accum[node]) - float(generated_accum[node])) <= 1.0e-5
+                    for node in raw_accum.keys()
+                )
+                if same_weights:
+                    return raw_fallback
+            except Exception:
+                pass
+
+        if not meaningful_generated_weights and raw_fallback is not None:
             return raw_fallback
+
 
         pairs.sort(key=lambda p: p[1], reverse=True)
-        total_w = sum(p[1] for p in pairs)
-        if total_w > 1.0e-8:
-            inv = 1.0 / total_w
-            for p in pairs:
-                p[1] *= inv
-        elif raw_fallback is not None:
-            return raw_fallback
-        else:
+        pairs = pairs[:4]
+        total = sum(p[1] for p in pairs if p[1] > 1.0e-8)
+        if total <= 1.0e-8:
+            if raw_fallback is not None:
+                return raw_fallback
             pairs = [[0, 1.0], [0, 0.0], [0, 0.0], [0, 0.0]]
+        else:
+            pairs = [[bi, wt / total if wt > 1.0e-8 else 0.0] for bi, wt in pairs]
 
         while len(pairs) < 4:
             pairs.append([0, 0.0])
@@ -4268,11 +4335,7 @@ def build_ps2_dma_for_strip(
             out_skin.extend(struct.pack('<I', raw_word))
         return bytes(out_skin)
 
-    has_skin_stream = is_ped or any(
-        any(int(b) != 0 for b in (getattr(v, 'bone_indices', (0, 0, 0, 0)) or (0, 0, 0, 0))) or
-        any(abs(float(w)) > 1.0e-8 for w in (getattr(v, 'bone_weights', (0.0, 0.0, 0.0, 0.0)) or (0.0, 0.0, 0.0, 0.0)))
-        for v in verts
-    )
+    has_skin_stream = is_ped
     if has_skin_stream:
 
         if is_ped:
@@ -4286,10 +4349,8 @@ def build_ps2_dma_for_strip(
     payload.extend(write_u32(VIF_MSCAL))
 
     pad_bytes_to(payload, 16)
-    # Validate the packet using the profile actually emitted above.  A PED
-    # split packet can legally place MSCAL before padding within its final
-    # qword; validating it as SIM produces the false
-    # "does not end with MSCAL on a qword boundary" error.
+
+
     validate_ps2_dma_vif_payload(payload, vif_profile=effective_profile)
     qwc_total = len(payload) // 16
     if qwc_total > 0xFFFF:
@@ -4423,16 +4484,7 @@ def finalize_mdl_header_ped_ps2(
     struct.pack_into("<I", buf, header.local_num_off, int(local_num_offset) & 0xFFFFFFFF)
     struct.pack_into("<I", buf, header.global_num_off, int(global_num_offset) & 0xFFFFFFFF)
 
-    # Retail PS2 PED/Clump MDLs use the split relocation-table form:
-    #   local_numTable  -> one DWORD root offset
-    #   global_numTable -> one DWORD local-table self pointer, followed by
-    #                      the relocatable pointer-field offsets
-    #
-    # Header numEntries counts DWORDs beginning at global_numTable, so the
-    # bookkeeping/self DWORD IS part of the declared count. The previous
-    # exporter wrote only len(pointer_fields), which caused the EE relocation
-    # loop to stop one row early. Depending on ordering, Atomic.hierarchy_ptr
-    # was left file-relative and the game immediately walked an invalid pointer.
+
     declared_relocation_dwords = int(pointer_count) + 1
     struct.pack_into(
         "<I",
@@ -4486,10 +4538,7 @@ def write_pointer_tables_ped_ps2(
 
     forced_fields = list(required_fields or [])
 
-    # PS2 PED local root points at Atomic +0x24. The hierarchy pointer is
-    # Atomic +0x2C, so it is always root_offset + 8. Derive the hierarchy
-    # anchor relocation here, at the final serializer, instead of depending
-    # on an earlier builder variable surviving every export path.
+
     try:
         atomic_hierarchy_field = int(root_offset) + 8
         if 0 <= atomic_hierarchy_field and atomic_hierarchy_field + 4 <= len(buf):
@@ -4518,8 +4567,7 @@ def write_pointer_tables_ped_ps2(
 
     pointer_fields[:] = normalized_fields
 
-    # The hierarchy anchor must be present in the exact list that is about to
-    # be serialized. Refuse to produce another count-minus-one PED MDL.
+
     try:
         atomic_hierarchy_field = int(root_offset) + 8
         hierarchy_offset = struct.unpack_from("<I", buf, atomic_hierarchy_field)[0]
@@ -5648,18 +5696,379 @@ def _should_place_ps2_ped_materials_after_geometry(
     predicted_sectors = (predicted_total + (sector_size - 1)) // sector_size
     return predicted_sectors <= target_small_file_sectors
 
+def validate_simplemodel_ps2_prop_bytes(data: bytes) -> Dict[str, Any]:
+    if not isinstance(data, (bytes, bytearray)):
+        raise TypeError("SimpleModel data must be bytes-like")
+    raw = bytes(data)
+    if len(raw) < 0x1B0:
+        raise RuntimeError("PS2 SimpleModel header is truncated")
+    if raw[0:4] != b"ldm\x00":
+        raise RuntimeError("PS2 SimpleModel signature is not 'ldm\\0'")
+
+    logical_len = struct.unpack_from("<I", raw, 0x08)[0]
+    local_table = struct.unpack_from("<I", raw, 0x0C)[0]
+    global_table = struct.unpack_from("<I", raw, 0x10)[0]
+    pointer_count = struct.unpack_from("<I", raw, 0x14)[0]
+    ptr2_before_tex = struct.unpack_from("<I", raw, 0x18)[0]
+    top_atomic = struct.unpack_from("<I", raw, 0x20)[0]
+
+    if logical_len <= 0 or logical_len > len(raw):
+        raise RuntimeError(f"PS2 SimpleModel logical length 0x{logical_len:X} is outside the file")
+    if top_atomic != 0xE0:
+        raise RuntimeError(f"PS2 SimpleModel top Atomic pointer must be 0xE0, got 0x{top_atomic:X}")
+    if local_table <= 0 or global_table <= 0 or local_table >= logical_len or global_table >= logical_len:
+        raise RuntimeError("PS2 SimpleModel relocation table offsets are outside the logical file")
+    if global_table + 4 + pointer_count * 4 > logical_len:
+        raise RuntimeError("PS2 SimpleModel relocation pointer list extends beyond the logical file")
+    expected_ptr2 = global_table + 4 + max(0, pointer_count - 1) * 4
+    if ptr2_before_tex != expected_ptr2:
+        raise RuntimeError(
+            f"PS2 SimpleModel ptr2_before_tex mismatch: expected 0x{expected_ptr2:X}, got 0x{ptr2_before_tex:X}"
+        )
+
+    atomic_magic = struct.unpack_from("<I", raw, 0xE0)[0]
+    geometry_ptr = struct.unpack_from("<I", raw, 0xF4)[0]
+    if atomic_magic != 0x0004AA01:
+        raise RuntimeError(f"PS2 SimpleModel Atomic1 magic is invalid: 0x{atomic_magic:08X}")
+    if geometry_ptr != 0x120:
+        raise RuntimeError(f"PS2 SimpleModel Atomic geometry pointer must be 0x120, got 0x{geometry_ptr:X}")
+
+    geom_off = geometry_ptr
+    global_off = geom_off + 0x20
+    part_count = (struct.unpack_from("<I", raw, global_off + 0x10)[0] >> 20) & 0xFFF
+    first_dma_rel = struct.unpack_from("<H", raw, global_off + 0x1A)[0]
+    dma_start = global_off + first_dma_rel
+    if part_count <= 0:
+        raise RuntimeError("PS2 SimpleModel contains no geometry parts")
+    if dma_start < 0x180 + part_count * 0x30 or dma_start >= logical_len or (dma_start & 0x0F):
+        raise RuntimeError("PS2 SimpleModel DMA start is invalid or not qword aligned")
+
+    material_count = struct.unpack_from("<I", raw, geom_off + 0x10)[0]
+    material_ptr_array = struct.unpack_from("<I", raw, geom_off + 0x0C)[0]
+    if material_count <= 0:
+        raise RuntimeError("PS2 SimpleModel contains no materials")
+    if material_ptr_array <= dma_start or material_ptr_array + material_count * 4 > logical_len:
+        raise RuntimeError("PS2 SimpleModel material pointer array is outside the post-DMA material area")
+
+    pointer_fields = []
+    cursor = global_table + 4
+    for _ in range(pointer_count):
+        field_off = struct.unpack_from("<I", raw, cursor)[0]
+        cursor += 4
+        if field_off + 4 > logical_len:
+            raise RuntimeError(f"PS2 SimpleModel relocation field 0x{field_off:X} is outside the logical file")
+        pointer_fields.append(field_off)
+
+    required_fields = {
+        0x20, 0x38, 0x3C, 0xC8,
+        0xE4, 0xE8, 0xEC, 0xF4,
+        0x104,
+        geom_off + 0x0C,
+    }
+    missing = sorted(required_fields.difference(pointer_fields))
+    if missing:
+        raise RuntimeError("PS2 SimpleModel relocation list is missing required fields: " + ", ".join(f"0x{x:X}" for x in missing))
+
+    for material_index in range(material_count):
+        slot_off = material_ptr_array + material_index * 4
+        desc_off = struct.unpack_from("<I", raw, slot_off)[0]
+        if desc_off <= dma_start or desc_off + 0x10 > logical_len:
+            raise RuntimeError(f"PS2 SimpleModel material {material_index} descriptor pointer is invalid")
+        string_off = struct.unpack_from("<I", raw, desc_off)[0]
+        if string_off <= 0 or string_off >= logical_len:
+            raise RuntimeError(f"PS2 SimpleModel material {material_index} texture string pointer is invalid")
+        if raw.find(b"\x00", string_off, logical_len) < 0:
+            raise RuntimeError(f"PS2 SimpleModel material {material_index} texture string is unterminated")
+        if slot_off not in pointer_fields or desc_off not in pointer_fields:
+            raise RuntimeError(f"PS2 SimpleModel material {material_index} pointers are missing relocation entries")
+
+    dma_cursor = dma_start
+    for part_index in range(part_count):
+        part_off = 0x180 + part_index * 0x30
+        rel = struct.unpack_from("<I", raw, part_off + 0x1C)[0]
+        packet_off = dma_start + rel
+        if packet_off < dma_start or packet_off + 16 > material_ptr_array:
+            raise RuntimeError(f"PS2 SimpleModel part {part_index} DMA offset is outside the DMA area")
+        tag = struct.unpack_from("<I", raw, packet_off)[0]
+        qwc = tag & 0xFFFF
+        packet_end = packet_off + 16 + qwc * 16
+        if (tag & 0x70000000) != 0x60000000:
+            raise RuntimeError(f"PS2 SimpleModel part {part_index} does not begin with a RET DMA tag")
+        if packet_end > material_ptr_array:
+            raise RuntimeError(f"PS2 SimpleModel part {part_index} DMA packet overruns the material area")
+        validate_dma_ref_packet(raw[packet_off:packet_end], vif_profile="SIM")
+        dma_cursor = max(dma_cursor, packet_end)
+
+    return {
+        "logical_len": int(logical_len),
+        "geometry_ptr": int(geometry_ptr),
+        "part_count": int(part_count),
+        "material_count": int(material_count),
+        "dma_start": int(dma_start),
+        "dma_end": int(dma_cursor),
+        "material_ptr_array": int(material_ptr_array),
+        "pointer_count": int(pointer_count),
+    }
+
+
+def build_simplemodel_ps2_prop_bytes(
+    scale_pos,
+    dma_packets: List[bytes],
+    material_names: List[str],
+    atomic_hash_key: int = 0x01093DC8,
+    material_vcols: Optional[List[int]] = None,
+    bounds: Optional[Tuple[float, float, float, float]] = None,
+    part_headers: Optional[List[Dict[str, Any]]] = None,
+    vertex_section_flags: Optional[int] = None,
+    model_info_id: int = -1,
+    vis_id_flag: int = 0,
+) -> Tuple[bytes, Dict[str, Any]]:
+    packets = [bytes(packet) for packet in list(dma_packets or [])]
+    if not packets:
+        raise RuntimeError("PS2 SimpleModel export has no DMA packets")
+    for packet_index, packet in enumerate(packets):
+        if len(packet) < 16 or (len(packet) & 0x0F):
+            raise RuntimeError(f"PS2 SimpleModel DMA packet {packet_index} is not qword aligned")
+        validate_dma_ref_packet(packet, vif_profile="SIM")
+
+    headers = [dict(h or {}) for h in list(part_headers or [])]
+    if len(headers) != len(packets):
+        raise RuntimeError(
+            f"PS2 SimpleModel part metadata count ({len(headers)}) does not match DMA packet count ({len(packets)})"
+        )
+
+    clean_material_names = [str(name or "default") for name in list(material_names or [])]
+    if not clean_material_names:
+        clean_material_names = ["default"]
+
+    max_tex_id = 0
+    for header in headers:
+        max_tex_id = max(max_tex_id, int(header.get("tex_id", 0) or 0))
+    while len(clean_material_names) <= max_tex_id:
+        clean_material_names.append(clean_material_names[-1] if clean_material_names else "default")
+
+    if material_vcols is None:
+        material_vcols = []
+    vcols = [int(value) & 0xFFFFFFFF for value in list(material_vcols)]
+    while len(vcols) < len(clean_material_names):
+        vcols.append(0xFF959595)
+
+    HEADER_SIZE = 0x24
+    ATOMIC2_OFF = 0x30
+    MATRICES_OFF = 0x40
+    ATOMIC1_OFF = 0xE0
+    GEOM_HDR_OFF = 0x120
+    GLOBAL_GEOM_HDR_OFF = 0x140
+    PART_TABLE_OFF = 0x180
+    PART_HEADER_SIZE = 0x30
+    DMA_START_OFF = (PART_TABLE_OFF + len(packets) * PART_HEADER_SIZE + 0x0F) & ~0x0F
+
+    out = bytearray(b"\x00" * DMA_START_OFF)
+    out[0:4] = b"ldm\x00"
+    struct.pack_into("<I", out, 0x04, 0)
+    struct.pack_into("<I", out, 0x08, 0)
+    struct.pack_into("<I", out, 0x0C, 0)
+    struct.pack_into("<I", out, 0x10, 0)
+    struct.pack_into("<I", out, 0x14, 0)
+    struct.pack_into("<I", out, 0x18, 0)
+    struct.pack_into("<I", out, 0x1C, 0x00010000)
+    struct.pack_into("<I", out, 0x20, ATOMIC1_OFF)
+
+    struct.pack_into("<I", out, ATOMIC2_OFF + 0x00, 0x0300AA00)
+    struct.pack_into("<I", out, ATOMIC2_OFF + 0x04, 0)
+    struct.pack_into("<I", out, ATOMIC2_OFF + 0x08, ATOMIC1_OFF + 0x08)
+    struct.pack_into("<I", out, ATOMIC2_OFF + 0x0C, ATOMIC1_OFF + 0x08)
+
+    identity = bytearray()
+    resolve_texture_name_identity(identity, ATOMIC2_OFF)
+    if len(identity) > (ATOMIC1_OFF - MATRICES_OFF):
+        raise RuntimeError("PS2 SimpleModel identity matrix block exceeds the retail Atomic boundary")
+    out[MATRICES_OFF:MATRICES_OFF + len(identity)] = identity
+
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x00, 0x0004AA01)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x04, ATOMIC2_OFF)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x08, ATOMIC2_OFF + 0x08)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x0C, ATOMIC2_OFF + 0x08)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x10, 0)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x14, GEOM_HDR_OFF)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x18, 0)
+    hash_key = int(atomic_hash_key) & 0xFFFFFFFF
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x1C, hash_key)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x20, hash_key)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x24, 0)
+    encoded_model_id = 0xFFFF if int(model_info_id) < 0 else (int(model_info_id) & 0xFFFF)
+    packed_model_vis = ((int(vis_id_flag) & 0xFFFF) << 16) | encoded_model_id
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x28, packed_model_vis)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x2C, 0)
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x30, 0)
+
+    material_count = len(clean_material_names)
+    struct.pack_into("<8I", out, GEOM_HDR_OFF,
+                     8, 0, 1, 0,
+                     material_count, 0x10, 0, 0)
+
+    sx, sy, sz = [float(v) for v in scale_pos.scale]
+    tx, ty, tz = [float(v) for v in scale_pos.pos]
+
+    def clamp_i16(value: int) -> int:
+        return max(-32768, min(32767, int(value)))
+
+    def union_bbox() -> List[int]:
+        mins = [32767, 32767, 32767]
+        maxs = [-32768, -32768, -32768]
+        found = False
+        for header in headers:
+            bbox = list(header.get("bbox_i16", []) or [])
+            if len(bbox) < 6:
+                continue
+            found = True
+            for axis in range(3):
+                mins[axis] = min(mins[axis], clamp_i16(bbox[axis]))
+                maxs[axis] = max(maxs[axis], clamp_i16(bbox[axis + 3]))
+        return mins + maxs if found else [0, 0, 0, 0, 0, 0]
+
+    if bounds is not None and len(bounds) >= 4:
+        global_sphere = tuple(float(v) for v in bounds[:4])
+    else:
+        spheres = [list(h.get("sphere", []) or []) for h in headers]
+        first = next((s for s in spheres if len(s) >= 4), None)
+        global_sphere = tuple(float(v) for v in first[:4]) if first else (0.0, 0.0, 0.0, 0.0)
+
+    logical_vertex_total = 0
+    for header in headers:
+        logical_vertex_total += max(0, int(header.get("runtime_vertex_count", header.get("emitted_runtime_vertex_count", 0)) or 0))
+    if logical_vertex_total > 0xFFFF:
+        raise RuntimeError(f"PS2 SimpleModel logical vertex count {logical_vertex_total} exceeds the 16-bit retail field")
+
+    global_flags = int(vertex_section_flags if vertex_section_flags is not None else 0x0D) & 0xFFFFFFFF
+    struct.pack_into("<4f", out, GLOBAL_GEOM_HDR_OFF + 0x00, *global_sphere)
+    struct.pack_into("<I", out, GLOBAL_GEOM_HDR_OFF + 0x10, 0)
+    struct.pack_into("<I", out, GLOBAL_GEOM_HDR_OFF + 0x14, global_flags)
+    struct.pack_into("<H", out, GLOBAL_GEOM_HDR_OFF + 0x18, logical_vertex_total & 0xFFFF)
+    struct.pack_into("<H", out, GLOBAL_GEOM_HDR_OFF + 0x1A, (DMA_START_OFF - GLOBAL_GEOM_HDR_OFF) & 0xFFFF)
+    struct.pack_into("<6h", out, GLOBAL_GEOM_HDR_OFF + 0x1C, *[clamp_i16(v) for v in union_bbox()])
+    struct.pack_into("<3f", out, GLOBAL_GEOM_HDR_OFF + 0x28, sx, sy, sz)
+    struct.pack_into("<3f", out, GLOBAL_GEOM_HDR_OFF + 0x34, tx, ty, tz)
+
+    dma_rel_offsets: List[int] = []
+    dma_cursor = 0
+    for packet in packets:
+        dma_rel_offsets.append(dma_cursor)
+        dma_cursor += len(packet)
+
+    for part_index, header in enumerate(headers):
+        part_off = PART_TABLE_OFF + part_index * PART_HEADER_SIZE
+        sphere = list(header.get("sphere", global_sphere) or global_sphere)
+        while len(sphere) < 4:
+            sphere.append(0.0)
+        bbox = list(header.get("bbox_i16", [0, 0, 0, 0, 0, 0]) or [0, 0, 0, 0, 0, 0])
+        while len(bbox) < 6:
+            bbox.append(0)
+        flags = int(header.get("flags", 0x19) or 0x19) & 0xFFFFFFFF
+        if flags == 0x10:
+            flags = 0x19
+        tri_count = int(header.get("strip_vertex_count", 0) or 0)
+        if tri_count < 0 or tri_count > 0xFFFF:
+            raise RuntimeError(f"PS2 SimpleModel part {part_index} triangle count {tri_count} exceeds the 16-bit retail field")
+        tex_id = int(header.get("tex_id", 0) or 0)
+        if tex_id < 0 or tex_id >= material_count:
+            raise RuntimeError(f"PS2 SimpleModel part {part_index} references invalid material {tex_id}")
+
+        struct.pack_into("<4f", out, part_off + 0x00, *[float(v) for v in sphere[:4]])
+        struct.pack_into("<2f", out, part_off + 0x10,
+                         float(header.get("uv_scale_u", 1.0)), float(header.get("uv_scale_v", 1.0)))
+        struct.pack_into("<I", out, part_off + 0x18, flags)
+        struct.pack_into("<I", out, part_off + 0x1C, dma_rel_offsets[part_index])
+        struct.pack_into("<H", out, part_off + 0x20, tri_count & 0xFFFF)
+        struct.pack_into("<H", out, part_off + 0x22, tex_id & 0xFFFF)
+        struct.pack_into("<6h", out, part_off + 0x24, *[clamp_i16(v) for v in bbox[:6]])
+
+    for packet in packets:
+        out.extend(packet)
+    if len(out) & 0x0F:
+        raise RuntimeError("PS2 SimpleModel DMA area ended off a qword boundary")
+
+    dma_end = len(out)
+    geom_section_size = dma_end - GLOBAL_GEOM_HDR_OFF
+    if geom_section_size > 0xFFFFF:
+        raise RuntimeError("PS2 SimpleModel geometry section exceeds the retail 20-bit size field")
+    packed_size_and_part_count = ((len(packets) & 0xFFF) << 20) | (geom_section_size & 0xFFFFF)
+    struct.pack_into("<I", out, GLOBAL_GEOM_HDR_OFF + 0x10, packed_size_and_part_count)
+
+    material_descriptor_offsets: List[int] = []
+    for material_index in range(material_count):
+        material_descriptor_offsets.append(len(out))
+        out.extend(struct.pack("<IIII", 0, int(vcols[material_index]) & 0xFFFFFFFF, 2, 0))
+
+    material_ptr_array_off = len(out)
+    for descriptor_off in material_descriptor_offsets:
+        out.extend(struct.pack("<I", descriptor_off))
+    struct.pack_into("<I", out, GEOM_HDR_OFF + 0x0C, material_ptr_array_off)
+
+    pointer_fields = [
+        0x38, 0x3C, 0xC8,
+        0xE4, 0xE8, 0xEC, 0xF4,
+        GEOM_HDR_OFF + 0x0C,
+        0x20,
+
+
+        0x104,
+    ]
+    pointer_fields.extend(material_descriptor_offsets)
+    pointer_fields.extend(material_ptr_array_off + material_index * 4 for material_index in range(material_count))
+    pointer_fields = list(dict.fromkeys(int(value) for value in pointer_fields))
+
+    relocation_table_off = len(out)
+    ptr2_before_tex_off = relocation_table_off + 4 + max(0, len(pointer_fields) - 1) * 4
+    out.extend(struct.pack("<I", ptr2_before_tex_off))
+    for field_off in pointer_fields:
+        out.extend(struct.pack("<I", field_off))
+
+    texture_string_offsets: List[int] = []
+    for material_index, material_name in enumerate(clean_material_names):
+        texture_string_offsets.append(len(out))
+        out.extend(material_name.encode("ascii", errors="replace") + b"\x00")
+        struct.pack_into("<I", out, material_descriptor_offsets[material_index], texture_string_offsets[-1])
+
+    struct.pack_into("<I", out, 0x0C, relocation_table_off)
+    struct.pack_into("<I", out, 0x10, relocation_table_off)
+    struct.pack_into("<I", out, 0x14, len(pointer_fields))
+    struct.pack_into("<I", out, 0x18, ptr2_before_tex_off)
+    logical_len = len(out)
+    struct.pack_into("<I", out, 0x08, logical_len)
+
+    validation = validate_simplemodel_ps2_prop_bytes(bytes(out))
+
+    sector_pad = (0x800 - (len(out) % 0x800)) % 0x800
+    if sector_pad:
+        out.extend(b"\x00" * sector_pad)
+
+    context = {
+        "material_names": list(clean_material_names),
+        "part_headers": list(headers),
+        "pointer_offsets_hint": list(pointer_fields),
+        "local_num_offset": int(relocation_table_off),
+        "global_num_offset": int(relocation_table_off),
+        "ptr2_before_tex_offset": int(ptr2_before_tex_off),
+        "validation": dict(validation),
+    }
+    return bytes(out), context
+
+
 def write_simplemodel_ps2_prop_mdl(
     filepath: str,
     scale_pos,
     dma_packets: List[bytes],
     material_names: List[str],
-    atomic_hash_key: int = 0,
+    atomic_hash_key: int = 0x01093DC8,
     material_vcols: Optional[List[int]] = None,
     bounds: Optional[Tuple[float, float, float, float]] = None,
     unknown_geom_ints: Optional[List[int]] = None,
     geom_block_override: Optional[bytes] = None,
     part_headers: Optional[List[Dict[str, Any]]] = None,
     vertex_section_flags: Optional[int] = None,
+    model_info_id: int = -1,
+    vis_id_flag: int = 0,
 ) -> None:
 
     if not material_names:
@@ -5722,7 +6131,9 @@ def write_simplemodel_ps2_prop_mdl(
     struct.pack_into("<I", out, ATOMIC1_OFF + 0x20, hk)
 
     struct.pack_into("<I", out, ATOMIC1_OFF + 0x24, 0)
-    struct.pack_into("<I", out, ATOMIC1_OFF + 0x28, GEOM_HDR_OFF)
+    encoded_model_id = 0xFFFF if int(model_info_id) < 0 else (int(model_info_id) & 0xFFFF)
+    packed_model_vis = ((int(vis_id_flag) & 0xFFFF) << 16) | encoded_model_id
+    struct.pack_into("<I", out, ATOMIC1_OFF + 0x28, packed_model_vis)
 
     struct.pack_into("<I", out, ATOMIC1_OFF + 0x2C, 0)
     struct.pack_into("<I", out, ATOMIC1_OFF + 0x30, 0)
@@ -6066,6 +6477,7 @@ def write_simplemodel_ps2_prop_mdl(
             "local_num_offset": int(local_num_table_off),
             "global_num_offset": int(global_num_table_off),
             "ptr2_before_tex_offset": int(ptr2_before_tex_off),
+            "simplemodel_layout": "JANUARY_RETAIL_SCAFFOLD",
         },
     )
 
@@ -6340,12 +6752,7 @@ def _build_ps2_ped_header_material_entry_ptrs(
     if not rebuilt:
         rebuilt = list(offsets[:3])
 
-    # The PS2 PED container header always exposes three relocatable material
-    # helper pointer slots at 0x28/0x2C/0x30.  If the edited model has fewer
-    # than three distinct material descriptors (common after Blender Separate),
-    # those slots must alias the last valid descriptor rather than become NULL.
-    # A NULL here is illegal because all three header fields are present in the
-    # PED relocation table.
+
     if rebuilt:
         last_valid = 0
         for value in rebuilt:
@@ -7122,9 +7529,8 @@ def _append_ps2_ped_frames_from_armature(
                     world_by_name[canon] = world_mats[idx]
                 if idx < len(local_mats) and canon not in local_by_name:
                     local_by_name[canon] = local_mats[idx]
-        # When exporting an edited/custom rig, live Blender rest matrices are the
-        # authority. Never seed the canned VCS runtime skeleton into that path;
-        # doing so mixes two bind spaces and can rotate/offset the rebuilt PED.
+
+
         if prefer_live_armature_bind_matrices:
             policy = 'live_armature_rest_no_default_seed'
         else:
@@ -7150,11 +7556,8 @@ def _append_ps2_ped_frames_from_armature(
             live_m = bone.matrix_local.copy()
             if getattr(live_m, 'size', 4) != 4:
                 live_m = live_m.to_4x4()
-            # Leeds frame globals are model/armature-local, not Blender world
-            # matrices. Object placement belongs to the scene and must never be
-            # baked into an exported MDL skeleton. Custom mesh export is also
-            # normalized to armature object space, so this keeps both sides in
-            # the same coordinate system.
+
+
             return live_m
         except Exception:
             return None
@@ -7335,11 +7738,8 @@ def _append_ps2_ped_frames_from_armature(
     def _bone_local_matrix(bone: Any) -> Optional[Matrix]:
 
         if prefer_live_armature_bind_matrices:
-            # Rebuilt PEDs are emitted with the canonical Leeds parent graph.
-            # Returning Blender's current parent-relative local matrix here
-            # would be wrong if an artist changed bone parenting. Keep the live
-            # armature-space global matrix and derive local transforms later
-            # from the canonical exported parent.
+
+
             return None
 
         if preserve_imported_frame_matrices:
@@ -7484,10 +7884,8 @@ def _append_ps2_ped_frames_from_armature(
         base_helper_name = _source_frame_name_from_bone(base_helper_bone, base_helper_name)
     base_helper_matrix, base_helper_local_matrix = _source_matrix_pair_for_bone(base_helper_bone)
     if base_helper_bone is None:
-        # An edited/custom armature must not inherit a hard-coded retail VCS
-        # helper transform. Use the normalized scene-root basis. The canned
-        # helper is only a compatibility fallback for an unedited VCS import
-        # whose original helper metadata is unavailable.
+
+
         if prefer_live_armature_bind_matrices:
             base_helper_matrix = root_helper_matrix.copy()
             base_helper_local_matrix = root_helper_matrix.copy()
@@ -7657,7 +8055,7 @@ def _append_ps2_ped_frames_from_armature(
     for node_index, node_off in enumerate(node_offsets):
         if node_off < 0 or node_off + node_size > len(buf):
             raise ValueError(
-                f"PED frame {node_index} points outside the serialized frame region: 0x{node_off:X}"
+                f"PED frame {node_index} points outside the frame data: 0x{node_off:X}"
             )
 
     if pending_frame_names is None:
@@ -8122,8 +8520,8 @@ def _ped_known_hanim_maps(import_type_hint: Optional[int]) -> Tuple[Dict[str, in
             "bip01_r_clavicle", "r_upperarm", "r_forearm", "r_hand", "r_finger", "l_thigh",
             "l_calf", "l_foot", "l_toe0", "r_thigh", "r_calf", "r_foot", "r_toe0",
         )
-        # VCS PS2 retail PLR/PED runtime HAnim IDs.  The previous custom
-        # mapping was not the mapping present in the retail VCS player model.
+
+
         bone_ids = (
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
             0x06, 0x1F, 0x20, 0x21, 0x22, 0x23,
@@ -8164,9 +8562,8 @@ def _ped_ps2_runtime_hierarchy_maps(import_type_hint: Optional[int]) -> Tuple[Di
             "bip01_r_clavicle", "r_upperarm", "r_forearm", "r_hand", "r_finger",
             "l_thigh", "l_calf", "l_foot", "l_toe0", "r_thigh", "r_calf", "r_foot", "r_toe0",
         )
-        # Runtime RslTAnim/HAnim IDs in canonical VCS PS2 retail node order.
-        # These values were verified against the original retail plr.mdl rather
-        # than inferred from a custom export.
+
+
         bone_ids = (
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05,
             0x06, 0x1F, 0x20, 0x21, 0x22, 0x23,
@@ -8267,8 +8664,7 @@ def _collect_ps2_ped_hanim_entries(
     ordered_bones: List[Any] = []
     seen_bones = set()
 
-    # Standard Stories PEDs use compact hierarchy node order. Preserve it even
-    # if Blender internally reordered bones or the artist renamed collections.
+
     for canon_name in known_order:
         bone = canon_to_bone.get(canon_frame_name(canon_name))
         if bone is None:
@@ -8279,8 +8675,7 @@ def _collect_ps2_ped_hanim_entries(
         ordered_bones.append(bone)
         seen_bones.add(marker)
 
-    # Keep non-standard helper/extra bones deterministic without allowing them
-    # to disturb the canonical node indices above.
+
     for bone in _depth_first_bone_order(root_bones or bones[:1], child_map):
         marker = id(bone)
         if marker in seen_bones:
@@ -8328,9 +8723,7 @@ def _collect_ps2_ped_hanim_entries(
         canon = canon_frame_name(export_name)
         children = child_map.get(str(getattr(bone, 'name', '')), []) or []
 
-        # Standard VCS PED nodes must use the runtime HAnim ID namespace.
-        # Do not serialize semantic IDs (or the old 2000/2001 toe placeholders)
-        # into this field. Imported metadata remains useful for non-standard nodes.
+
         if canon in fallback_id_map and int(import_type_hint or 0) in (2, 3):
             bone_id = fallback_id_map.get(canon)
         else:
@@ -8630,9 +9023,7 @@ def _build_ps2_ped_hierarchy_header_info(
     source_by_offset = source_nodes.get("by_offset") if isinstance(source_nodes, dict) else {}
     preferred_canon_name = ""
 
-    # The Atomic frame pointer is the authoritative source for the hierarchy
-    # node/anchor pointer.  Preserve its semantic target across rebuilds rather
-    # than falling back to the first/root frame.
+
     atomic_frame_ptr = _ped_template_meta_u32(meta, "atomic_frame_ptr", "bleeds_mdl_atomic_frame_ptr")
     if isinstance(source_by_offset, dict) and atomic_frame_ptr:
         atomic_node = source_by_offset.get(int(atomic_frame_ptr))
@@ -10267,10 +10658,7 @@ def validate_ps2_ped_export_buffer(
                 f"descriptors={descriptor_count}."
             )
 
-        # Retail Leeds PEDs routinely reuse one descriptor from several runtime
-        # geometry parts. The part count and descriptor count are independent;
-        # the actual invariant is that every emitted part tex_id addresses an
-        # existing descriptor slot.
+
         part_table = geom_offset + 0x60
         for part_index in range(runtime_part_count):
             part_off = part_table + (part_index * 0x30)
@@ -10620,9 +11008,7 @@ def write_simplemodel_ps2_ped_mdl(
     )
     pointer_fields = sanitize_ped_ps2_pointer_fields(pointer_fields)
 
-    # The hierarchy anchor at +0x34 is a real relocatable pointer. Older export
-    # paths could leave it out of the declared table even though the field was
-    # populated, producing an otherwise-valid MDL with relocation_count-1.
+
     if hierarchy_offset > 0:
         hierarchy_anchor_field = int(hierarchy_offset) + 0x34
         if hierarchy_anchor_field + 4 <= len(buf):
@@ -11433,7 +11819,7 @@ class Manhunt2MdlReader:
             self.read_bone_record(sibling_offset, depth + 1)
 
     def complete_missing_local_bone_matrices(self):
-        """Derive local matrices from stored world matrices when a variant does not expose a verified local-matrix field."""
+
         for offset, bone_info in self.bone_map.items():
             if bone_info.get("local_matrix") is not None:
                 continue
@@ -11489,12 +11875,7 @@ class Manhunt2MdlReader:
         return None
 
     def read_animation_bone_bindings(self):
-        """Resolve MH2 IFP BoneIDs and the vertex skin palette from the MDL.
 
-        Retail MH2 skin bytes index the animation/bone-transform palette. They
-        are not hierarchy traversal indices.  The same table also supplies the
-        authoritative int16 BoneID used by ANCT/SEQT IFP tracks.
-        """
         candidates = []
         for bone_info in self.bone_map.values():
             offset = int(bone_info.get("anim_data_idx_offset", 0) or 0)
@@ -11623,9 +12004,7 @@ class Manhunt2MdlReader:
             pass
         self.run_mode_set("EDIT")
 
-        # MH2 stores both a local hierarchy matrix and a world/initial matrix.
-        # Rebuild child world transforms exactly as the Max/Allen hierarchy does:
-        # Blender column-vector equivalent of Max local * parent is parent @ local.
+
         rebuilt_world = {}
         visiting = set()
 
@@ -12627,8 +13006,7 @@ class Manhunt2MdlReader:
         if mesh_object is None or self.armature_obj is None:
             return False
 
-        # Preserve the imported mesh placement while establishing a real
-        # Blender object parent-child relationship with the armature.
+
         try:
             world_matrix = mesh_object.matrix_world.copy()
         except Exception:
@@ -12970,8 +13348,8 @@ class Manhunt2MdlReader:
         return material
 
     def get_skin_palette_names(self):
-        # Retail MH2 vertex bone bytes index the animation/bone-transform
-        # palette.  They are not hierarchy traversal indices.
+
+
         if self.skin_palette:
             names = []
             for palette_index, palette_entry in enumerate(self.skin_palette):
@@ -13170,7 +13548,6 @@ def is_manhunt2_pmlc_mdl(filepath):
     return False
 
 
-# Backwards-compatible name used by older add-on builds.
 def is_manhunt2_pc_mdl(filepath):
     return is_manhunt2_pmlc_mdl(filepath)
 

@@ -40,6 +40,12 @@ class IMPORT_OT_tex(Operator, ImportHelper):
 
         name = bpy.path.display_name_from_filepath(self.filepath)
         count = len(images)
+        model_objects = [obj for obj in context.scene.objects
+                         if obj.get("bleeds_mdl_detected_game") or obj.get("bleeds_model_game")]
+        if images and model_objects:
+            tex_importer.apply_images_to_imported_mdl_materials(images, model_objects)
+            from ..ops.uv_playback import requestNativeUvPlayback
+            requestNativeUvPlayback(context)
         if count == 0:
             self.report({"WARNING"}, f"No textures were decoded from '{name}'.")
         else:
@@ -111,8 +117,6 @@ class SCENE_PT_bleeds_texture_io(Panel):
         row = layout.row(align=True)
         row.operator("import_scene.leeds_tex", text="Import Texture", icon="IMPORT")
         row.operator("export_scene.leeds_tex", text="Export Texture", icon="EXPORT")
-
-
 
 
 classes = (IMPORT_OT_tex, EXPORT_OT_tex, SCENE_PT_bleeds_texture_io)

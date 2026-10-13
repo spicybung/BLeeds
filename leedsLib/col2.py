@@ -18,15 +18,6 @@
 import struct
 from pathlib import Path
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .COL2 - the file format for GTA Stories collisions           #
-#   NOTE: Leeds Engine Collision 2 differs from Rockstars Renderware Col2 format    #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
-# •
-# - Mod resources/cool stuff:
-# •
 
 HEADER_SIZE = 0x20
 COLMODEL_HEADER_SIZE = 0x60

@@ -37,9 +37,7 @@ _ACTIVE_IMPORT_LINKED_COLLECTION = None
 _ACTIVE_IMPORT_2DFX_COLLECTION = None
 _CURRENT_PLACED_OBJECT_RECORDS = []
 
-# External converter IPL sidecars are deliberately deprecated. Placement is
-# read from the LVZ/IMG tables themselves; keep these explicit defaults only
-# so the old diagnostic helpers remain safe if called by an older scene.
+
 USE_STORIES_IPL_SIDECAR_FOR_PLACEMENT = False
 STORIES_IPL_SIDECAR_NAME_OVERRIDE = ""
 
@@ -300,9 +298,8 @@ class LvzImgImportProgress:
         self.update(value, stage)
 
     def redraw(self):
-        # A modal timer returns control to Blender between batches. Tagging the
-        # UI is sufficient; forcing DRAW_WIN_SWAP here produced console spam,
-        # expensive dependency-graph updates, and Windows "Not Responding".
+
+
         try:
             for window in self.window_manager.windows:
                 screen = getattr(window, "screen", None)
@@ -403,10 +400,7 @@ IMPORT_VERBOSE_MDL_DEBUG = False
 IMPORT_MDL_DEBUG_LIMIT = 48
 IMPORT_VERBOSE_RESOURCE_BUILD_LOGS = False
 
-# Keep the legacy ROWLINK fallback structures compiled, but the path is disabled
-# instances from inheriting 32/64/128 WRLD cell basis as object scale.
-# That was the source of the big wall/slab buildings while BestIPLModel's
-# candidate choice was still the least broken branch.
+
 IPL_FALLBACK_STRIP_CELL_SCALE_ENABLED = True
 IPL_FALLBACK_CELL_SCALE_MIN = 31.5
 IPL_FALLBACK_CELL_SCALE_LOG_LIMIT = 96
@@ -418,17 +412,8 @@ IPL_FALLBACK_REJECT_LOG_LIMIT = 96
 ENABLE_IPL_MODEL_ID_FALLBACK = False
 ENABLE_INTERNAL_IPL_MODEL_FALLBACK_MDLS = False
 ENABLE_CONVERTER_IDE_OBJECT_ID_MAP = False
-# Increase the maximum delta for neighbour alias searches.  A value of zero
-# disables this fallback entirely.  Setting it to one allows the importer to
-# consider the immediately preceding and following resource IDs when no
-# direct match is found.  This is essential for maps where placeholder
-# resource IDs point to the adjacent chunk rather than carrying their own
-# payload.
-# Widen the search radius for neighbour‑alias fallback.  A delta of two
-# allows the importer to consider the two preceding and two following
-# resource IDs when searching for a substitute model.  This is helpful
-# for large maps where placeholder IDs may sit several entries away from
-# their real geometry.
+
+
 NEIGHBOR_ALIAS_MAX_DELTA = 2
 NEIGHBOR_ALIAS_GLOBAL_MAX_DELTA = 2
 NEIGHBOR_ALIAS_LOG_LIMIT = 96
@@ -436,15 +421,11 @@ NEIGHBOR_ALIAS_MAX_WORLD_RADIUS_RATIO = 8.0
 NEIGHBOR_ALIAS_MIN_RADIUS_LIMIT = 40.0
 NEIGHBOR_ALIAS_TINY_PLACEMENT_RADIUS = 8.0
 NEIGHBOR_ALIAS_TINY_MAX_WORLD_RADIUS = 55.0
-# Enable neighbour alias fallback by default.  When true, the importer will
-# attempt to reuse neighbouring resource entries for placement rows that do
-# not resolve through exact or IPL fallbacks.  Safety checks on object
-# radius ensure that only geometrically compatible candidates are chosen.
+
+
 ENABLE_NEIGHBOR_ALIAS_FALLBACK = False
-# Enable aggregate piece fallback.  When true, the importer will attempt
-# to reuse parts of aggregate groups (such as city blocks split into
-# many subpieces) when no direct resource exists.  This helps fill in
-# gaps caused by placeholder IDs that reference parts of a larger group.
+
+
 ENABLE_AGGREGATE_PIECE_FALLBACK = False
 ENABLE_WRLD_SUBMODEL_GROUP_ID_RECOVERY = False
 ENABLE_GLOBAL_WRLD_SUBMODEL_ID_RECOVERY = False
@@ -459,53 +440,37 @@ REFERENCE_DFF_COMPARE_ROWS: List[dict] = []
 ENABLE_VISIBLE_PLACEMENT_DEDUPLICATION = False
 ENABLE_SKIP_AREA_CONTINUATION_DUPLICATE_SUBMODELS = False
 
-# V90/V92: in Stories WRLD/LVZ placement rows, the second u16 is the
-# resource/object identity.  The first u16 is only a row model/IPL hint and must
-# not rename Beach1881 into Beach1280.  If the LVZ master Resource[] slot is
-# empty, keep the resource ID and search the IMG continuation data for a real
-# descriptor/VIF payload with matching material IDs.
+
 ENABLE_ROW_MODEL_ID_AUTHORITATIVE_PLACEMENT = False
 ROW_MODEL_ID_AUTHORITATIVE_SKIP_LIGHTS = True
 ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG = True
 
-# V93 cleanup: remove the old approximate/recovery layers from normal import.
-# The current rule is format-driven: BeachX comes from the row RES/object id;
-# empty LVZ Resource[] entries are IMG-backed continuations.
+
 CONTINUES_IN_IMG_SCAN_STRIDE = 0x10
 CONTINUES_IN_IMG_MAX_LOG_ROWS = 128
 CONTINUES_IN_IMG_TEXTURE_ID_DELTAS = (1, 0)
-# Keep several exact-RES raw IMG descriptor variants.  A texture-number match
-# alone is not enough to identify geometry; the row's own sphere and 4x4 matrix
-# select the matching variant during placement.
+
+
 CONTINUES_IN_IMG_MAX_VARIANTS_PER_RES = 6
 CONTINUES_IN_IMG_MAX_FIT_DETAILS_PER_RES = 24
 CONTINUES_IN_IMG_MAX_PLACEMENT_FIT_SCORE = 5.0
 CONTINUES_IN_IMG_PROOF_CACHE: Dict[int, List[dict]] = {}
-# Exact WRLD submodels are normalized model data.  Their 16/32/64/128 basis is
-# the real model transform, not a scale value to discard.  Preserve it and
-# compensate any bbox-center origin rebase in matrix space.
+
+
 PRESERVE_EXACT_WRLD_SUBMODEL_ROW_MATRIX = True
-# A same-RES WRLD submodel can be a small aggregate slice rather than the full
-# object represented by the placement row.  Only in that case, scan for more
-# exact-RES IMG variants and compare them using the row sphere/matrix.  This is
-# still strict RES matching; the internal ROWLINK never substitutes geometry.
+
+
 EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_RADIUS_RATIO = 0.42
 EXACT_WRLD_SUBMODEL_RAW_VARIANT_MAX_RADIUS_RATIO = 2.75
 EXACT_WRLD_SUBMODEL_RAW_VARIANT_MIN_TARGET_RADIUS = 4.0
 EXACT_WRLD_SUBMODEL_RAW_VARIANT_SPARSE_FACE_LIMIT = 18
-# V97: keep the dangerous IPL/IDE/neighbor approximate paths off, but restore the real
-# structured exact-RES IMG table paths.  V96 disabled these as debugging bloat and
-# left rows such as RES 4477/4478/4494/4495 missing even though the IMG has real
-# table-backed payloads.  These three passes only build candidates keyed by the row
-# RES/object id; they do not remap through IPL ids or GTA SA converter IDE names.
+
+
 ENABLE_GLOBAL_EXACT_RES_FALLBACK_MDLS = True
 ENABLE_NESTED_CHILD_FALLBACK_MDLS = True
 ENABLE_ROW_SHARED_FALLBACK_MDLS = True
 
 
-# V54 speed gate: keep object matrix/transform logging, but do not build a
-# huge full-scene matrix CSV by default.  Full logging is useful for one-off
-# audits, but doing it for every visible object burns time and memory.
 OBJECT_MATRIX_TRANSFORM_LOG_ENABLED = False
 OBJECT_MATRIX_TRANSFORM_LOG_FULL_VISIBLE = False
 OBJECT_MATRIX_TRANSFORM_LOG_MAX_GENERIC_ROWS = 256
@@ -514,20 +479,13 @@ OBJECT_MATRIX_TRANSFORM_LOG_TO_CSV = False
 OBJECT_MATRIX_TRANSFORM_LOG_TO_BLENDER_LOG = True
 OBJECT_MATRIX_TRANSFORM_LOG_BLENDER_MAX_LINES = 256
 
-# V56 speed fix: deleting tens of thousands of raw parser base objects at the
-# end causes Blender to crawl.  Hide parser bases by default instead of deleting.
-RAW_PARSER_BASE_CLEANUP_MODE = "hide"  # "hide" or "delete"
 
-# V60: keep diagnostics in Blender log only. No CSV pile by default.
+RAW_PARSER_BASE_CLEANUP_MODE = "hide"
+
+
 DIAGNOSTIC_CSV_LOGS_ENABLED = False
 
-# 1.0.21 identity/2DFX rule. The first placement u16 is an internal ROWLINK
-# and the second is the streamed geometry RES. GAME.DTZ ownership comes from the
-# matching master AreaInfo -> AERA AreaResource.secondaryId row. GAME.DTZ effect
-# positions are native model-space units: the streamed row basis contains an
-# additional per-axis geometry-normalization scale and must be normalized before
-# it is applied to C2dEffect positions. Split opaque/transparent resources that
-# share one runtime model placement emit one helper set, not duplicate sets.
+
 PLACEMENT_RES_TXT_REPORT_ENABLED = True
 CREATE_GAME_DTZ_2DFX_HELPERS = True
 PLACEMENT_RES_REPORT_EFFECT_LIMIT = 8
@@ -535,31 +493,26 @@ PLACEMENT_RES_REPORT_CANDIDATE_LIMIT = 24
 PLACEMENT_RES_REPORT_TARGET_IDS = {1179, 1725, 1881, 1887, 1989, 2184, 3528}
 _CURRENT_PLACEMENT_REPORT_ROWS = {}
 
-# V60: geometry data prints in Blender console/log. No recovery approximations.
+
 GEOMETRY_OBJECT_LOG_ENABLED = False
 GEOMETRY_OBJECT_LOG_MAX_LINES = 2048
 GEOMETRY_OBJECT_LOG_ALWAYS_RES_IDS = {1179, 1725, 1881, 1887, 1888, 1989, 2184, 3528, 4294, 5045}
 
-# V66: resolver audit. Logs the actual row -> candidate geometry chain
-# in Blender's console. No approximations are imported.
+
 RESOLVER_AUDIT_ENABLED = False
 RESOLVER_AUDIT_MAX_ROWS = 4096
 RESOLVER_AUDIT_ALWAYS_RES_IDS = {1019, 1033, 1179, 1287, 1511, 1586, 1612, 1633, 1670, 1725, 1881, 1887, 1888, 1961, 1989, 2082, 2184, 3528, 4294, 5045}
 RESOLVER_AUDIT_ALWAYS_IPL_IDS = {436, 437, 438, 439, 562, 825, 840, 856, 864, 892, 1280, 1281, 1285, 1322, 1479}
 RESOLVER_AUDIT_CANDIDATE_LIMIT_PER_ROW = 48
-# V67: target-only. Do not audit every row just because chosen_obj is None.
-# The V66 log filled 512 lines on early UNDERWATER/LIGHTS rows before Beach1881.
+
+
 RESOLVER_AUDIT_TARGET_ONLY = True
 RESOLVER_AUDIT_TARGET_PASSES = {"NORMAL", "ROADS", "TRANSPARENT"}
 
-# V68: actual recovery path for the pattern proven by V67:
-# RES has only a tiny sparse WRLD fragment. Legacy code once treated ROWLINK as a
-# rich internal LVZ+IMG model. Use that internal model with the full row matrix.
+
 ENABLE_RICH_IPL_OVER_SPARSE_RECOVERY = False
-# V71: real-new-found recovery. Never import WRLD sparse fragments as buildings.
-# This legacy ROWLINK-as-model path is disabled; GAME_MODEL identity is handled separately.
-# Global/area parsed MDLs are allowed again because they are actual payloads,
-# but WRLD_SUBMODEL_GROUP and submodel-slice junk are always rejected.
+
+
 RICH_IPL_RECOVERY_STRICT_SAME_SECTOR_OR_ROW = False
 RICH_IPL_RECOVERY_ALLOWED_LABELS = {
     "exact_sector_res",
@@ -584,31 +537,22 @@ RICH_IPL_RECOVERY_MIN_FACES = 140
 RICH_IPL_RECOVERY_MIN_VERT_RATIO = 3.0
 RICH_IPL_RECOVERY_MIN_FACE_RATIO = 3.0
 
-# V72: direct row IPL recovery. The 80-byte WRLD placement row has BOTH:
-#   +0x00 = internal ROWLINK (not the GTA IDE model id)
-#   +0x02 = resource id
-# Some rows have no usable RES candidate and never enter the sparse-fragment
-# branch. The legacy ROWLINK-as-model interpretation is disabled;
-# place that real MDL instead of leaving the row missing.
+
 ENABLE_REAL_IPL_FOR_MISSING_RES_ROWS = False
 REAL_IPL_FOR_MISSING_ALLOWED_PASSES = {"NORMAL", "ROADS", "TRANSPARENT"}
 REAL_IPL_FOR_MISSING_MIN_VERTS = 20
 REAL_IPL_FOR_MISSING_MIN_FACES = 18
 
-# V83: do not suppress sparse WRLD submodel fragments.
-# The map legitimately places repeated small building pieces through row IPL/RES pairs.
-# Earlier builds counted these as missing with "NOT importing bad non-LIGHTS sparse building fragment".
-# That was a debug safety approximation, not format truth, so it stays off for LVZ+IMG imports.
+
 ENABLE_ROW_LOCAL_RENDER_MODEL_RECOVERY = False
 ENABLE_SKIP_BAD_NONLIGHT_SPARSE_BUILDING_FRAGMENTS = False
 BAD_NONLIGHT_SPARSE_MAX_VERTS = 160
 BAD_NONLIGHT_SPARSE_MAX_FACES = 160
 BAD_NONLIGHT_SPARSE_PASSES = {"NORMAL"}
-# Last hard cases in beach are not top-level Resource[] ids and not same-sector group ranges.
-# They are stable two-id placement pairs that resolve to one explicit render resource id.
-# This is deliberately pair-keyed, not nearest-neighbor scanning.
+
+
 FINAL_VERIFIED_RENDER_PAIR_ALIAS = {
-    # V28 hard pairs proven from repeated beach placement rows.
+
     (407, 961): 960,
     (825, 1511): 1509,
     (1322, 1961): 1960,
@@ -616,56 +560,35 @@ FINAL_VERIFIED_RENDER_PAIR_ALIAS = {
     (82, 209): 82,
     (2536, 3239): 2536,
 
-    # V33 converter-pack cross-check pairs. These are not sidecar placement.
-    # The converter pack only gives the visible model name; the target below
-    # still must exist as an actual LVZ+IMG MDL object before it is used.
-    (37, 31): 37,        # beach31 uses render resource 37 in sectors 199/200.
-    (496, 658): 496,     # beach658 uses render resource 496 in the LVZ+IMG pool.
-    (1624, 2292): 742,   # beach2292 converter IDE/resource 742 exists in LVZ+IMG.
-    (3540, 3767): 1464,  # beach3767 converter IDE/resource 1464 exists in LVZ+IMG.
-    (7135, 5453): 2190,  # beach5453 converter IDE/resource 2190 exists in LVZ+IMG.
+
+    (37, 31): 37,
+    (496, 658): 496,
+    (1624, 2292): 742,
+    (3540, 3767): 1464,
+    (7135, 5453): 2190,
 }
 
-# Last-resort import for placement rows that still have no direct RES model.
-# Legacy disabled path that treated ROWLINK as an authoritative model key and records
-# every imported row in *_blds_imported_missing_mdl_report.csv.
+
 ENABLE_FORCE_IMPORT_MISSING_IMG_MDLS = False
 FORCE_IMPORT_MISSING_IMG_MDL_LOG_LIMIT = 512
 
-# Exact-only recovery mode: do not silently fill unresolved missing rows with
-# nearby substitute geometry. If the true exact IMG/IPL model cannot be found,
-# the row stays missing and is reported as unresolved.
+
 EXACT_ONLY_REAL_MISSING_MDL_RECOVERY = True
 ENABLE_EXACT_IPL_RECOVERY_FOR_MISSING_ROWS = False
 
-# Legacy V7 fallback. If the exact ROWLINK-as-model value is absent from every
-# parsed resource table, clone the nearest already-imported IMG MDL and place it
-# with the missing row matrix. These clones are deliberately named Beach*_... and
-# marked/reported so they can be audited instead of silently hidden.
+
 ENABLE_FINAL_MISSING_IPL_NEIGHBOR_IMPORT = False
 FINAL_MISSING_IPL_NEIGHBOR_MAX_DELTA = 64
 FINAL_MISSING_IPL_NEIGHBOR_LOG_LIMIT = 512
 CREATE_NAMED_MISSING_MDL_COPIES = True
 FORCE_MISSING_IMG_MDL_CENTER_ON_BBOX = False
 
-# Final missing MDLs can be cloned from a nearby resource whose raw local mesh
-# radius is much smaller than the IMG placement sphere.  If the row matrix does
-# not already contain that scale, the copy appears as a tiny stuck model.  Fit
-# only forced/final missing copies upward to the placement sphere radius.
+
 FIT_FINAL_MISSING_MDL_TO_PLACEMENT_RADIUS = True
 FIT_FINAL_MISSING_MDL_MIN_RATIO = 0.65
 FIT_FINAL_MISSING_MDL_MAX_SCALE = 512.0
 
-# Adjust the minimum and maximum aggregate group thresholds.  Some maps
-# contain aggregate objects that are made up of only a handful of
-# sub‑groups.  The previous minimum of 12 prevented these from being
-# registered for fallback, leaving small structures unplaced.  Lower
-# the minimum to one so that all aggregate groups, regardless of size,
-# can contribute pieces for fallback.  Increase the maximum to a high
-# value to ensure large aggregates are not excluded.  These limits
-# primarily gate registration performance and do not alter safety
-# checks, so widening them improves coverage without risking
-# oversized substitutions.
+
 AGGREGATE_SPLIT_MIN_GROUPS = 1
 AGGREGATE_SPLIT_MAX_GROUPS = 4096
 AGGREGATE_PIECE_MAX_DISTANCE_PAD = 24.0
@@ -678,16 +601,11 @@ WRLD_SUBMODEL_GROUP_ROWS: List[dict] = []
 
 
 def normalized_copy_stem(name: str) -> str:
-    return re.sub(r"\s*\(\d+\)$", "", str(name or "").strip())
+    return re.sub(r"\s*\(\d+(?:-\d+)?\)$", "", str(name or "").strip())
 
 
 def find_stories_companion_file(lvz_path: str, extension: str, stem: str = "", explicit_path: str = "") -> Optional[Path]:
-    """Find an IDE/IPL companion without confusing copy suffixes with identity.
 
-    Exact names are preferred. Blender/browser copies such as beach(1).ide and
-    beach (2).ipl are accepted when their normalized stem matches the LVZ stem.
-    An explicit path selected with the separate BLeeds picker always wins.
-    """
     ext = str(extension or "").lower().lstrip(".")
     if not ext:
         return None
@@ -738,7 +656,7 @@ def find_stories_companion_file(lvz_path: str, extension: str, stem: str = "", e
     except Exception:
         copy_variants = []
 
-    # Deterministic choice: lower copy number/name first. Exact files already won.
+
     copy_variants.sort(key=lambda item: item.name.lower())
     return copy_variants[0] if copy_variants else None
 
@@ -824,14 +742,7 @@ def read_img_next_to_lvz(lvz_path: str) -> Tuple[Optional[bytes], Optional[str]]
 
 
 def read_ide_object_id_map_next_to_lvz(lvz_path: str, explicit_path: str = "", stem: str = ""):
-    """Read converter IDE beside LVZ.
 
-    Stories Map Converter IDE lines look like:
-        562, beach1828, beach1828, 1, 299, 0
-
-    The first number is the converter/IPL object id. The model name suffix is
-    the real beach resource id to try in LVZ/IMG.
-    """
     ide_path = find_stories_companion_file(
         lvz_path, "ide", stem=stem or Path(lvz_path).stem, explicit_path=explicit_path
     )
@@ -999,13 +910,8 @@ def find_stories_ipl_sidecar(lvz_path: str, stem: str) -> Optional[Path]:
     return None
 
 
-
 def build_ide_res_to_model_id_map(id_to_res: Dict[int, int], id_to_name: Dict[int, str], stem: str):
-    """Build the exact reverse identity map: streamed/name RES -> GTA IDE model id.
 
-    The IDE object id is not the streamed row's first u16. Prefer the exact map
-    prefix (for example beach1887) and reject ambiguous competing non-LOD names.
-    """
     stem_low = str(stem or "").lower()
     choices: Dict[int, List[Tuple[int, str, int]]] = {}
     for model_id, res_id in (id_to_res or {}).items():
@@ -1045,7 +951,7 @@ def build_ide_res_to_model_id_map(id_to_res: Dict[int, int], id_to_name: Dict[in
 
 
 def find_stories_identity_ipl_next_to_lvz(lvz_path: str, stem: str, explicit_path: str = "") -> Optional[Path]:
-    """Find an IPL only for exact identity/coordinate verification, never placement."""
+
     return find_stories_companion_file(
         lvz_path, "ipl", stem=stem or Path(lvz_path).stem, explicit_path=explicit_path
     )
@@ -1057,13 +963,7 @@ def build_stories_placement_identity_map(details, lvz_path: str, stem: str,
                                          ide_res_to_model: Dict[int, int],
                                          ide_res_to_name: Dict[int, str],
                                          explicit_ipl_path: str = ""):
-    """Match internal placement rows to sidecar IPL rows by RES/name and position.
 
-    Returns exact identity metadata keyed by the internal source-row key. The IPL
-    is never used to move an object or provide geometry. It only proves that, for
-    example, RES 1887 at the Beach1887 position is GTA model id 587 while the
-    internal row-link value is 1281.
-    """
     result: Dict[Tuple[int, int, int, int], Dict[str, object]] = {}
     ipl_path = find_stories_identity_ipl_next_to_lvz(lvz_path, stem, explicit_path=explicit_ipl_path)
     rows = parse_stories_ipl_sidecar(ipl_path) if ipl_path is not None else []
@@ -1076,7 +976,7 @@ def build_stories_placement_identity_map(details, lvz_path: str, stem: str,
             continue
         if res_id < 0 or game_model_id < 0:
             continue
-        # Require the IDE to agree with both the model id and the name suffix.
+
         if int((ide_id_to_res or {}).get(game_model_id, -1)) != res_id:
             continue
         by_res.setdefault(res_id, []).append(item)
@@ -1495,15 +1395,15 @@ def _find_rw_sections_recursive(data: bytes, want_id: int, start: int = 0, end: 
     for sid, body, size, ver, hdr in _rw_section_iter(data, start, end):
         if sid == int(want_id):
             yield (sid, body, size, ver, hdr)
-        # Container sections usually contain nested chunks. Try recursive scanning
-        # regardless of section id; invalid child walks exit fast.
+
+
         if size >= 12:
             yield from _find_rw_sections_recursive(data, want_id, body, body + size, depth + 1)
 
 def _parse_rw_geometry_struct_candidates(data: bytes, body: int, size: int):
     end = int(body) + int(size)
     out = []
-    # Geometry struct sometimes has old-version surface props after the counts.
+
     for payload_start_extra in (16, 28):
         try:
             if body + payload_start_extra > end:
@@ -1515,8 +1415,8 @@ def _parse_rw_geometry_struct_candidates(data: bytes, body: int, size: int):
             num_morph = int(num_morph)
             if num_vert <= 0 or num_vert > 250000 or num_tri < 0 or num_tri > 500000 or num_morph <= 0 or num_morph > 8:
                 continue
-            # Native RenderWare geometry stores platform payloads elsewhere. The
-            # converter-pack DFFs we want are PC-style non-native geometry.
+
+
             if flags & 0x01000000:
                 continue
             uv_sets = (flags >> 16) & 0xFF
@@ -1528,14 +1428,14 @@ def _parse_rw_geometry_struct_candidates(data: bytes, body: int, size: int):
                 else:
                     uv_sets = 0
             off = body + payload_start_extra
-            if flags & 0x08:  # prelit vertex colors
+            if flags & 0x08:
                 off += num_vert * 4
             off += num_vert * 8 * uv_sets
             tri_off = off
             off += num_tri * 8
             if off + 24 > end:
                 continue
-            # Only first morph target is used as the local mesh.
+
             sx, sy, sz, sr = struct.unpack_from("<ffff", data, off)
             off += 16
             has_pos, has_norm = struct.unpack_from("<II", data, off)
@@ -1576,7 +1476,7 @@ def _parse_reference_dff_meshes_lightweight(dff_path: Path):
     data = Path(dff_path).read_bytes()
     meshes = []
     for sid, body, size, ver, hdr in _find_rw_sections_recursive(data, 0x0F):
-        # Geometry chunk contains a Struct child.
+
         for csid, cbody, csize, cver, chdr in _rw_section_iter(data, body, body + size):
             if csid != 0x01:
                 continue
@@ -1586,7 +1486,7 @@ def _parse_reference_dff_meshes_lightweight(dff_path: Path):
     return meshes
 
 def reference_dff_proof_stats_only(stem: str, model_id: int):
-    """Parse exact reference DFF for diagnostics only.  Never creates or returns a Blender object."""
+
     if not ENABLE_REFERENCE_DFF_EXACT_GEOMETRY_FOR_MISSING:
         return None, ""
     model_id = int(model_id)
@@ -1718,7 +1618,7 @@ def _build_reference_dff_object_lightweight(stem: str, model_id: int, dff_path: 
     return obj
 
 def _try_registered_dff_operator(dff_path: Path):
-    # Try common DFF importer operator ids, but do not require any of them.
+
     candidates = (
         ("import_scene", "dff"),
         ("import_scene", "dragonff_dff"),
@@ -1873,8 +1773,8 @@ def matrix_to_report_values(matrix: Matrix):
 
 def make_visible_placement_dedupe_key(ipl_id: int, res_id: int, pass_name: str, matrix: Matrix):
     vals = matrix_to_report_values(matrix)
-    # Use the visible transform, not sector/container id. Same visible object can be repeated
-    # through overlapping sector/extra containers; those should import once.
+
+
     rounded = tuple(round(float(v), 4) for v in vals[:12])
     return (int(ipl_id), int(res_id), str(pass_name), rounded)
 
@@ -1960,9 +1860,8 @@ def matrix_from_img_detail_centered_on_object(detail, obj) -> Matrix:
         return matrix
     if radius <= 0.0:
         return matrix
-    # Legacy fallback resources can have mesh verts that are not authored
-    # around 0,0,0. Applying the placement matrix directly then throws big slabs/walls
-    # off to the side. Center the mesh's local bounds before applying the row matrix.
+
+
     return matrix @ Matrix.Translation((-float(cx), -float(cy), -float(cz)))
 
 
@@ -2055,8 +1954,8 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
         (target_collection or bpy.context.scene.collection).objects.link(obj)
     except Exception:
         bpy.context.scene.collection.objects.link(obj)
-    # Parser/resource objects are templates, not visible placements. Keep each
-    # one hidden until the placement pass has assigned its final matrix.
+
+
     try:
         obj.hide_viewport = True
         obj.hide_render = True
@@ -2086,7 +1985,7 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
 
 
 def mdl_groups_geometry_signature(material_list, groups):
-    """Stable geometry identity used to reject conflicting generic RES matches."""
+
     vert_count = 0
     face_count = 0
     xs = []
@@ -2159,7 +2058,7 @@ def blds_object_geometry_signature(obj):
 
 
 def build_unambiguous_resource_object_map(objects):
-    """Return one object per RES only when every parsed candidate has the same mesh."""
+
     candidates = {}
     for obj in objects or []:
         if obj is None:
@@ -2187,9 +2086,8 @@ def build_unambiguous_resource_object_map(objects):
     return result, ambiguous
 
 
-
 def build_resource_object_candidate_map(objects):
-    """Group exact resource-table models by resource ID and unique geometry."""
+
     grouped = {}
     for obj in objects or []:
         if obj is None:
@@ -2213,7 +2111,7 @@ def build_resource_object_candidate_map(objects):
 
 
 def placement_bbox_fit(bbox_min, bbox_max, detail):
-    """Compare local bounds transformed by a row matrix with its stored sphere."""
+
     if bbox_min is None or bbox_max is None or detail is None:
         return None
     try:
@@ -2268,7 +2166,7 @@ def placement_bbox_fit(bbox_min, bbox_max, detail):
 
 
 def placement_candidate_fit(obj, detail):
-    """Compare an exact model candidate with the row's world-space bounding sphere."""
+
     if obj is None or detail is None:
         return None
     try:
@@ -2282,7 +2180,7 @@ def placement_candidate_fit(obj, detail):
 
 
 def exact_candidate_needs_raw_variant(obj, detail):
-    """Return True only when an exact WRLD submodel looks like an incomplete slice."""
+
     if obj is None or detail is None:
         return False
     try:
@@ -2316,7 +2214,7 @@ def exact_candidate_needs_raw_variant(obj, detail):
 
 
 def choose_exact_resource_candidate(candidates, detail, max_fit_score=5.0):
-    """Choose among exact table-backed variants using the placement row's own bounds."""
+
     unique = []
     seen = set()
     for item in candidates or []:
@@ -2420,7 +2318,7 @@ def reset_aggregate_group_parts():
     WRLD_SUBMODEL_GROUP_ROWS.clear()
 
 def all_aggregate_group_parts():
-    # Only return Blender objects that were actually created lazily.
+
     parts = []
     for sector_parts in AGGREGATE_GROUP_PARTS_BY_SECTOR.values():
         for part in sector_parts:
@@ -2488,18 +2386,11 @@ def format_blds_vec(value):
 
 
 def rebase_wrld_submodel_mesh_origin_to_bbox_center(obj):
-    """
-    Fast V54 version.
 
-    Recovered WRLD submodel groups can carry vertices in parent/group-local
-    space.  Rebase the shared mesh once, then stamp every object that uses it.
-    Older V51 copied/rebased the mesh per duplicate object, which made imports
-    crawl on dense maps.
-    """
     try:
         mesh = getattr(obj, "data", None)
 
-        # Object already stamped.
+
         if bool(obj.get("blds_wrld_submodel_origin_rebased", False)):
             try:
                 parts = str(obj.get("blds_wrld_submodel_origin_offset", "0,0,0")).split(",")
@@ -2507,7 +2398,7 @@ def rebase_wrld_submodel_mesh_origin_to_bbox_center(obj):
             except Exception:
                 return False, 0.0, 0.0, 0.0, float(obj.get("blds_local_radius", 0.0))
 
-        # Mesh already rebased by the first instance; do NOT copy/rebase again.
+
         if mesh is not None:
             try:
                 if bool(mesh.get("blds_wrld_submodel_origin_rebased", False)):
@@ -2549,9 +2440,7 @@ def rebase_wrld_submodel_mesh_origin_to_bbox_center(obj):
         if mesh is None or not hasattr(mesh, "vertices"):
             return False, cx, cy, cz, radius
 
-        # Intentionally do NOT copy when mesh.users > 1.  The mesh is shared by
-        # duplicates of the same recovered submodel; one shared rebase is the
-        # correct and fast operation.
+
         for v in mesh.vertices:
             v.co.x = float(v.co.x) - cx
             v.co.y = float(v.co.y) - cy
@@ -2592,12 +2481,7 @@ def rebase_wrld_submodel_mesh_origin_to_bbox_center(obj):
 
 
 def should_preserve_world_baked_submodel_matrix(obj, matrix):
-    """
-    Some recovered WRLD submodel groups are already in world space and must keep
-    identity; others are local submodel pieces like beach1881 and must receive
-    the row matrix.  Decide by comparing the raw group bbox center to the row
-    translation.  This prevents the old all-or-nothing V30 identity override.
-    """
+
     try:
         cx, cy, cz, radius = object_bbox_center_radius(obj)
         tx = float(matrix[0][3])
@@ -2686,7 +2570,7 @@ def register_aggregate_group_parts(stem: str, sector_index: int, res_id: int, gr
         if info is None:
             continue
         cx, cy, cz, cr, mn, mx = info
-        # Store a cheap descriptor. Do NOT create thousands of Blender objects up front.
+
         parts.append({
             "obj": None,
             "stem": stem,
@@ -2776,10 +2660,8 @@ def lookup_aggregate_piece_base(detail, sector_index: int):
             if dist > radius_pad:
                 continue
             radius_score = abs(cr - sr) * 0.20
-            # Prefer an origin-baked match over a raw local match if they tie.  This is the
-            # missing IPL path for VCS beach: rows such as RES=1828 / ROWLINK=1222..1241 live
-            # as pieces inside the sector aggregate, whose group centers need the sector
-            # origin before comparing to the placement sphere.
+
+
             mode_bonus = -2.0 if mode == "origin" else 0.0
             score = dist + radius_score + mode_bonus
             if best_score is None or score < best_score:
@@ -2900,11 +2782,7 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
         if not parent_items:
             continue
 
-        # V29: recover in two guarded stages.
-        # Stage 1 is the older V23 contiguous-cluster resolver. It is safer for
-        # big real WRLD aggregate parents such as the 2786.. range because it
-        # prefers broad aggregate group tables and does not let a sparse shortcut
-        # overwrite a proven contiguous mapping.
+
         missing_ids = set(int(v) for v in id_counts.keys())
         used_parents = set()
         clusters = cluster_sorted_ids_for_submodels(missing_ids, gap_limit=128)
@@ -2925,7 +2803,7 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                 if not covered:
                     continue
                 covered_rows = sum(int(id_counts.get(rid, 0)) for rid in covered)
-                # prefer broad aggregate resources for converter-style exploded WRLD groups.
+
                 score = (len(covered) * 1000000) + (covered_rows * 10000) + (min(int(group_count), 4096) * 100) - abs(int(group_count) - int(span))
                 if best_score is None or score > best_score:
                     best_score = score
@@ -2938,7 +2816,7 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                 group_index = int(rid) - int(start)
                 if 0 <= group_index < len(parent_parts):
                     part = parent_parts[group_index]
-                    # Do not let a later sparse pass replace this exact contiguous mapping.
+
                     part["blds_submodel_id_recovery"] = True
                     part["blds_submodel_sparse_range_recovery"] = False
                     part["blds_submodel_contiguous_range_recovery"] = True
@@ -2961,9 +2839,7 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                 "mode": "contiguous-sector-range",
             })
 
-        # Stage 2: guarded sparse resolver for the ids left after Stage 1.
-        # This is intentionally narrower than V26/V27: it cannot overwrite the
-        # safe contiguous mappings and it uses unused parents only.
+
         unused_ids = set(int(v) for v in missing_ids)
         used_parent_keys = set(int(v) for v in used_parents)
         while unused_ids:
@@ -2986,8 +2862,8 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                         continue
                     span = max(covered) - min(covered) + 1
                     density = len(covered) / max(1, span)
-                    # Keep sparse recovery useful but less aggressive than V26.
-                    # Require either multiple unique ids or meaningful duplicate placement rows.
+
+
                     if len(covered) < 2 and covered_rows < 8:
                         continue
                     score = (covered_rows * 1000000) + (len(covered) * 25000) + int(density * 10000) - abs(int(group_count) - int(span))
@@ -3002,7 +2878,7 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                 group_index = int(rid) - int(range_start)
                 if 0 <= group_index < len(parent_parts):
                     part = parent_parts[group_index]
-                    # Never overwrite a Stage-1 contiguous mapping.
+
                     if (int(sector_index), int(rid)) in WRLD_SUBMODEL_GROUP_LOOKUP:
                         continue
                     part["blds_submodel_id_recovery"] = True
@@ -3072,8 +2948,8 @@ def _proof_stats_from_vertices_faces(vertices, faces, prefix: str):
             radius = max(radius, (dx * dx + dy * dy + dz * dz) ** 0.5)
         diag = ((mx[0] - mn[0]) ** 2 + (mx[1] - mn[1]) ** 2 + (mx[2] - mn[2]) ** 2) ** 0.5
         h = hashlib.sha1()
-        # Quantized vertex cloud + face count: stable enough to prove large
-        # mismatch without requiring identical source ordering.
+
+
         h.update(f"verts={len(pts)};faces={len(faces or [])};".encode("ascii"))
         for x, y, z in sorted((round(x, 4), round(y, 4), round(z, 4)) for x, y, z in pts):
             h.update(f"{x:.4f},{y:.4f},{z:.4f};".encode("ascii"))
@@ -3301,8 +3177,6 @@ def lookup_verified_render_pair_alias_base(
     return None, alias_id, "alias-target-not-found"
 
 
-
-
 def get_or_create_missing_lvz_material(texture_id: int):
     name = f"lvz_texres_{int(texture_id)}_missing_image"
     material = bpy.data.materials.get(name)
@@ -3479,13 +3353,7 @@ def iter_build_lvz_resource_mdl_objects(lvz_reader: LVZ.read_lvz, rows: List[Dic
             continue
         slots_added = add_material_slots(obj, lvz_reader.material_by_res_index, material_list, face_ranges)
 
-        # VCS Master WRLD Resource[] rows are 12 bytes. The third dword is a
-        # resource/name identifier, not just padding. Converted IPL names like
-        # beach3457 refer to that identifier, while the table slot can be a
-        # completely different row number. Earlier builds keyed master MDLs only
-        # by the row index, so rows whose visible id was beach#### were reported
-        # missing even when the MDL existed in the master table under another
-        # slot. Register both names, but never overwrite a true exact key.
+
         resource_id_field = row.get("resource_id_field", None)
         external_res_id = None
         try:
@@ -3593,7 +3461,7 @@ def build_img_mdl_objects(stem: str, img_bytes: bytes, img_reader: LVZ.read_img,
 
 
 def _probe_ps2_img_descriptor_for_continuation(img_bytes: bytes, off: int) -> Optional[dict]:
-    """Validate one raw IMG material descriptor table and compute its exact VIF packet end."""
+
     try:
         n = len(img_bytes)
         off = int(off)
@@ -3726,8 +3594,8 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
     parser_failures = 0
 
     def candidate_descriptor_offsets():
-        # Filter descriptor headers in vectorized chunks before invoking the
-        # strict parser; a 200+ MB IMG otherwise requires millions of calls.
+
+
         if np is None:
             total = max(1, (max(0, n - 0x20) + stride - 1) // stride)
             step = 0
@@ -3861,8 +3729,8 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
                 if fit is not None:
                     fit_values.append(float(fit[0]))
             best_fit = min(fit_values) if fit_values else None
-            # Placement fit is authoritative. Descriptor richness only breaks
-            # ties or ranks candidates when no row fit is available.
+
+
             if best_fit is None:
                 rank_key = (1.0, 999999.0, -float(final_score))
             else:
@@ -4025,10 +3893,8 @@ def iter_build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reade
     preselect_dropped_rows = 0
 
     if collapse_by_res_id:
-        # Keep one representative for every distinct exact geometry variant.
-        # Several sectors can legitimately store different models under the same
-        # resource ID; the placement row's world-space sphere chooses the correct
-        # variant later instead of discarding the whole resource ID.
+
+
         best_by_res_signature = {}
         signatures_by_res = {}
         preselect_input_rows = len(overlay_rows)
@@ -4083,8 +3949,8 @@ def iter_build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reade
             sector_index = int(overlay.get("sector_index", -1))
             res_id = int(overlay.get("res_id", -1))
             key = (sector_index, res_id)
-            # Resource tables normally contain one entry per ID in each sector.
-            # Keep the richer object only if malformed duplicate rows share a key.
+
+
             existing = preselected_by_key.get(key)
             if existing is not None:
                 existing_score = score_mdl_groups_for_preselect(existing[1])
@@ -4193,11 +4059,7 @@ def iter_build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: L
     )
     parser.material_by_res_index = lvz_reader.material_by_res_index
 
-    # Scan every sector record, not only the first sector in each row.
-    # Some VCS IMG rows use a resource that is row-shared, but the resource table
-    # entry can live in any concrete sector within that row.  The old first-row
-    # shortcut missed those tables and made the row-shared fallback return zero
-    # useful bases for many beach/mainla placements.
+
     row_base_records = [
         record
         for record in sorted(sector_records, key=lambda item: (int(item.get("row_index", -1)), int(item.get("sector_index", -1))))
@@ -4405,7 +4267,6 @@ def iter_build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader:
     return nested_by_row_res
 
 
-
 def iter_build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
                                              lvz_reader: LVZ.read_lvz,
                                              img_reader: LVZ.read_img,
@@ -4413,7 +4274,7 @@ def iter_build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
                                              img_name: Optional[str],
                                              needed_res_ids=None,
                                              progress_callback=None):
-    """Build exact models from the master AreaInfo[] -> AERA AreaResource[] path."""
+
     area_records = img_reader.find_area_info_records_from_lvz()
     if not area_records:
         LVZ.dbg("[area-resource] no proven master AreaInfo/AERA table found")
@@ -4598,7 +4459,6 @@ def iter_build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_re
     return area_objects
 
 
-
 def log_overlay_resource_stats(img_reader: LVZ.read_img, label: str):
     if not IMPORT_VERBOSE_RESOURCE_BUILD_LOGS:
         return
@@ -4648,7 +4508,7 @@ def stamp_img_detail_on_object(obj: bpy.types.Object, detail, instance_index: in
 
 
 def get_or_create_import_collection(collection_name: str, parent_collection=None):
-    """Get/create one collection and link it under the requested parent only."""
+
     try:
         parent = parent_collection or bpy.context.scene.collection
         existing = bpy.data.collections.get(collection_name)
@@ -4686,12 +4546,7 @@ def blds_clear_collection_tree_objects(collection):
 
 
 def blds_remove_legacy_import_collections():
-    """Remove collection names created by pre-1.0.21 LVZ imports.
 
-    Those collections were global rather than tied to one LVZ+IMG pair, so
-    leaving them in the scene makes a corrected import appear to have duplicate
-    or detached effects. Only exact BLeeds-owned legacy names are touched.
-    """
     for collection_name in ("BLeeds Leeds 2DFX", "BLeeds IMG linked placements"):
         try:
             collection = bpy.data.collections.get(collection_name)
@@ -4730,14 +4585,7 @@ def blds_import_pair_base_name(lvz_path: str, img_name: Optional[str]) -> str:
 
 
 def blds_prepare_import_collection_tree(lvz_path: str, img_name: Optional[str]):
-    """Create one source-named hierarchy for the LVZ+IMG pair.
 
-    Example:
-        beach
-          Objects
-          Linked Placements
-          2DFX
-    """
     global _ACTIVE_IMPORT_ROOT_COLLECTION
     global _ACTIVE_IMPORT_OBJECTS_COLLECTION
     global _ACTIVE_IMPORT_LINKED_COLLECTION
@@ -4764,7 +4612,7 @@ def blds_prepare_import_collection_tree(lvz_path: str, img_name: Optional[str]):
     linked = get_or_create_named_child("Linked Placements", "LVZ_IMG_LINKED_COLLECTION")
     effects = get_or_create_named_child("2DFX", "LVZ_IMG_2DFX_COLLECTION")
 
-    # A fresh import replaces only BLeeds-owned children for this exact pair.
+
     for collection in (objects, linked, effects):
         blds_clear_collection_tree_objects(collection)
     try:
@@ -4799,7 +4647,6 @@ def set_collection_view_hidden(collection, hidden: bool):
         collection.hide_viewport = bool(hidden)
     except Exception:
         pass
-
 
 
 RAW_PARSER_BASE_KIND_NAMES = {
@@ -4855,7 +4702,7 @@ def blds_raw_parser_base_name_matches(name: str, import_stem: str = "") -> bool:
     if not raw_name:
         return False
 
-    # Blender may append .001/.002.  Strip only the automatic duplicate suffix.
+
     base_name = re.sub(r"\.\d{3}$", "", raw_name)
     lower = base_name.lower()
 
@@ -4868,7 +4715,7 @@ def blds_raw_parser_base_name_matches(name: str, import_stem: str = "") -> bool:
         stems.add(stem)
         stems.add(stem + "1")
 
-    # Keep the common maps covered even when the import stem was unavailable.
+
     stems.update(("beach", "beach1", "mainla", "mainla1"))
 
     prefix_group = "|".join(re.escape(item) for item in sorted(stems, key=len, reverse=True))
@@ -4951,7 +4798,6 @@ def purge_stale_raw_parser_bases(import_stem: str = "", reason: str = "stale") -
     return touched
 
 
-
 def remove_unplaced_base_objects(candidate_objects, used_object_ids) -> int:
     touched = 0
     seen_ids = set()
@@ -4990,8 +4836,6 @@ def remove_unplaced_base_objects(candidate_objects, used_object_ids) -> int:
     return touched
 
 
-
-
 def blds_mesh_quality_score(obj) -> float:
     if obj is None:
         return -1.0
@@ -5012,10 +4856,7 @@ def blds_mesh_quality_score(obj) -> float:
     except Exception:
         radius = 0.0
 
-    # Legacy helper for a shared internal ROWLINK value. VCS beach has
-    # multiple sector resource-table candidates for the same model id.  Taking
-    # the first one gives stripped/partial facades like beach model 562 from
-    # sector 60; sector 61 has the fuller mesh.
+
     return (faces * 8.0) + (verts * 2.0) + (groups * 64.0) + min(max(radius, 0.0), 4096.0)
 
 
@@ -5084,10 +4925,8 @@ def detail_max_matrix_scale(detail) -> float:
 
 
 def neighbor_alias_candidate_is_safe(obj, detail) -> Tuple[bool, str]:
-    # V18 fixed a lot of holes, but it could also alias tiny placeholder rows
-    # onto a huge neighbouring chunk. That creates the giant purple/grey slabs.
-    # Only accept an alias when the candidate's transformed radius is close to
-    # the placement row sphere.
+
+
     expected = detail_expected_world_radius(detail)
     if expected <= 0.0:
         return True, "no_expected_radius"
@@ -5126,9 +4965,7 @@ def lookup_neighbor_alias_base(
             rejected.append((sector_index, row_index, int(detail[4]), res_id, cand_res, source, delta, str(detail[14]) if len(detail) > 14 else "UNKNOWN", why))
         return None
 
-    # Some VCS beach/mainland rows use placeholder/aggregate resource IDs with
-    # no direct payload row. The real sector chunk can be adjacent, but it is
-    # only safe to use if its size matches the placement sphere.
+
     for delta in range(1, int(NEIGHBOR_ALIAS_MAX_DELTA) + 1):
         for cand_res in (res_id - delta, res_id + delta):
             got = try_candidate(overlay_by_sector_res.get((sector_index, cand_res)), cand_res, "sector-neighbor", delta)
@@ -5145,8 +4982,7 @@ def lookup_neighbor_alias_base(
                 if got is not None:
                     return got
 
-    # Last resort: global neighbouring MDL resources. Keep this radius small to
-    # avoid pulling in unrelated city chunks.
+
     for delta in range(1, int(NEIGHBOR_ALIAS_GLOBAL_MAX_DELTA) + 1):
         for cand_res in (res_id - delta, res_id + delta):
             got = try_candidate(built_by_res.get(cand_res), cand_res, "lvz-neighbor", delta)
@@ -5160,7 +4996,6 @@ def lookup_neighbor_alias_base(
                 return got
 
     return None, -1, "", 0, rejected
-
 
 
 def blds_placement_report_key(detail):
@@ -5188,7 +5023,7 @@ def blds_make_placement_report_row(detail, index: int = -1) -> Dict[str, object]
             "row_link_raw": int(detail[3]),
             "row_link_id": int(detail[4]),
             "row_link_high_bit": bool(int(detail[3]) & 0x8000),
-            # Compatibility aliases for older scripts; UI/report labels no longer call this IPL.
+
             "ipl_raw": int(detail[3]),
             "ipl_id": int(detail[4]),
             "ipl_high_bit": bool(int(detail[3]) & 0x8000),
@@ -5342,7 +5177,7 @@ def blds_write_placement_res_report(lvz_path: str, details, report_rows_by_key: 
     )
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("BLeeds 1.1.0 RES / GAME.DTZ entity-pool 2DFX / source collection report\n")
+        f.write("BLeeds: map resources and GAME.DTZ effects\n")
         f.write("=" * 78 + "\n")
         f.write(f"LVZ: {lvz_path}\n")
         f.write(f"Placement rows retained: {len(ordered_rows)}\n")
@@ -5571,8 +5406,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
     ipl_row_overlay_by_res = ipl_row_overlay_by_res or {}
     ipl_nested_overlay_by_res = ipl_nested_overlay_by_res or {}
     ipl_extra_resource_objects = ipl_extra_resource_objects or []
-    # V75: these maps are loaded in the main importer scope.  Keep local empty
-    # fallbacks so placement can never die from IDE debug/report metadata.
+
+
     ide_ipl_to_res = ide_ipl_to_res or {}
     ide_ipl_to_name = ide_ipl_to_name or {}
     ide_res_to_model_id = ide_res_to_model_id or {}
@@ -6190,9 +6025,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
     except Exception:
         positive_sector_pair_keys = set()
 
-    # Build one runtime-placement group per AERA model-info/ROWLINK/transform.
-    # Several streamed RES pieces can form one opaque/transparent model.  They
-    # all point at the same CBaseModelInfo and must not duplicate its effects.
+
     two_dfx_split_res_by_placement = {}
     if create_game_dtz_2dfx_helpers and model_2dfx_by_game_model_id:
         for effect_detail in details:
@@ -6220,9 +6053,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                 )
             except TypeError:
                 progress_callback(detail_index + 1, total_details)
-        # Match DemonFF's cooperative import: a bounded batch completes, then
-        # control returns to Blender for redraws and window events. The status
-        # update happens first so the visible map and progress value agree.
+
+
         if detail_index and detail_index % 64 == 0:
             yield None
         used_ipl_model_fallback = False
@@ -6233,7 +6065,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         source_model_id_for_row = -1
         final_missing_fit_note = ""
         res_id = int(detail[0])
-        # detail[4] is an internal row-link/index, not a GTA IDE model id.
+
         ipl_id = int(detail[4])
         identity = placement_identity_by_key.get(blds_placement_report_key(detail), {}) or {}
         game_model_id = int(identity.get("game_model_id", -1))
@@ -6241,9 +6073,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         sector_index = int(detail[15]) if len(detail) > 15 else -1
         pass_name = str(detail[14]) if len(detail) > 14 else "UNKNOWN"
         row_index = int(detail[19]) if len(detail) > 19 else -1
-        # Decode the final world transform before any model-recovery branch
-        # needs it. This also guarantees that a recovered object is published
-        # with its correct XYZ/rotation/scale in the same placement batch.
+
+
         matrix = matrix_from_img_detail(detail)
         placement_report_row = placement_report_rows.get(blds_placement_report_key(detail))
         resolver_audit_row(detail, "row-start")
@@ -6285,11 +6116,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                     pass
                 exact_candidates.append((candidate, str(source), int(rank)))
 
-            # Master AreaInfo -> AERA rows are the authoritative exact payload
-            # source for streamed map resources.  Select a fitting AERA payload
-            # first so an empty/incomplete same-RES WRLD placeholder cannot hide
-            # it from placement.  This remains exact-RES only; no ROWLINK or
-            # GAME_MODEL geometry alias is involved.
+
             aera_candidates = []
             for candidate in extra_candidates_by_res.get(model_id, []):
                 try:
@@ -6314,8 +6141,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                         pass
                 return aera_obj, aera_source
 
-            # Every candidate below is keyed by the placement row's RES ID.
-            # Rank only breaks ties; the row sphere/matrix is the authority.
+
             add_candidate(overlay_by_sector_res.get((sector_index, model_id)), "exact_sector_model", 0)
             if row_index >= 0:
                 add_candidate(nested_overlay_by_res.get((row_index, model_id)), "exact_nested_row_model", 1)
@@ -6331,8 +6157,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
             for candidate in overlay_candidates_by_res.get(model_id, []):
                 add_candidate(candidate, "global_sector_model", 5)
 
-            # Raw continuation candidates are also exact RES variants.  They are
-            # generated only for unresolved rows or suspicious aggregate slices.
+
             for candidate in continuation_candidates_by_res.get(model_id, []):
                 exact_candidates.append((candidate, "img_continuation_model", 6))
 
@@ -6396,11 +6221,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
             if obj is not None:
                 return obj, source
 
-            # A fit failure must not create a new hole when an exact structured
-            # RES model already existed in the normal LVZ/IMG tables.  Raw IMG
-            # approximate matches remain rejectable, but the best same-RES structured model
-            # is retained as the conservative fallback.  This restores the old
-            # static-model coverage without ever substituting an IPL/other RES.
+
             structured_candidates = [
                 item for item in exact_candidates
                 if len(item) < 2 or str(item[1]) != "img_continuation_model"
@@ -6435,13 +6256,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                 fallback_extra += 1
             elif primary_model_source in ("global_sector_model", "img_continuation_model"):
                 fallback_overlay += 1
-        # GAME_MODEL is identity/2DFX metadata only. It is never a streamed
-        # geometry resource key. Visible geometry remains exact RES-only.
 
-        # Legacy V72 path: if RES was absent, ROWLINK was once treated as though it had a
-        # real parsed MDL payload, use the real MDL. This matches the WRLD row
-        # structure: +0x00 ROWLINK, +0x02 RES. This path remains disabled; do not run before
-        # WRLD sparse-fragment fallback so missing rows do not become fake slices.
+
         if (
             base_obj is None
             and ENABLE_REAL_IPL_FOR_MISSING_RES_ROWS
@@ -6476,8 +6292,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                     extra_note="RES side had no usable resource; legacy ROWLINK-as-model side resolved (should remain disabled)",
                 )
 
-        # V53: reference DFF is completely disabled.  Do not search it, parse it,
-        # create hidden proof objects, write reference CSVs, or use it for scene geometry.
+
         if base_obj is None and ENABLE_WRLD_SUBMODEL_GROUP_ID_RECOVERY:
             submodel_obj, submodel_info = lookup_wrld_submodel_group_by_res_id(sector_index, res_id)
             if (
@@ -6624,10 +6439,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                     ))
 
         if base_obj is None and ENABLE_IPL_MODEL_ID_FALLBACK:
-            # Disabled for V20. The first u16 in these rows is not a safe model-resource id
-            # for Stories WRLD import. It behaves like a placement/IDE remap id, while the
-            # second u16 is the resource name/id visible in converted IPLs such as beach3457.
-            # Using this as a fallback was the source of the wrong black slabs and fake fills.
+
+
             model_id = int(ipl_id)
             model_source = None
             base_obj = ipl_overlay_by_sector_res.get((sector_index, model_id))
@@ -6737,12 +6550,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         instance_index = object_use_count.get(base_id, 0)
         if ENABLE_VISIBLE_PLACEMENT_DEDUPLICATION:
             try:
-                # V44: dedupe/overlap filtering must apply to every visible
-                # placement row, not only recovered missing/submodel rows.  The
-                # broken Beach4977.### wall came from direct MDL rows repeated
-                # across sector containers with the same visible transform, plus
-                # AREA/IMG-continuation shifted copies when a normal positive-sector
-                # copy already exists for the same model/pass.
+
+
                 should_dedupe_this_row = True
                 pair_key = (int(ipl_id), int(res_id), str(pass_name))
                 skip_reason = ""
@@ -6764,17 +6573,12 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         missing_radius_fit_target_radius = 0.0
         missing_radius_fit_world_radius_before = 0.0
         if used_force_missing_img_mdl and FORCE_MISSING_IMG_MDL_CENTER_ON_BBOX:
-            # Older forced-missing builds centered the fallback mesh on its source
-            # bounding box.  That made final missing pieces collapse into a stuck
-            # clump when the mesh was already authored with the correct local
-            # offset.  Keep this as an off-by-default escape hatch.
+
+
             matrix = matrix_from_img_detail_centered_on_object(detail, base_obj)
         elif used_force_missing_img_mdl or used_final_missing_ipl_neighbor:
-            # Final missing rows are often cloned from a nearby IMG MDL whose
-            # raw local radius is far smaller than the placement row sphere.
-            # The row matrix alone can leave those visible copies tiny.  Fit the
-            # row matrix basis upward to the placement radius only for these
-            # forced/final-missing imports.
+
+
             (
                 matrix,
                 missing_radius_fit_applied,
@@ -6807,11 +6611,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
             base_is_world_baked_for_matrix = False
         keep_world_baked_submodel_matrix = bool(base_is_wrld_submodel_group and base_is_world_baked_for_matrix and should_preserve_world_baked_submodel_matrix(base_obj, matrix))
 
-        # V19 speed fix: use the parsed base itself for the first exact
-        # placement, then rename/transform/stamp it as a real placed object.
-        # Duplicates still get copied.  This avoids creating and later deleting
-        # tens of thousands of extra Blender objects, while still preventing
-        # raw beach_sec###_res### parser templates from surviving at origin.
+
         if instance_index == 0:
             obj = base_obj
             used_object_ids.add(base_id)
@@ -6926,11 +6726,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
             if len(ipl_cell_scale_rows) < int(IPL_FALLBACK_CELL_SCALE_LOG_LIMIT):
                 ipl_cell_scale_rows.append((sector_index, row_index, pass_name, ipl_id, res_id, str(ipl_model_source_for_row), sx, sy, sz))
         elif force_row_matrix_for_named_missing:
-            # Do not strip scale from forced/final missing MDLs.  These rows need
-            # their placement-row scale, and V12 could undo that scale here,
-            # leaving the visible Beach*_missingmdl copies tiny.  Recovered WRLD
-            # submodel rows are handled above, before this forced-name branch;
-            # their full normalized-model matrix is preserved and rebase-compensated.
+
+
             strip_ipl_cell_scale_for_this_row = bool(
                 IPL_FALLBACK_STRIP_CELL_SCALE_ENABLED
                 and used_ipl_model_fallback
@@ -6992,8 +6789,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         except Exception:
             pass
 
-        # Publish only a fully placed object. This prevents origin/identity
-        # flashes and lets the map visibly grow with correct XYZ/rotation/scale.
+
         try:
             obj.hide_viewport = False
             obj.hide_render = False
@@ -7005,11 +6801,11 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
             obj["blds_res_id"] = int(res_id)
             obj["blds_row_link_id"] = int(ipl_id)
             obj["blds_row_link_raw"] = int(detail[3])
-            obj["blds_ipl_id"] = int(ipl_id)  # compatibility alias only
+            obj["blds_ipl_id"] = int(ipl_id)
             obj["blds_aera_secondary_id"] = int(game_model_id)
             obj["blds_aera_secondary_name"] = str(game_model_name)
-            # Compatibility alias for older scenes/reports.  Entity-owned 2DFX
-            # stamps overwrite this only after an actual CEntity match.
+
+
             obj["blds_game_model_id"] = int(game_model_id)
             obj["blds_game_model_name"] = str(game_model_name)
             obj["blds_identity_source"] = str(identity.get("source", ""))
@@ -7037,10 +6833,7 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         except Exception:
             pass
 
-        # Do not create or stamp 2DFX from streamed placement rows.  The
-        # authoritative effect instances are imported after geometry placement
-        # from GAME.DTZ BUILDING/TREADABLE/DUMMY CEntity pools.  AERA secondary
-        # values remain placement metadata only.
+
         try:
             matrix_decision_rows.append({
                 "object_name": str(getattr(obj, "name", "")),
@@ -7316,8 +7109,8 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
             str(ipl_model_source_for_row or "exact-res"), str(matrix_mode_for_row), int(instance_index),
         )
         object_use_count[base_id] = instance_index + 1
-        # Do not preserve raw parser bases.  The visible placed object is the
-        # copy linked above, so the base belongs in the cleanup list.
+
+
         applied += 1
 
         if IMPORT_APPLY_PROGRESS_EVERY > 0 and (applied % IMPORT_APPLY_PROGRESS_EVERY) == 0:
@@ -7837,11 +7630,6 @@ def find_details_missing_primary_resources(built_by_res: Dict[int, bpy.types.Obj
     return missing
 
 
-
-
-
-# Canonical GAME.DTZ binary logic lives in data/data_zlib.py. These aliases
-# keep the Blender-facing helper names stable without duplicating the parser.
 blds_2dfx_effect_type_name = DATA_ZLIB.game_dtz_2dfx_effect_type_name
 blds_decode_dtz_2dfx_entry = DATA_ZLIB.decode_game_dtz_2dfx_entry
 blds_parse_game_dtz_2dfx_bytes = DATA_ZLIB.parse_game_dtz_2dfx_bytes
@@ -7925,7 +7713,7 @@ def blds_find_parent_for_game_entity(entity, spatial_index, bucket_size: float =
 
 
 def blds_import_game_entity_2dfx_helpers(collection, import_stem: str, model_effects, summary, sector_records, placed_records):
-    """Import authoritative entity-owned 2DFX for the current LVZ sector grid."""
+
     if collection is None or not model_effects:
         return 0
     entities = list(summary.get("effect_entities", []) or [])
@@ -7945,9 +7733,8 @@ def blds_import_game_entity_2dfx_helpers(collection, import_stem: str, model_eff
             sector_xy = blds_nearest_sector_xy_for_world_position(x, y, game_hint)
             parent_record = blds_find_parent_for_game_entity(entity, spatial_index)
             selection_reason = "ENTITY_ORIGIN_CELL" if (not active_cells or sector_xy in active_cells) else ""
-            # A model origin may sit just outside the final concrete sector while
-            # one or more of its native 2DFX points cross into it. Test the actual
-            # transformed effect positions before rejecting the entity.
+
+
             if active_cells and not selection_reason and parent_record is None:
                 try:
                     entity_matrix = blds_entity_matrix(entity)
@@ -8068,13 +7855,7 @@ def blds_parse_game_dtz_2dfx(lvz_path: str, explicit_path: str = "", wanted_mode
     )
 
 def blds_2dfx_placement_key(game_model_id: int, detail) -> Tuple:
-    """Return one runtime-placement key shared by split streamed resources.
 
-    Opaque/transparent/underwater pieces of one model carry different RES ids but
-    the same AERA model-info id, ROWLINK, row basis and world translation.  2DFX
-    belongs to the runtime model placement, so those pieces must share one helper
-    set.
-    """
     try:
         values = detail[12]
         origin = detail[18] if len(detail) > 18 else (0.0, 0.0, 0.0)
@@ -8093,17 +7874,7 @@ def blds_2dfx_placement_key(game_model_id: int, detail) -> Tuple:
 
 
 def blds_2dfx_native_model_matrix(placement_matrix: Matrix) -> Tuple[Matrix, Tuple[float, float, float]]:
-    """Remove streamed-geometry quantization scale from a placement matrix.
 
-    AERA/WRLD mesh vertices are normalized around roughly [-1, 1].  The three
-    placement-basis column lengths expand that normalized geometry back to world
-    size.  C2dEffect.position is already stored in native model units, so applying
-    those lengths again multiplies positions by values such as 16/32/64/128 and
-    scatters helpers hundreds or thousands of metres away.
-
-    Keep the exact placement translation and handed basis directions, but make
-    every basis column unit length before transforming GAME.DTZ positions.
-    """
     result = Matrix.Identity(4)
     scales = []
     for column_index in range(3):
@@ -8191,7 +7962,7 @@ def blds_clear_model_2dfx_collection(collection):
 
 
 def blds_2dfx_type_collection(collection, effect_type: int):
-    """Return a stable, readable child collection for one GAME.DTZ effect type."""
+
     if collection is None:
         return None
     names = {
@@ -8219,7 +7990,7 @@ def blds_2dfx_type_collection(collection, effect_type: int):
 
 
 def blds_attach_model_2dfx_metadata(obj, visible_res_id: int, game_model_id: int, placement_ipl_id: int, entries: List[Dict[str, object]], summary: Optional[Dict[str, object]] = None, mapping_basis: str = "MASTER_AERA_SECONDARY_ID", transform_mode: str = "GAME_DTZ_NATIVE_MODEL_SPACE_SCALE_STRIPPED_BASIS"):
-    """Attach namespaced Leeds metadata without touching another add-on's RNA."""
+
     if obj is None or not entries:
         return
     try:
@@ -8228,7 +7999,7 @@ def blds_attach_model_2dfx_metadata(obj, visible_res_id: int, game_model_id: int
         obj["blds_2dfx_visible_res_id"] = int(visible_res_id)
         obj["blds_2dfx_game_model_id"] = int(game_model_id)
         obj["blds_2dfx_model_id"] = int(game_model_id)
-        obj["blds_2dfx_placement_ipl_id"] = int(placement_ipl_id)  # compatibility alias
+        obj["blds_2dfx_placement_ipl_id"] = int(placement_ipl_id)
         obj["blds_2dfx_row_link_id"] = int(placement_ipl_id)
         obj["blds_2dfx_mapping_basis"] = str(mapping_basis)
         obj["blds_2dfx_transform_mode"] = str(transform_mode)
@@ -8241,15 +8012,7 @@ def blds_attach_model_2dfx_metadata(obj, visible_res_id: int, game_model_id: int
 
 
 def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: str, visible_res_id: int, game_model_id: int, placement_ipl_id: int, entries: List[Dict[str, object]], sector_index: int, row_index: int, pass_name: str, instance_index: int, placement_matrix: Matrix, split_res_ids=None, source_path: str = "", native_entity_matrix: bool = False, mapping_basis: str = "MASTER_AERA_SECONDARY_ID", entity_pool_name: str = "", entity_pool_index: int = -1, entity_sector_xy=None, parent_to_placed: bool = False, source_game: str = "") -> int:
-    """Create one plain BLeeds helper set for one runtime model placement.
 
-    ``C2dEffect.position`` is native model-space data.  The streamed geometry
-    object matrix contains a second, implicit normalization scale used to expand
-    quantized AERA/WRLD vertices.  The helper transform therefore uses the same
-    translation and basis directions with those column lengths stripped.
-
-    No DemonFF RNA is written.
-    """
     if collection is None or not entries:
         return 0
     try:
@@ -8293,8 +8056,8 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
                 helper = bpy.data.objects.new(helper_name, light_data)
                 source_rgb = tuple(channel / 255.0 for channel in source_rgba[:3])
                 light_data.color = source_rgb
-                # GAME.DTZ alpha is the only per-entry intensity channel. Map
-                # it deterministically instead of assigning one generic light.
+
+
                 light_data.energy = (source_rgba[3] / 255.0) * 1000.0
                 light_size = max(0.0, abs(float(entry.get("light_size", 0.0))))
                 light_distance = max(
@@ -8342,9 +8105,8 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
                 )
             except Exception:
                 pass
-            # Keep display helpers unscaled. Light spheres need only a world
-            # position; directional effect arrows receive their own direction
-            # rotation below. All source basis data is retained as metadata.
+
+
             helper_matrix = Matrix.Identity(4)
             helper_matrix[0][3] = float(world.x)
             helper_matrix[1][3] = float(world.y)
@@ -8360,7 +8122,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             helper["blds_2dfx_split_res_ids"] = str(split_res_text)
             helper["blds_2dfx_game_model_id"] = int(game_model_id)
             helper["blds_2dfx_model_id"] = int(game_model_id)
-            helper["blds_2dfx_placement_ipl_id"] = int(placement_ipl_id)  # compatibility alias
+            helper["blds_2dfx_placement_ipl_id"] = int(placement_ipl_id)
             helper["blds_2dfx_row_link_id"] = int(placement_ipl_id)
             helper["blds_2dfx_mapping_basis"] = str(mapping_basis)
             helper["blds_2dfx_transform_mode"] = "GAME_DTZ_CENTITY_NATIVE_WORLD_MATRIX" if native_entity_matrix else "GAME_DTZ_NATIVE_MODEL_SPACE_SCALE_STRIPPED_BASIS"
@@ -8461,10 +8223,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     LVZ.dbg(f"[log] live import log: {LVZ.DEBUG.file_path if LVZ.DEBUG is not None else log_path}")
     globals()["_CURRENT_IMPORT_LVZ_PATH"] = lvz_path
 
-    # Remove raw parser bases left by earlier test imports before this pass starts.
-    # These are source/template meshes such as beach_sec0199_res51 with identity
-    # transforms.  They are not real map placements and will otherwise keep showing
-    # up in dirty Blender scenes even after the new importer is fixed.
+
     purge_stale_raw_parser_bases(stem, reason="pre-import")
 
     previous_missing_keys = set()
@@ -8505,7 +8264,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     yield None
 
     LVZ.dbg("===== LVZ + IMG Import =====")
-    LVZ.dbg("BLeeds 1.1.0: readable GAME.DTZ entity 2DFX collections and properties")
+    LVZ.dbg("BLeeds: GAME.DTZ effects")
     old_global_undo = None
     try:
         global _ACTIVE_IMPORT_UNDO_STATE
@@ -8535,9 +8294,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     LVZ.dbg(f"LVZ: {lvz_path}")
     LVZ.dbg(f"[io] LVZ bytes in: {len(lvz_bytes_in)}  decomp: {len(decomp)} ({'compressed' if was_cmp else 'raw'})")
     LVZ.dbg("Retail LVZ+IMG import: no .DIR used. IMG resources are reconstructed from LVZ chunk headers and exact WRLD/AERA resource tables.")
-    # Converter IDE/IPL sidecars are not part of the LVZ/IMG placement path.
-    # Keep compatibility maps empty; authoritative GAME_MODEL identity is read
-    # from master AreaInfo -> AERA AreaResource.secondaryId below.
+
+
     ide_ipl_to_res = {}
     ide_ipl_to_name = {}
     ide_res_to_model_id = {}
@@ -8630,9 +8388,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         dialect_text = ", ".join(f"{key}:{value}" for key, value in sorted(resource_dialects.items())) if resource_dialects else "none"
         LVZ.dbg(f"[platform] resource dialects: {dialect_text}; final platform={platform}; texture swizzle={'PS2' if use_swizzle else 'PSP/no-PS2-swizzle'}")
         LVZ.dbg("")
-    # IMG-only model recovery is intentionally delayed until every exact WRLD
-    # resource table has been checked.  This prevents texture-number matches
-    # from replacing a real same-sector, master, linked, or AREA model.
+
 
     progress.update(18, "Decoding LVZ textures")
     yield None
@@ -8659,11 +8415,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             dedupe_visible=True,
             progress_callback=lambda index, total: progress.update_range(22, 26, index, total, "Reading IMG sector placements"),
         )
-        # Only concrete sector IPL tables place static map objects.  The broader
-        # parent/nested container scan is useful for finding exact model data,
-        # but its rows include triggered/auxiliary data and do not form another
-        # static IPL.  Importing those rows created the shifted beach and sand
-        # copies far outside the real map.
+
+
         extra_details = []
         LVZ.dbg(
             "Triggered and AREA blocks are used to find model data only; their rows are not added as extra static map placements."
@@ -8721,10 +8474,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     else:
         LVZ.dbg("[img] IMG rows not enumerated because IMG is missing")
 
-    # Resolve GAME.DTZ model-info ownership from the authoritative AERA row:
-    #   AreaResource.id1 = streamed RES
-    #   AreaResource.id2 = CBaseModelInfo / GAME.DTZ model-info index
-    # detail[4] remains ROWLINK and is never used as model identity.
+
     placement_identity_by_key = {}
     area_model_info_by_res = {}
     area_model_info_provenance = {}
@@ -8778,8 +8528,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         "conflicting_res_ids": len(area_model_info_conflicts),
         "aera_rows": int((area_identity_stats or {}).get("rows", 0)),
         "valid_pointer_rows": int((area_identity_stats or {}).get("valid_pointer_rows", 0)),
-        # Compatibility fields retained for old report readers.  No sidecar or
-        # position-based identity is used.
+
+
         "ipl_path": "",
         "matched_by_position": 0,
         "ide_name_fallback": 0,
@@ -8868,11 +8618,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 )
         else:
             LVZ.dbg("[2dfx-model] Beach3528 has no visible placement row in this LVZ/IMG import")
-    # LIGHTS rows were already decoded by enumerate_sector_details() above.
-    # Reuse those authoritative results instead of rescanning the IMG through
-    # the removed legacy blds_count_lights_pass_rows() diagnostic helper.
-    # Besides avoiding a second pass over a large IMG, this keeps the log tied
-    # to the exact rows that the importer will actually place.
+
+
     lights_kept = sum(
         1 for detail in (details or [])
         if len(detail) > 14 and str(detail[14]).upper() == "LIGHTS"
@@ -8927,9 +8674,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             lvz_path,
             img_name,
             needed_sector_res_keys=needed_sector_res_keys,
-            # Slave WRLD resource rows are 8 bytes: resource ID + resource offset.
-            # Twelve-byte interpretations belong to unrelated data and can attach
-            # the wrong geometry to a real placement ID.
+
+
             include_alt_12_layouts=False,
             progress_callback=lambda index, total: progress.update_range(41, 52, index, total, "Building exact IMG resource models"),
         )
@@ -8944,7 +8690,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             if len(detail) > 19 and int(detail[19]) >= 0
         }
         needed_deep_res_ids = {int(detail[0]) for detail in missing_after_primary}
-        # detail[4] is ROWLINK only. Old row-link/IPL fallback sets stay empty.
+
         needed_ipl_sector_keys = set()
         needed_ipl_row_res_keys = set()
         needed_ipl_res_ids = set()
@@ -8954,21 +8700,14 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             f"details={len(missing_after_primary)} row/res={len(needed_deep_row_res_keys)} res={len(needed_deep_res_ids)}"
         )
 
-        # Official VCS Area resources are not Sector overlays.  The master LVZ
-        # AreaInfo[] rows point to AERA chunks whose entries are
-        #   s16 RES, s16 secondaryId, u32 chunk-relative payload pointer.
-        # Parse this authoritative path before any broad/global recovery.
+
         progress.update(60, "Building exact AERA resource models")
         yield None
         LVZ.dbg("[progress] building exact models from master AreaInfo/AERA resources")
         if LVZ.DEBUG is not None:
             LVZ.DEBUG.flush()
-        # Build authoritative AERA payloads for every visible placement RES, not
-        # only rows that appear absent in the early LVZ/same-sector existence
-        # check.  A same-RES placeholder or incomplete WRLD slice can exist and
-        # still be unusable for the row; filtering AERA by mere object existence
-        # was why exact resources such as Beach1887 remained missing even though
-        # their real payload was present in the IMG AERA table.
+
+
         visible_placement_res_ids = {
             int(detail[0]) for detail in details
             if detail and int(detail[0]) >= 0
@@ -8996,10 +8735,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 LVZ.dbg(f"[aera-placement] exact RES={int(_watch_res)} has no parsed AERA geometry candidate")
 
         if needed_deep_res_ids and ENABLE_GLOBAL_EXACT_RES_FALLBACK_MDLS:
-            # Some VCS sectors do not carry the model payload in the same sector container
-            # even though the placement row's normal resource id is correct. Build one
-            # best global exact-res candidate per missing resource id before falling back
-            # to the more dangerous legacy ROWLINK-as-model interpretation.
+
+
             progress.update(62, "Building global exact-resource models")
             yield None
             LVZ.dbg("[progress] building exact IMG resource models from other map blocks")
@@ -9015,7 +8752,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 lvz_path,
                 img_name,
                 needed_sector_res_keys=None,
-                # Use the documented 8-byte Slave WRLD resource table only.
+
                 include_alt_12_layouts=False,
                 wanted_res_ids=needed_deep_res_ids,
                 collapse_by_res_id=True,
@@ -9039,10 +8776,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             LVZ.dbg(f"[cleanup] global exact-res IMG recovery had no build request; unresolved exact RES ids={len(needed_deep_res_ids)}")
 
         if needed_ipl_res_ids and ENABLE_INTERNAL_IPL_MODEL_FALLBACK_MDLS:
-            # Legacy disabled path: build ROWLINK-keyed resources globally, not only in the same sector.
-            # beach rows like RES=1828 / ROWLINK=1222..1241 reference model IDs that are
-            # stored in other sector resource tables, so same-sector filtering leaves
-            # the building half-missing and forces bad AREA/nested fallbacks.
+
+
             LVZ.dbg("[progress] building legacy ROWLINK fallback MDLs")
             if LVZ.DEBUG is not None:
                 LVZ.DEBUG.flush()
@@ -9166,8 +8901,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             lvz_path,
             img_name,
             needed_res_ids=needed_deep_res_ids,
-            # Triggered/auxiliary WRLD containers still use Sector-style rows.
-            # Keep these separate from the official AERA AreaResource parser.
+
+
             include_alt_12_layouts=False,
             wanted_res_ids=needed_deep_res_ids,
             progress_callback=lambda index, total: progress.update_range(75, 79, index, total, "Building linked auxiliary resource models"),
@@ -9205,9 +8940,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         )
         LVZ.dbg(f"Additional exact IMG models built: {additional_exact_img_models}")
 
-        # WRLD placement rows use the second u16 as the resource ID.  Resolve
-        # that ID from exact tables first: same Slave WRLD, row-linked records,
-        # Master WRLD, linked/AREA records, then another exact Slave table.
+
         exact_overlay_objects = []
         for (_candidate_sector, _candidate_res_id), candidate_obj in overlay_by_sector_res.items():
             if candidate_obj is None:
@@ -9221,12 +8954,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         exact_global_candidates_by_res = build_resource_object_candidate_map(exact_overlay_objects)
         exact_area_candidates_by_res = build_resource_object_candidate_map(area_direct_objects)
 
-        # Promote a fitting authoritative AERA payload into the concrete
-        # placement sector/RES lookup before the unresolved scan and before the
-        # Blender instance loop.  This makes placement deterministic: when the
-        # master AERA table contains exact RES geometry that fits the row, the
-        # row cannot later fall through to MISSING merely because another
-        # generic lookup pool was empty or contained an incomplete placeholder.
+
         aera_promoted_rows = 0
         aera_promoted_res_ids = set()
         for _detail in details:
@@ -9350,8 +9078,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 f"compared with raw exact-RES IMG variants: {len(suspicious_exact_slice_details)}"
             )
 
-        # Raw IMG scanning is limited to unresolved rows and same-RES WRLD
-        # aggregate slices whose transformed bounds do not cover their row.
+
         raw_scan_res_ids = {int(detail[0]) for detail in raw_scan_details if int(detail[0]) >= 0}
         if raw_scan_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
             progress.update(79, "Checking remaining IMG model data")
@@ -9380,7 +9107,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
 
     linked_instances = 0
     removed_unplaced = 0
-    sidecar_ipl_path = None  # V18: do not use external beach.ipl sidecars; fix internal master/slave WRLD placement only.
+    sidecar_ipl_path = None
     placement_report_rows = {}
     for placement_index, placement_detail in enumerate(details or []):
         placement_key = blds_placement_report_key(placement_detail)
@@ -9617,11 +9344,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
 
 
 def import_lvz_img_archive(*args, **kwargs):
-    """Compatibility wrapper for non-modal callers.
 
-    Blender's UI operator uses ``iter_import_lvz_img_archive`` directly so it
-    can yield between phases and placement batches.
-    """
     iterator = iter_import_lvz_img_archive(*args, **kwargs)
     while True:
         try:

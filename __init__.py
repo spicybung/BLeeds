@@ -15,12 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.5.2.8"
+__version__ = "1.5.3"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 5, 2, 8),
+    "version": (1, 5, 3),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Rockstar Leeds import/export tools for Blender 2.90 and newer",
@@ -33,10 +33,6 @@ from bpy.utils import register_class, unregister_class
 from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, IntProperty, StringProperty
 
 
-# Blender 2.90 stores custom mesh attributes as ID properties because the
-# generic Mesh.attributes API was added later.  These helpers keep the
-# fallback in the package root so the add-on has no external compatibility
-# module and can import under Blender 2.90's Python 3.7 runtime.
 def get_blender_version():
     return tuple(getattr(bpy.app, "version", (0, 0, 0)))
 
@@ -61,10 +57,7 @@ def set_mesh_gouraud_shading(mesh, enabled=True):
     except Exception:
         pass
 
-    # Full Gouraud shading must not use Blender's angle-based Auto Smooth.
-    # Auto Smooth splits normals again at its default 30-degree threshold,
-    # which makes the low-poly Stories meshes look flat even though every
-    # polygon is marked smooth.
+
     set_mesh_auto_smooth(mesh, False)
 
 
@@ -631,7 +624,6 @@ def register_lvz_img_progress_properties():
         )
 
 
-
 def unregister_lvz_img_progress_properties():
     for property_name in (
         "bleeds_lvz_img_progress", "bleeds_lvz_img_stage", "bleeds_lvz_img_status",
@@ -692,7 +684,7 @@ def register_bleeds_mdl_object_props():
     if not hasattr(bpy.types.Object, "bleeds_mdl_type"):
         bpy.types.Object.bleeds_mdl_type = EnumProperty(
             name="MDL Layout",
-            description="Serialized Leeds MDL layout; runtime model-info class is tracked separately",
+            description="Imported model type",
             items=[
                 ("SIM", "SimpleModel", "Static/simple Leeds model serialization"),
                 ("PED", "ClumpModel", "Skinned or hierarchical Leeds clump serialization"),
@@ -829,16 +821,21 @@ def register():
         append_menu_callback(export_menu, gui.cw_menu_export)
         export_hooked = True
 
-        # Do not claim success unless Blender can resolve the registered menu classes.
+
         if not hasattr(bpy.types, gui.TOPBAR_MT_file_import_bleeds.bl_idname):
             raise RuntimeError("BLeeds import menu class was not registered")
         if not hasattr(bpy.types, gui.CW_MT_ExportChoice.bl_idname):
             raise RuntimeError("BLeeds export menu class was not registered")
 
-        print("BLeeds 1.5.2.6 registered successfully: classes=%d, import_menu=yes, export_menu=yes" % len(registered_classes))
+        from .ops import uv_playback
+        uv_playback.registerNativeUvPlayback()
+
+        print("BLeeds %s registered successfully: classes=%d, import_menu=yes, export_menu=yes" % (__version__, len(registered_classes)))
 
     except Exception as exc:
-        # Roll back partial registration so Blender never gets stuck in a ghost-enabled state.
+        from .ops import uv_playback
+        uv_playback.unregisterNativeUvPlayback()
+
         if export_hooked:
             remove_menu_callback(export_menu, gui.cw_menu_export)
         if import_hooked:
@@ -853,10 +850,12 @@ def register():
         unregister_bleeds_mdl_object_props()
         unregister_bleeds_texture_scene_props()
         unregister_lvz_img_progress_properties()
-        print("BLeeds 1.5.2.6 registration FAILED: %s" % exc)
+        print("BLeeds %s registration FAILED: %s" % (__version__, exc))
         raise
 
 def unregister():
+    from .ops import uv_playback
+    uv_playback.unregisterNativeUvPlayback()
     remove_menu_callback(get_file_import_menu_type(), gui.cw_menu_import)
     remove_menu_callback(get_file_export_menu_type(), gui.cw_menu_export)
 

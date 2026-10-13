@@ -41,7 +41,7 @@ def image_to_rgba8(image: bpy.types.Image, platform: str) -> Tuple[int, int, byt
     target = 0
     ps2 = str(platform).upper() == "PS2"
 
-    # Blender image buffers are bottom-up. Leeds raster rows are top-down.
+
     for y in range(height - 1, -1, -1):
         row_start = y * width * 4
         for x in range(width):

@@ -47,6 +47,8 @@ class IMPORT_OT_leeds_world(Operator, ImportHelper):
         except Exception as exc:
             self.report({'ERROR'}, f"Failed to import World Level: {exc}")
             raise
+        from ..ops.uv_playback import requestNativeUvPlayback
+        requestNativeUvPlayback(context)
         return {'FINISHED'}
 
 def menu_func_import(self, context):

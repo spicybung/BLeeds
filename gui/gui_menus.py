@@ -134,7 +134,7 @@ class TOPBAR_MT_file_import_bleeds(Menu):
         )
         layout.operator(
             "import_scene.leeds_lvz_img",
-            text="R* Leeds: LeVelZlib IMG Archive (.lvz + .img)",
+            text="R* Leeds: World (.dtz, .lvz + .img)",
         )
         layout.operator(
             "import_scene.leeds_world",

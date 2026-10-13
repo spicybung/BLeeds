@@ -23,18 +23,6 @@ from typing import List, Dict, Tuple, Optional, Sequence
 
 import numpy as np
 
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for .CHK/XTX/TEX - dictionaries for LCS/VCS/CW/MH2 textures      #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
-# • https://web.archive.org/web/20180729204205/http://gtamodding.ru/wiki/CHK (.xtx, .tex)
-# - Mod resources/cool stuff:
-# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (extract textures)
-# • https://gtaforums.com/topic/518948-rel-gta-stories-texture-explorer-20/ (view/explore textures)
-# • https://www.dixmor-hospital.com/mhs/index.php (Manhunt 2)
-
-#######################################################
 
 def read_u32(data: bytes, offset: int) -> int:
 
@@ -207,105 +195,38 @@ def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
         )
     return entries
 
-def unswizzle_psp_4bit(src: bytes, w: int, h: int) -> bytes:
+def unswizzlePspRows(source: bytes, row_stride: int, height: int) -> bytes:
+    if row_stride <= 0 or row_stride % 16 or height <= 0:
+        raise ValueError("Invalid PSP texture row size")
+    columns = np.arange(row_stride, dtype=np.int64)
+    rows = np.arange(height, dtype=np.int64)[:, None]
+    addresses = ((rows // 8) * (row_stride // 16) + columns // 16) * 128
+    addresses += (rows % 8) * 16 + columns % 16
+    if int(addresses.max()) >= len(source):
+        raise ValueError("PSP texture pixels are truncated")
+    pixels = np.frombuffer(source, dtype=np.uint8)
+    return pixels[addresses].tobytes()
 
-    min_width = 32
-    buffer_width = max(int(w), min_width)
-    padded_height = ((int(h) + 7) // 8) * 8
-    stride = buffer_width // 2
-    expected_size = stride * padded_height
-    source = bytes(src[:expected_size]).ljust(expected_size, b"\x00")
 
-    dest = bytearray(expected_size)
-    blocks_x = stride // 16
-    blocks_y = padded_height // 8
-    source_offset = 0
+def unswizzle_psp_4bit(src: bytes, w: int, h: int, buffer_stride: int = 0) -> bytes:
+    row_size = (int(w) + 1) // 2
+    row_stride = max(16, row_size, int(buffer_stride))
+    pixels = unswizzlePspRows(src, row_stride, int(h))
+    return np.frombuffer(pixels, dtype=np.uint8).reshape(h, row_stride)[:, :row_size].tobytes()
 
-    for block_y in range(blocks_y):
-        row_base = block_y * 8 * stride
-        for block_x in range(blocks_x):
-            block_base = row_base + block_x * 16
-            destination_offset = block_base
-            for block_row in range(8):
-                dest[destination_offset:destination_offset + 16] = source[source_offset:source_offset + 16]
-                source_offset += 16
-                destination_offset += stride
 
-    output_stride = int(w) // 2
-    out = bytearray(output_stride * int(h))
-    for row in range(int(h)):
-        source_row_offset = row * stride
-        destination_row_offset = row * output_stride
-        out[destination_row_offset:destination_row_offset + output_stride] = dest[
-            source_row_offset:source_row_offset + output_stride
-        ]
-    return bytes(out)
+def unswizzle_psp_8bit(src: bytes, w: int, h: int, buffer_stride: int = 0) -> bytes:
+    row_stride = max(16, int(w), int(buffer_stride))
+    pixels = unswizzlePspRows(src, row_stride, int(h))
+    return np.frombuffer(pixels, dtype=np.uint8).reshape(h, row_stride)[:, :w].tobytes()
 
-def unswizzle_psp_8bit(src: bytes, w: int, h: int) -> bytes:
-    min_width = 16
-    buffer_width = max(int(w), min_width)
-    padded_height = ((int(h) + 7) // 8) * 8
-    stride = buffer_width
-    expected_size = stride * padded_height
-    source = bytes(src[:expected_size]).ljust(expected_size, b"\x00")
 
-    dest = bytearray(expected_size)
-    blocks_x = stride // 16
-    blocks_y = padded_height // 8
-    source_offset = 0
+def unswizzle_psp_32bit(src: bytes, w: int, h: int, buffer_stride: int = 0) -> bytes:
+    row_size = int(w) * 4
+    row_stride = max(16, row_size, int(buffer_stride))
+    pixels = unswizzlePspRows(src, row_stride, int(h))
+    return np.frombuffer(pixels, dtype=np.uint8).reshape(h, row_stride)[:, :row_size].tobytes()
 
-    for block_y in range(blocks_y):
-        row_base = block_y * 8 * stride
-        for block_x in range(blocks_x):
-            block_base = row_base + block_x * 16
-            destination_offset = block_base
-            for block_row in range(8):
-                dest[destination_offset:destination_offset + 16] = source[source_offset:source_offset + 16]
-                source_offset += 16
-                destination_offset += stride
-
-    output_stride = int(w)
-    out = bytearray(output_stride * int(h))
-    for row in range(int(h)):
-        source_row_offset = row * stride
-        destination_row_offset = row * output_stride
-        out[destination_row_offset:destination_row_offset + output_stride] = dest[
-            source_row_offset:source_row_offset + output_stride
-        ]
-    return bytes(out)
-
-def unswizzle_psp_32bit(src: bytes, w: int, h: int) -> bytes:
-    min_width = 4
-    buffer_width = max(int(w), min_width)
-    padded_height = ((int(h) + 7) // 8) * 8
-    stride = buffer_width * 4
-    expected_size = stride * padded_height
-    source = bytes(src[:expected_size]).ljust(expected_size, b"\x00")
-
-    dest = bytearray(expected_size)
-    blocks_x = stride // 16
-    blocks_y = padded_height // 8
-    source_offset = 0
-
-    for block_y in range(blocks_y):
-        row_base = block_y * 8 * stride
-        for block_x in range(blocks_x):
-            block_base = row_base + block_x * 16
-            destination_offset = block_base
-            for block_row in range(8):
-                dest[destination_offset:destination_offset + 16] = source[source_offset:source_offset + 16]
-                source_offset += 16
-                destination_offset += stride
-
-    output_stride = int(w) * 4
-    out = bytearray(output_stride * int(h))
-    for row in range(int(h)):
-        source_row_offset = row * stride
-        destination_row_offset = row * output_stride
-        out[destination_row_offset:destination_row_offset + output_stride] = dest[
-            source_row_offset:source_row_offset + output_stride
-        ]
-    return bytes(out)
 
 def expand_nibbles_lo_first(data: bytes) -> np.ndarray:
 
@@ -470,7 +391,11 @@ def validate_ps2_stories_runtime_container(data: bytes) -> Tuple[bool, List[str]
         else:
             width, height, depth, mip_count, swizzle_mask, unknown_bits = fields
             expected_transfer = (0x450000 | (width // 2)) if depth == 4 else (0x250000 | width) if depth == 8 else 0
-            if depth in (4, 8) and read_u32(data, header + 4) != expected_transfer:
+            transfer = read_u32(data, header + 4)
+
+
+            valid_runtime_bits = (transfer >> 28) in (0, 0xC)
+            if depth in (4, 8) and (transfer & 0x00FFFFFF != expected_transfer or not valid_runtime_bits):
                 messages.append("PS2 indexed texture transfer word is inconsistent")
         raster = read_u32(data, header + 8)
         if raster < 0x50 or raster >= base:
@@ -509,6 +434,13 @@ def parse_psp_header(data: bytes, offset: int) -> Optional[PspTexHeader]:
     width = 1 << width_pow2 if width_pow2 < 32 else 0
     height = 1 << height_pow2 if height_pow2 < 32 else 0
     if width == 0 or height == 0 or width > 4096 or height > 4096:
+        return None
+    if bpp not in (4, 8, 16, 32) or mip_count > 8:
+        return None
+    if raster_offset <= 0 or raster_offset >= len(data):
+        return None
+    row_size = (width * bpp + 7) // 8
+    if swizzle_width and (swizzle_width < row_size or max(16, swizzle_width) % 16):
         return None
     return PspTexHeader(
         unknown0=unknown0,
@@ -606,103 +538,114 @@ def parse_container(data: bytes, base: int) -> Optional[Dict[str, int]]:
         'name': name,
     }
 
+def getPspRasterLayout(header: PspTexHeader) -> Dict[str, object]:
+    if header.bpp not in (4, 8, 16, 32):
+        raise ValueError("Unsupported PSP texture depth: %d" % header.bpp)
+    if not 0 <= header.mip_count <= 8:
+        raise ValueError("Invalid PSP mipmap count: %d" % header.mip_count)
+    levels = []
+    width = header.width
+    height = header.height
+    offset = int(header.raster_offset)
+    buffer_stride = int(header.swizzle_width)
+    for level in range(max(1, header.mip_count)):
+        row_size = (width * header.bpp + 7) // 8
+        if buffer_stride:
+            row_stride = max(16, row_size, buffer_stride >> level)
+            if row_stride % 16:
+                raise ValueError("Invalid PSP texture row size: %d" % row_stride)
+        else:
+            row_stride = row_size
+        size = row_stride * height
+        levels.append({'offset': offset, 'size': size, 'width': width,
+                       'height': height, 'row_stride': row_stride})
+        offset += size
+        width = max(1, width // 2)
+        height = max(1, height // 2)
+    palette_size = (1 << header.bpp) * 4 if header.bpp in (4, 8) else 0
+    if palette_size and not buffer_stride:
+        offset = (offset + 15) & ~15
+    return {'levels': levels, 'palette_offset': offset,
+            'palette_size': palette_size,
+            'size': offset + palette_size - header.raster_offset}
+
+
+def decodePspDirectColor(pixels: np.ndarray, header: PspTexHeader) -> np.ndarray:
+    if header.bpp == 32:
+        return pixels.reshape(header.height, header.width, 4).copy()
+    values = np.frombuffer(pixels.tobytes(), dtype='<u2').reshape(header.height, header.width)
+    color_format = header.tail & 0x0F00
+    rgba = np.empty((header.height, header.width, 4), dtype=np.uint8)
+    if color_format == 0x0200:
+        rgba[:, :, 0] = (values & 31) * 255 // 31
+        rgba[:, :, 1] = ((values >> 5) & 63) * 255 // 63
+        rgba[:, :, 2] = ((values >> 11) & 31) * 255 // 31
+        rgba[:, :, 3] = 255
+    elif color_format in (0x0100, 0x0A00):
+        rgba[:, :, 0] = (values & 31) * 255 // 31
+        rgba[:, :, 1] = ((values >> 5) & 31) * 255 // 31
+        rgba[:, :, 2] = ((values >> 10) & 31) * 255 // 31
+        rgba[:, :, 3] = np.where(values & 0x8000, 255, 0) if color_format == 0x0100 else 255
+    elif color_format == 0x0300:
+        for channel in range(4):
+            rgba[:, :, channel] = ((values >> (channel * 4)) & 15) * 17
+    else:
+        raise ValueError("Unsupported PSP 16-bit colour format: 0x%04X" % header.tail)
+    return rgba
+
+
 def decode_psp_texture(
     data: bytes,
     thdr: PspTexHeader,
     block_size: int,
     palette_override: Optional[Sequence[Tuple[int, int, int, int]]] = None,
+    mip_level: int = 0,
 ) -> Optional[np.ndarray]:
-    w = thdr.width
-    h = thdr.height
-    bpp = thdr.bpp
-    offset = thdr.raster_offset
-    if w <= 0 or h <= 0 or offset <= 0:
-        return None
-    pixel_count = w * h
-    padded_height = ((h + 7) // 8) * 8
-
-    if bpp == 4:
-        if thdr.swizzle_width:
-            base_bytes = (max(w, 32) // 2) * padded_height
-        else:
-            base_bytes = (pixel_count + 1) // 2
-    elif bpp == 8:
-        if thdr.swizzle_width:
-            base_bytes = max(w, 16) * padded_height
-        else:
-            base_bytes = pixel_count
-    elif bpp == 32:
-        if thdr.swizzle_width:
-            base_bytes = max(w, 4) * 4 * padded_height
-        else:
-            base_bytes = pixel_count * 4
-    else:
-        return None
-    if offset + base_bytes > len(data):
-        return None
-    raw = data[offset:offset + base_bytes]
-
+    layout = getPspRasterLayout(thdr)
+    levels = layout['levels']
+    if not 0 <= mip_level < len(levels):
+        raise ValueError("PSP mipmap level is out of range")
+    level = levels[mip_level]
+    block_end = min(len(data), thdr.raster_offset + int(block_size))
+    last_level = levels[-1]
+    pixel_end = int(last_level['offset']) + int(last_level['size'])
+    required_end = (int(layout['palette_offset']) + int(layout['palette_size'])
+                    if palette_override is None else pixel_end)
+    if block_size <= 0 or thdr.raster_offset <= 0 or required_end > block_end:
+        raise ValueError("PSP texture pixels or palette are truncated")
+    width = int(level['width'])
+    height = int(level['height'])
+    row_stride = int(level['row_stride'])
+    offset = int(level['offset'])
+    raw = data[offset:offset + int(level['size'])]
     if thdr.swizzle_width:
-        if bpp == 4:
-            unswizzled = unswizzle_psp_4bit(raw, w, h)
-            idx = expand_nibbles_lo_first(unswizzled)
-        elif bpp == 8:
-            unswizzled = unswizzle_psp_8bit(raw, w, h)
-            idx = np.frombuffer(unswizzled, dtype=np.uint8)
-        elif bpp == 32:
-            unswizzled = unswizzle_psp_32bit(raw, w, h)
-            rgba = np.frombuffer(unswizzled, dtype=np.uint8).reshape((h, w, 4))
-            return rgba
+        raw = unswizzlePspRows(raw, row_stride, height)
+    rows = np.frombuffer(raw, dtype=np.uint8).reshape(height, row_stride)
+    if thdr.bpp in (16, 32):
+        row_size = width * thdr.bpp // 8
+        level_header = PspTexHeader(thdr.unknown0, offset, 0,
+                                   width.bit_length() - 1, height.bit_length() - 1,
+                                   thdr.bpp, 1, thdr.tail)
+        return decodePspDirectColor(rows[:, :row_size].copy(), level_header)
+    if thdr.bpp == 4:
+        indices = np.empty((height, row_stride * 2), dtype=np.uint8)
+        indices[:, 0::2] = rows & 15
+        indices[:, 1::2] = rows >> 4
+        indices = indices[:, :width]
     else:
-        if bpp == 4:
-            idx = expand_nibbles_lo_first(raw)
-        elif bpp == 8:
-            idx = np.frombuffer(raw, dtype=np.uint8)
-        elif bpp == 32:
-            rgba = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 4))
-            return rgba
-    pal = palette_override
-    if pal is None:
-        if bpp == 4:
-
-            pal_size = 16 * 4
-        elif bpp == 8:
-
-            pal_size = 256 * 4
-        else:
-            pal_size = 0
-        if pal_size > 0:
-            pal_start = offset + block_size - pal_size
-            pal_end = pal_start + pal_size
-            if 0 <= pal_start < pal_end <= len(data):
-                pal_bytes = data[pal_start:pal_end]
-                pal = []
-                for i in range(0, len(pal_bytes), 4):
-                    r = pal_bytes[i]
-                    g = pal_bytes[i + 1]
-                    b = pal_bytes[i + 2]
-                    a = pal_bytes[i + 3]
-                    pal.append((r, g, b, a))
-            else:
-                pal = None
-    rgba = np.empty((h, w, 4), dtype=np.uint8)
-    if pal:
-
-        for i, v in enumerate(idx[:pixel_count]):
-            y = i // w
-            x = i % w
-            col = pal[int(v) % len(pal)]
-            rgba[y, x] = col
+        indices = rows[:, :width]
+    if palette_override is None:
+        palette_start = int(layout['palette_offset'])
+        palette_end = palette_start + int(layout['palette_size'])
+        palette = np.frombuffer(data[palette_start:palette_end], dtype=np.uint8).reshape(-1, 4)
     else:
+        palette = np.asarray(palette_override, dtype=np.uint8)
+        if palette.ndim != 2 or palette.shape[1] != 4:
+            raise ValueError("PSP palette must contain RGBA colours")
+    if len(palette) <= int(indices.max()):
+        raise ValueError("PSP texture uses a missing palette colour")
+    return palette[indices].copy()
 
-        max_idx = int(idx.max()) if len(idx) > 0 else 0
-        scale = 255.0 / max_idx if max_idx > 0 else 0.0
-        for i, v in enumerate(idx[:pixel_count]):
-            y = i // w
-            x = i % w
-            gval = int(v * scale + 0.5)
-            rgba[y, x] = (gval, gval, gval, 255)
-    return rgba
 
 def decode_ps2_texture(
     data: bytes,

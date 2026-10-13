@@ -50,7 +50,7 @@ def _decompress_limited(data: bytes, wbits: int, max_output: int) -> bytes:
 
 
 def decompress_game_dtz(data: bytes, max_output: int = GAME_DTZ_MAX_DECOMPRESSED_BYTES) -> Tuple[bytes, bool]:
-    """Return a raw GATG/GTAG resource image and whether zlib was used."""
+
     raw = bytes(data or b"")
     if raw[:4] in (b"GATG", b"GTAG"):
         return raw, False
@@ -87,7 +87,7 @@ def _resolve_offset(data: bytes, raw_offset: int, min_size: int = 1) -> int:
 
 
 def decode_game_dtz_2dfx_entry(data: bytes, off: int, index: int, table_abs: int) -> Optional[Dict[str, object]]:
-    """Decode one exact 64-byte Stories C2dEffect record."""
+
     try:
         if off < 0 or off + GAME_DTZ_2DFX_ROW_SIZE > len(data):
             return None
