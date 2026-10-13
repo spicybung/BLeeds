@@ -15,7 +15,7 @@ The following is a list of file formats that are currently supported by the addo
   - [x] Export 
 - [X] Texture Files (.chk, .xtx, .tex)*
   - [X] Import
-  - [X] Export *
+  - [X] Export 
 - [X] Collision files (.col2)*
   - [X] Import
   - [x] Export *
