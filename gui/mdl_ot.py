@@ -406,7 +406,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         description="Target platform profile for the exported Leeds MDL",
         items=(
             ("PS2", "PlayStation 2", "Export a PlayStation 2 Stories MDL"),
-            ("PSP", "PlayStation Portable", "Select the PSP Stories MDL profile"),
+            ("PSP", "PlayStation Portable", "Export a PSP Stories MDL"),
         ),
         default="PS2",
     )
@@ -493,6 +493,9 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         col.prop(self, "export_game")
         col.prop(self, "mdl_type")
         col.prop(self, "use_normals")
+        if self.mdl_type == "SIMPLE":
+            col.prop(self, "simple_model_info_id")
+            col.prop(self, "simple_atomic_hash_key")
 
     def invoke(self, context, event):
         from ..ops import mdl_exporter
@@ -530,6 +533,8 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     hash_value = int(root["bleeds_mdl_atomic_hash_key"])
                 if model_info_value is not None and 0 <= model_info_value <= 0xFFFF:
                     self.simple_model_info_id = f"0x{model_info_value:X}"
+                if hash_value is not None:
+                    hash_value &= 0xFFFFFFFF
                 if hash_value is not None and 0 <= hash_value <= 0xFFFFFFFF:
                     self.simple_atomic_hash_key = f"0x{hash_value:X}"
         except Exception:
@@ -604,9 +609,6 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                 except Exception:
                     pass
 
-            if self.platform == "PSP":
-                raise RuntimeError("PSP MDL export is not supported. Choose PlayStation 2.")
-
             if requested_model_format == "SIMPLE":
                 def parse_runtime_integer(text, field_name, maximum):
                     value_text = str(text or "").strip()
@@ -640,7 +642,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     root["bleeds_mdl_model_info_id"] = -1
 
                 if explicit_hash_key is not None:
-                    root["bleeds_mdl_atomic_hash_key"] = int(explicit_hash_key)
+                    root["bleeds_mdl_atomic_hash_key"] = int(explicit_hash_key) if explicit_hash_key <= 0x7FFFFFFF else int(explicit_hash_key) - 0x100000000
                 else:
                     existing_hash = None
                     try:
@@ -653,10 +655,11 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     if existing_hash is None:
                         root["bleeds_mdl_atomic_hash_key"] = 0
 
-            mdl_exporter.export_stories_mdl_ps2(
+            export_function = mdl_exporter.export_stories_mdl_psp if self.platform == "PSP" else mdl_exporter.export_stories_mdl_ps2
+            export_function(
                 context=context,
                 filepath=self.filepath,
-                mdl_type=internal_mdl_type,
+                mdl_type=semantic_type if self.platform == "PSP" else internal_mdl_type,
                 max_batch_verts=self.max_batch_verts,
                 rounding_mode=self.rounding_mode,
                 use_normals=use_normals,

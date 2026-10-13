@@ -481,6 +481,10 @@ def create_armature_from_context(
             if atomic_frame_ptr in frame_names_by_ptr:
                 arm_obj["bleeds_mdl_atomic_frame_name"] = str(frame_names_by_ptr[atomic_frame_ptr])
                 arm_obj["bleeds_base_frame_name"] = str(frame_names_by_ptr[atomic_frame_ptr])
+            if stories_ctx.platform == 'PSP':
+                for bone in arm_data.bones:
+                    if 'BoneID' in bone:
+                        bone['bleeds_psp_import_display_bone_id'] = int(bone['BoneID'])
         except Exception:
             pass
     except Exception:
@@ -682,6 +686,8 @@ def get_or_create_material_for_stories(
     mat["bleeds_material_identity"] = identity
     mat["bleeds_material_texture_name"] = key
     mat["bleeds_mdl_texture_name"] = str(getattr(mat_desc, 'texture', '') or '')
+    mat["bleeds_mdl_material_entry_offset"] = int(getattr(mat_desc, 'offset', 0))
+    mat["bleeds_mdl_material_rgba_hex"] = "0x%08X" % (int(getattr(mat_desc, 'rgba', 0)) & 0xFFFFFFFF)
     return mat
 
 CUTSCENE_BODY_BONE_NAMES = {
@@ -3616,6 +3622,7 @@ def buildPspAtomicMeshes(
                     pass
 
         obj['bleeds_mdl_atomic_offset'] = int(getattr(atomic, 'atomic_offset', 0))
+        obj['bleeds_mdl_vehicle_extra'] = str(getattr(atomic, 'atomic_source', '')).startswith('extra')
         obj['bleeds_mdl_atomic_frame_ptr'] = int(atomic.frame_ptr)
         obj['bleeds_mdl_geom_ptr'] = int(atomic.geom_ptr)
         obj['bleeds_mdl_render_cb'] = int(atomic.render_cb)
@@ -4487,6 +4494,12 @@ def import_stories_mdl(
     root_obj["bleeds_model_usage_hint"] = str(getattr(stories_ctx, "model_usage_hint", "UNKNOWN") or "UNKNOWN")
     root_obj["bleeds_model_format_note"] = "Leeds model"
     root_obj["bleeds_mdl_filepath"] = str(filepath)
+    if platform == 'PSP':
+        import base64
+        import zlib
+        with open(filepath, 'rb') as source_file:
+            source_metadata = source_file.read()
+        root_obj['bleeds_psp_source_metadata'] = base64.b64encode(zlib.compress(source_metadata, 9)).decode('ascii')
     root_obj["bleeds_export_use_normals"] = True
     root_obj["bleeds_export_gouraud_shading"] = True
     root_obj["bleeds_leeds_scale_base"] = [float(scale_base[0]), float(scale_base[1]), float(scale_base[2])]

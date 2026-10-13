@@ -27,6 +27,7 @@ from ..leedsLib.tex import (
     PspTexHeader,
     Ps2TexHeader,
     read_u32,
+    read_cstr,
     slot_base_from_slot_ptr,
     parse_container,
     parse_psp_header,
@@ -972,7 +973,7 @@ def decode_chk_to_blender_images(
     blender_images: List[bpy.types.Image] = []
     source_path = os.path.abspath(input_path)
     texture_errors = []
-    for ((name, tex_off, entry_base, header, raster_offset), block_size) in zip(textures, block_sizes):
+    for entry_index, ((name, tex_off, entry_base, header, raster_offset), block_size) in enumerate(zip(textures, block_sizes)):
         if isinstance(header, PspTexHeader):
             try:
                 rgba = decode_psp_texture(data, header, block_size, palette_override=None)
@@ -1033,6 +1034,8 @@ def decode_chk_to_blender_images(
             img["bleeds_texture_container_flags24"] = int(hdr['flags24'])
             img["bleeds_texture_container_glob_count"] = int(hdr['glob_count'])
             img["bleeds_texture_entry_offset"] = int(entry_base)
+            img["bleeds_texture_dictionary_index"] = entry_index
+            img["bleeds_texture_mask_name"] = read_cstr(data, int(entry_base) + 0x30, 32)
             img["bleeds_texture_header_offset"] = int(tex_off)
             img["bleeds_texture_raster_offset"] = int(raster_offset)
             img["bleeds_texture_raster_block_size"] = int(block_size)

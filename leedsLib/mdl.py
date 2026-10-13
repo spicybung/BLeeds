@@ -16,6 +16,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import io
 import struct
 import math
 from dataclasses import dataclass, field
@@ -2547,13 +2548,14 @@ def resolveStoriesGameFromFrameNames(frame_names: Dict[int, str]) -> str:
 
 class read_stories:
 
-    def __init__(self, filepath: str, platform: str, mdl_type: str, game: str = "AUTO", print_debug_log: bool = False):
+    def __init__(self, filepath: str, platform: str, mdl_type: str, game: str = "AUTO", print_debug_log: bool = False, data: Optional[bytes] = None):
         self.filepath = filepath
         self.platform = str(platform or "AUTO").upper().strip()
         self.mdl_type = str(mdl_type or "AUTO").upper().strip()
         self.game = str(game or "AUTO").upper().strip()
         self.print_debug_log = bool(print_debug_log)
         self.ctx = None
+        self.source_data = data
 
     def read(self) -> StoriesMDLContext:
         ctx = StoriesMDLContext(
@@ -2591,7 +2593,7 @@ class read_stories:
         ctx.runtime_model_info_hint = runtime_classes.get(mdl_type_u, "UNKNOWN")
         ctx.model_usage_hint = usages.get(mdl_type_u, "UNKNOWN")
 
-        with open(filepath, "rb") as f:
+        with (io.BytesIO(self.source_data) if self.source_data is not None else open(filepath, "rb")) as f:
             ctx.log(
                 f"MDL structure: game={ctx.game}, platform={ctx.platform}, layout={ctx.serialized_layout}, "
                 f"runtime_class={ctx.runtime_model_info_hint}, usage={ctx.model_usage_hint}"

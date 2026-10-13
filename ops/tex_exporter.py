@@ -65,6 +65,9 @@ def collect_images_from_context(context: bpy.types.Context) -> List[bpy.types.Im
     active = getattr(context, "active_object", None)
     if active is not None and active not in objects:
         objects.insert(0, active)
+    for obj in list(objects):
+        if obj.get('bleeds_is_mdl_root', False):
+            objects.extend(child for child in obj.children_recursive if child.type == 'MESH' and child not in objects)
 
     for obj in objects:
         for slot in list(getattr(obj, "material_slots", []) or []):
@@ -87,7 +90,21 @@ def collect_images_from_context(context: bpy.types.Context) -> List[bpy.types.Im
         image = getattr(active_space, "image", None)
         if image is not None:
             found.append(image)
+            seen.add(image.name)
 
+    source_paths = {str(image.get('bleeds_texture_source_path', '')) for image in found
+                    if image.get('bleeds_texture_source_path')}
+    for image in bpy.data.images:
+        if str(image.get('bleeds_texture_source_path', '')) in source_paths and image.name not in seen:
+            seen.add(image.name)
+            found.append(image)
+    dictionary_order = {}
+    for image in found:
+        source = str(image.get('bleeds_texture_source_path', ''))
+        if source and source not in dictionary_order:
+            dictionary_order[source] = len(dictionary_order)
+    found.sort(key=lambda image: (dictionary_order.get(str(image.get('bleeds_texture_source_path', '')), len(dictionary_order)),
+                                  int(image.get('bleeds_texture_dictionary_index', 0))))
     return found
 
 
@@ -215,6 +232,125 @@ def build_ps2_texture_container(texture_records, texture_format="XTX") -> bytes:
     return bytes(data)
 
 
+def buildPspTextureRaster(rgba, width, height, depth, mip_count=1):
+    import numpy as np
+
+    levels = [np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4).copy()]
+    mip_count = max(1, min(8, int(mip_count)))
+    for level in range(1, mip_count):
+        previous = levels[-1]
+        old_height, old_width = previous.shape[:2]
+        if old_height == 1 and old_width == 1:
+            break
+        new_width = max(1, old_width // 2)
+        new_height = max(1, old_height // 2)
+        next_level = np.zeros((new_height, new_width, 4), dtype=np.uint16)
+        samples = 0
+        for row in range(min(2, old_height)):
+            for column in range(min(2, old_width)):
+                next_level += previous[row::min(2, old_height), column::min(2, old_width)]
+                samples += 1
+        levels.append(((next_level + samples // 2) // samples).astype(np.uint8))
+
+    quantized = quantize_texture_rgba(levels[0].tobytes(), depth, "PSP")
+    palette_size = (1 << depth) * 4
+    palette = quantized[-palette_size:]
+    pixel_count = width * height
+    if depth == 4:
+        packed = np.frombuffer(quantized[:(pixel_count + 1) // 2], dtype=np.uint8)
+        indices = np.empty(len(packed) * 2, dtype=np.uint8)
+        indices[0::2] = packed & 15
+        indices[1::2] = packed >> 4
+        indices = indices[:pixel_count]
+    else:
+        indices = np.frombuffer(quantized[:pixel_count], dtype=np.uint8)
+
+    level_indices = [indices.reshape(height, width)]
+    palette_colors = np.frombuffer(palette, dtype=np.uint8).reshape(-1, 4).astype(np.int32)
+    for level in levels[1:]:
+        colors, reverse = np.unique(level.reshape(-1, 4), axis=0, return_inverse=True)
+        nearest = np.empty(len(colors), dtype=np.uint8)
+        for first in range(0, len(colors), 1024):
+            batch = colors[first:first + 1024].astype(np.int32)
+            difference = batch[:, None, :] - palette_colors[None, :, :]
+            distance = (difference * difference).sum(axis=2)
+            nearest[first:first + len(batch)] = distance.argmin(axis=1)
+        level_indices.append(nearest[reverse].reshape(level.shape[:2]))
+
+    swizzled = all(max(16, (level.shape[1] * depth + 7) // 8) == 16 or level.shape[0] >= 8
+                   for level in levels)
+    pitch = max(16, (width * depth + 7) // 8) if swizzled else 0
+    output = bytearray()
+    for level_index, level in enumerate(levels):
+        level_height, level_width = level.shape[:2]
+        values = level_indices[level_index]
+        row_size = (level_width * depth + 7) // 8
+        row_stride = max(16, row_size, pitch >> level_index) if swizzled else row_size
+        rows = np.zeros((level_height, row_stride), dtype=np.uint8)
+        if depth == 4:
+            rows[:, :row_size] = values[:, 0::2]
+            rows[:, :level_width // 2] |= values[:, 1::2] << 4
+        else:
+            rows[:, :level_width] = values
+        if swizzled:
+            columns = np.arange(row_stride)
+            row_numbers = np.arange(level_height)[:, None]
+            addresses = ((row_numbers // 8) * (row_stride // 16) + columns // 16) * 128
+            addresses += (row_numbers % 8) * 16 + columns % 16
+            raster = np.zeros(row_stride * level_height, dtype=np.uint8)
+            raster[addresses] = rows
+            output.extend(raster.tobytes())
+        else:
+            output.extend(rows.tobytes())
+    if not swizzled:
+        output.extend(bytes(align(len(output), 16) - len(output)))
+    output.extend(palette)
+    return bytes(output), pitch, len(levels)
+
+
+def buildPspTextureContainer(texture_records):
+    if len(texture_records) > 4096:
+        raise ValueError("Too many textures for a Leeds texture dictionary")
+    data = bytearray(0x30)
+    data[:4] = b"xet\0"
+    struct.pack_into("<III", data, 0x20, 0x106, 0, 0x28)
+    struct.pack_into("<I", data, 0x2C, 0x28)
+    relocations = [0x28, 0x2C]
+    nodes = []
+    for name, width, height, raster, depth, pitch, mip_count, mask in texture_records:
+        data.extend(bytes(align(len(data), 16) - len(data)))
+        raster_offset = len(data)
+        data.extend(raster)
+        data.extend(bytes(align(len(data), 4) - len(data)))
+        header_offset = len(data)
+        format_flags = 0x4500 if depth == 4 else 0x2500
+        data.extend(struct.pack("<IIHBBBBH", 0, raster_offset, pitch,
+                                power_of_two_log2(width), power_of_two_log2(height),
+                                depth, mip_count, format_flags))
+        node = len(data)
+        nodes.append(node)
+        data.extend(bytes(0x50))
+        struct.pack_into("<II", data, node, header_offset, 0x20)
+        encoded = name.encode("ascii", "replace")[:31]
+        data[node + 0x10:node + 0x10 + len(encoded)] = encoded
+        encoded_mask = mask.encode("ascii", "replace")
+        data[node + 0x30:node + 0x30 + len(encoded_mask)] = encoded_mask
+        relocations.extend((node, node + 4, node + 8, node + 12, header_offset + 4))
+    if nodes:
+        struct.pack_into("<II", data, 0x28, nodes[-1] + 8, nodes[0] + 8)
+    for index, node in enumerate(nodes):
+        previous = nodes[index - 1] + 8 if index else 0x28
+        following = nodes[index + 1] + 8 if index + 1 < len(nodes) else 0x28
+        struct.pack_into("<II", data, node + 8, previous, following)
+    relocation_offset = len(data)
+    data.extend(struct.pack("<" + "I" * len(relocations), *relocations))
+    logical_end = len(data)
+    struct.pack_into("<IIII", data, 8, logical_end, relocation_offset,
+                     relocation_offset, len(relocations))
+    data.extend(bytes(align(logical_end, 2048) - logical_end))
+    return bytes(data)
+
+
 def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: str = "PS2", bit_depth="AUTO", texture_format="XTX") -> bytes:
     platform = str(platform or "PS2").upper().strip()
     if platform not in {"PS2", "PSP"}:
@@ -225,95 +361,23 @@ def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: s
         width, height, rgba = image_to_rgba8(image, platform)
         depth = resolve_texture_depth(image, bit_depth)
         raster = quantize_texture_rgba(rgba, depth, platform)
-        texture_records.append((clean_texture_name(image.name), width, height, raster, depth))
+        name = clean_texture_name(image.get("bleeds_texture_name", image.name))
+        if platform == "PSP":
+            if len(name.encode("ascii", "replace")) > 31:
+                raise ValueError("PSP texture names must be at most 31 characters: %s" % name)
+            mip_count = int(image.get("bleeds_texture_mipmap_count", 1))
+            raster, pitch, mip_count = buildPspTextureRaster(rgba, width, height, depth, mip_count)
+            mask = str(image.get("bleeds_texture_mask_name", ""))
+            if len(mask.encode("ascii", "replace")) > 31:
+                raise ValueError("PSP mask names must be at most 31 characters: %s" % mask)
+            texture_records.append((name, width, height, raster, depth, pitch, mip_count, mask))
+        else:
+            texture_records.append((name, width, height, raster, depth))
 
     if platform == "PS2":
         return build_ps2_texture_container(texture_records, texture_format)
 
-    if not texture_records:
-        raise ValueError("No image textures are available to export")
-
-    header_size = 0x50
-    cursor = header_size
-    raster_offsets = []
-    for _name, _width, _height, rgba, _depth in texture_records:
-        cursor = align(cursor, 16)
-        raster_offsets.append(cursor)
-        cursor += len(rgba)
-
-    cursor = align(cursor, 16)
-    node_offsets = []
-    for _record in texture_records:
-        node_offsets.append(cursor)
-        cursor += 0x50
-
-    cursor = align(cursor, 16)
-    texture_header_offsets = []
-    for _record in texture_records:
-        texture_header_offsets.append(cursor)
-        cursor += 0x10
-
-    data = bytearray(cursor)
-    data[0:4] = b"xet\0"
-    struct.pack_into("<I", data, 0x04, 2 if platform == "PS2" else 1)
-    struct.pack_into("<I", data, 0x08, len(data))
-    struct.pack_into("<I", data, 0x0C, 0)
-    struct.pack_into("<I", data, 0x10, 0)
-    struct.pack_into("<I", data, 0x14, 0)
-    struct.pack_into("<I", data, 0x20, 0x00008606 if platform == "PS2" else 0)
-
-    if platform == "PS2":
-        for index, value in enumerate((0x00000001, 0x0012FD70, 0x000003B5, 0x0012FDB8)):
-            struct.pack_into("<I", data, 0x30 + index * 4, value)
-
-    first_slot = node_offsets[0] + 8
-    last_slot = node_offsets[-1] + 8
-    struct.pack_into("<I", data, 0x28, first_slot)
-    struct.pack_into("<I", data, 0x2C, last_slot)
-
-    for index, (name, width, height, rgba, depth) in enumerate(texture_records):
-        raster_offset = raster_offsets[index]
-        node_offset = node_offsets[index]
-        texture_header_offset = texture_header_offsets[index]
-        data[raster_offset:raster_offset + len(rgba)] = rgba
-
-        previous_slot = node_offsets[index - 1] + 8 if index > 0 else 0
-        if index + 1 < len(texture_records):
-            next_slot = node_offsets[index + 1] + 8
-        else:
-            next_slot = 0x28 if platform == "PS2" else 0
-
-        struct.pack_into("<IIII", data, node_offset, texture_header_offset, 0, next_slot, previous_slot)
-        encoded_name = name.encode("ascii", "replace")[:63]
-        data[node_offset + 0x10:node_offset + 0x10 + len(encoded_name)] = encoded_name
-        data[node_offset + 0x10 + len(encoded_name)] = 0
-
-        width_pow2 = power_of_two_log2(width)
-        height_pow2 = power_of_two_log2(height)
-        if platform == "PS2":
-            flags = (
-                (width_pow2 & 0x3F)
-                | ((height_pow2 & 0x3F) << 6)
-                | ((depth & 0x3F) << 12)
-                | ((1 & 0x0F) << 20)
-            )
-            struct.pack_into("<IIII", data, texture_header_offset, 0, 0, raster_offset, flags)
-        else:
-            struct.pack_into(
-                "<IIHBBBBH",
-                data,
-                texture_header_offset,
-                0,
-                raster_offset,
-                0,
-                width_pow2,
-                height_pow2,
-                depth,
-                1,
-                0,
-            )
-
-    return bytes(data)
+    return buildPspTextureContainer(texture_records)
 
 
 def export_leeds_texture_container(filepath: str, images: Iterable[bpy.types.Image], platform: str = "PS2", bit_depth="AUTO") -> int:
