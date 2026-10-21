@@ -75,7 +75,11 @@ def finishNativeUvPlaybackRequests():
 def requestNativeUvPlayback(context=None):
     if bpy.app.background:
         return False
-    scene = (context or bpy.context).scene
+    if context is None:
+        context = bpy.context
+    if context is None or not hasattr(context, "scene") or context.scene is None:
+        return False
+    scene = context.scene
     if not sceneHasNativeUvAnimation(scene):
         return False
     pendingScenes.add(scene.name)
