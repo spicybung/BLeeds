@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
 
@@ -69,7 +69,7 @@ def resolve_export_defaults_from_root(context):
 class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
     bl_idname = "import_scene.bleeds_stories_mdl"
     bl_label = "Import Leeds MDL"
-    bl_description = "Import a Rockstar Leeds model from an MDL file"
+    bl_description = "Import Rockstar Leeds .MDL"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".mdl"
@@ -391,7 +391,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_stories_mdl"
     bl_label = "Export R* Leeds Stories MDL"
-    bl_description = "Export the active Leeds model to an MDL file"
+    bl_description = "Export Rockstar Leeds .MDL"
     bl_options = {"UNDO"}
 
     filename_ext = ".mdl"

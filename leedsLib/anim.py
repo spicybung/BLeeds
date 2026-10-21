@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
 
@@ -14,20 +14,6 @@
 
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-#   This script is for Stories .ANIM files and raw CAnimBlendTree data              #
-#   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #   #
-# - Script resources:
-# • https://gtamods.com/wiki/Relocatable_chunk (pre-process)
-# • https://web.archive.org/web/20180712151513/http://gtamodding.ru/wiki/ANIM (*Russian*)
-# • https://web-archive-org.translate.goog/web/20180712151513/http://gtamodding.ru/wiki/ANIM?_x_tr_sl=ru&_x_tr_tl=en&_x_tr_hl=en (*English*)
-# • https://github.com/aap/librwgta (*re'd RW/Leeds Engine source by The_Hero*)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rsl.h (ditto)
-# • https://github.com/aap/librwgta/blob/master/tools/storiesconv/rslconv.cpp (ditto)
-# - Mod resources/cool stuff:
-# • https://libertycity.net/files/gta-liberty-city-stories/48612-yet-another-img-editor.html (GTA3xx .img: .mdls, textures, animations)
-# • https://gtaforums.com/topic/838537-lcsvcs-dir-files/
 
 import math
 import struct

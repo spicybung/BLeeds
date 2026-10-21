@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
 
@@ -38,7 +38,7 @@ def _ensure_bytes(d):
 class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
     bl_idname = "import_scene.cw_wbl"
     bl_label = "Import Worldblock"
-    bl_description = "Import objects from a Chinatown Wars WBL file"
+    bl_description = "Import Chinatown Wars .WBL"
     filename_ext = ".wbl"
     filter_glob: StringProperty(default="*.wbl", options={'HIDDEN'})
     files: CollectionProperty(type=bpy.types.PropertyGroup)
@@ -304,7 +304,7 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
 class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.cw_wbl"
     bl_label = "Export CW Worldblock (.wbl)"
-    bl_description = "Export selected objects to a Chinatown Wars WBL file"
+    bl_description = "Export Chinatown Wars .WBL"
     filename_ext = ".wbl"
     filter_glob: StringProperty(default="*.wbl", options={'HIDDEN'})
 

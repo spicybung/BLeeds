@@ -23,7 +23,7 @@ bl_info = {
     "version": (1, 5, 3, 1),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
-    "description": "Rockstar Leeds import/export tools for Blender 2.90 and newer",
+    "description": "Importer/Exporter for Leeds Engine & RenderWare formats",
     "warning": "Work in progress",
     "category": "Import-Export",
 }

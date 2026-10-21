@@ -1,4 +1,4 @@
-# BLeeds - R* Leeds COL2 operators (ImportHelper/ExportHelper etc.)
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
 
@@ -11,7 +11,7 @@
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-#
+
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -25,7 +25,7 @@ from ..ops import col2_importer, col2_exporter
 class IMPORT_OT_COL2(Operator, ImportHelper):
     bl_idname = "import_scene.col2_leeds"
     bl_label = "Rockstar Leeds Collision"
-    bl_description = "Import collision geometry from a Rockstar Leeds COL2 file"
+    bl_description = "Import Rockstar Leeds .COL2"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".col2"
@@ -64,7 +64,7 @@ class IMPORT_OT_COL2(Operator, ImportHelper):
 class EXPORT_OT_COL2(Operator, ExportHelper):
     bl_idname = "export_scene.col2_leeds"
     bl_label = "Rockstar Leeds Collision"
-    bl_description = "Export collision geometry to a Rockstar Leeds COL2 file"
+    bl_description = "Export Rockstar Leeds .COL2"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".col2"

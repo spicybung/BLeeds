@@ -1,5 +1,19 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# BLeeds - Blender operators for Rockstar Leeds ANIM files.
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
+# Author: spicybung
+# Years: 2025 - 2026
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from pathlib import Path
 from typing import List
@@ -14,7 +28,7 @@ from ..ops import anim_importer
 class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_anim"
     bl_label = "Import R* Leeds Stories ANIM"
-    bl_description = "Import GTA Stories animation data from a Rockstar Leeds .anim file; Manhunt uses the separate IFP importer"
+    bl_description = "Import Rockstar Leeds .ANIM"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".anim"

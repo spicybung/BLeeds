@@ -1,6 +1,19 @@
-# BLeeds - GUI operators for R* Leeds CHK/XTX/TEX textures
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
 
@@ -15,7 +28,7 @@ from ..ops import tex_importer
 class IMPORT_OT_tex(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_tex"
     bl_label = "Import Texture"
-    bl_description = "Decode a Rockstar Leeds CHK/XTX/TEX texture container"
+    bl_description = "Import Rockstar Leeds .CHK, .XTX, .TEX"
     bl_options = {"UNDO"}
 
     filename_ext = ".xtx"
@@ -56,7 +69,7 @@ class IMPORT_OT_tex(Operator, ImportHelper):
 class EXPORT_OT_tex(Operator, ExportHelper):
     bl_idname = "export_scene.leeds_tex"
     bl_label = "Export Texture"
-    bl_description = "Export image textures used by the selected objects to a Leeds CHK/XTX/TEX container"
+    bl_description = "Export Rockstar Leeds .CHK, .XTX, .TEX"
 
     filename_ext = ".xtx"
     filter_glob: StringProperty(

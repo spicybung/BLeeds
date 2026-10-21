@@ -1,5 +1,19 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
-# BLeeds - Blender operator for Manhunt IFP files.
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
+# Author: spicybung
+# Years: 2025 - 2026
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from pathlib import Path
 
@@ -14,7 +28,7 @@ from ..ops import ifp_importer
 class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
     bl_idname = "import_scene.bleeds_manhunt_ifp"
     bl_label = "R* Studios: IFP (.ifp)"
-    bl_description = "Import Manhunt 1/2 ANCT IFP animation data onto a matching BLeeds armature"
+    bl_description = "Import Manhunt .IFP"
     bl_options = {"REGISTER", "UNDO"}
 
     filename_ext = ".ifp"

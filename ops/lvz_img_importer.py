@@ -1,4 +1,4 @@
-# BLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in Blender
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
 
@@ -6,6 +6,14 @@
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import re
 import struct
@@ -147,7 +155,7 @@ class LvzImgImportProgress:
         except Exception:
             pass
 
-    def begin(self, stage="Reading LVZ container"):
+    def begin(self, stage="Reading LVZ..."):
         global _ACTIVE_IMPORT_PROGRESS
         _ACTIVE_IMPORT_PROGRESS = self
         self.started = True
@@ -246,7 +254,7 @@ class LvzImgImportProgress:
         self.model_current = 0
         self.cached_current = 0
 
-    def update_map(self, current, total, placed, models, cached, detail="Placing IMG instances"):
+    def update_map(self, current, total, placed, models, cached, detail="Placing objects..."):
         self.map_total = max(0, int(total))
         self.map_current = max(0, min(self.map_total, int(current)))
         self.model_current = max(0, min(self.model_total, int(models)))
@@ -266,8 +274,8 @@ class LvzImgImportProgress:
         if self.map_total > 0:
             percent = (float(self.map_current) / float(self.map_total)) * 100.0
             text = (
-                "Leeds Stories map import {}/{} ({:.1f}%) | models {}/{} | "
-                "cached {}/{} | elapsed {} | ETA {}"
+                "LVZ/IMG: {}/{} ({:.1f}%) | MDLs: {}/{} | "
+                "Copies: {}/{} | Time: {} | ETA: {}"
             ).format(
                 self.map_current,
                 self.map_total,
@@ -280,7 +288,7 @@ class LvzImgImportProgress:
                 eta_text,
             )
         else:
-            text = "Leeds Stories map import | {}% | elapsed {} | ETA {}".format(
+            text = "LVZ/IMG: {}% | Time: {} | ETA: {}".format(
                 int(value), elapsed_text, eta_text
             )
         if self.stage:
@@ -8212,8 +8220,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         operator.report({'ERROR'}, "No LVZ selected.")
         return {'CANCELLED'}
 
-    progress = LvzImgImportProgress(operator, context).begin("Reading LVZ container")
-    progress.update(1, "Reading LVZ container", force=True)
+    progress = LvzImgImportProgress(operator, context).begin("Reading LVZ...")
+    progress.update(1, "Reading LVZ...", force=True)
 
     stem = normalized_copy_stem(Path(lvz_path).stem) or Path(lvz_path).stem
     globals()["_CURRENT_IMPORT_STEM"] = stem
@@ -8260,7 +8268,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     create_game_dtz_2dfx_helpers = bool(CREATE_GAME_DTZ_2DFX_HELPERS and import_game_dtz_2dfx)
     lvz_bytes_in = Path(lvz_path).read_bytes()
     decomp, was_cmp = LVZ.safe_decompress(lvz_bytes_in)
-    progress.update(4, "Decoding LVZ container")
+    progress.update(4, "Reading LVZ...")
     yield None
 
     LVZ.dbg("===== LVZ + IMG Import =====")
@@ -8312,7 +8320,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         debug_print=debug_print,
     )
 
-    progress.update(6, "Parsing LVZ headers")
+    progress.update(6, "Reading LVZ...")
     yield None
     try:
         master = lvz.parse_master_header()
@@ -8325,7 +8333,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             LVZ.DEBUG.flush()
         return {'CANCELLED'}
 
-    progress.update(9, "Reading companion IMG")
+    progress.update(9, "Reading IMG...")
     yield None
     img_bytes, img_name = None, None
     try:
@@ -8377,7 +8385,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         LVZ.dbg(f"  unique parent IMG container bases: {len(set(record['cont'] for record in parent_records))}")
     LVZ.dbg("")
 
-    progress.update(13, "Reading LVZ resource table")
+    progress.update(13, "Reading LVZ resources...")
     yield None
     rows = lvz.walk_master_resource_table(master.res_table_addr, res_count)
     platform_from_resources, resource_dialects = detect_platform_from_resource_dialects(lvz, rows, platform)
@@ -8390,14 +8398,14 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         LVZ.dbg("")
 
 
-    progress.update(18, "Decoding LVZ textures")
+    progress.update(18, "Importing textures...")
     yield None
     lvz.decode_textures(
         rows,
-        progress_callback=lambda index, total: progress.update_range(18, 22, index, total, "Decoding LVZ textures"),
+        progress_callback=lambda index, total: progress.update_range(18, 22, index, total, "Importing textures..."),
     )
 
-    progress.update(22, "Reading IMG placement tables")
+    progress.update(22, "Reading placements...")
     yield None
     transforms_by_res: Dict[int, Matrix] = {}
     details = []
@@ -8413,7 +8421,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             max_resource_id=res_count,
             include_lod=IMPORT_LOD_PASSES_BY_DEFAULT,
             dedupe_visible=True,
-            progress_callback=lambda index, total: progress.update_range(22, 26, index, total, "Reading IMG sector placements"),
+            progress_callback=lambda index, total: progress.update_range(22, 26, index, total, "Reading placements..."),
         )
 
 
@@ -8540,7 +8548,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         f"unresolved={int(identity_summary.get('unresolved', 0))} conflicts={len(area_model_info_conflicts)}"
     )
 
-    progress.update(27, "Reading model 2DFX metadata")
+    progress.update(27, "Reading 2DFX...")
     yield None
     model_2dfx_by_game_model_id, two_dfx_summary = blds_parse_game_dtz_2dfx(
         lvz_path,
@@ -8639,7 +8647,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     built_by_res = yield from iter_build_lvz_resource_mdl_objects(
         lvz,
         rows,
-        progress_callback=lambda index, total: progress.update_range(28, 40, index, total, "Building LVZ model resources"),
+        progress_callback=lambda index, total: progress.update_range(28, 40, index, total, "Importing MDLs..."),
     )
     LVZ.dbg(f"LVZ models built: {len(built_by_res)}")
     yield None
@@ -8677,7 +8685,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
 
 
             include_alt_12_layouts=False,
-            progress_callback=lambda index, total: progress.update_range(41, 52, index, total, "Building exact IMG resource models"),
+            progress_callback=lambda index, total: progress.update_range(41, 52, index, total, "Importing MDLs..."),
         )
         log_overlay_resource_stats(img, "sector")
         LVZ.dbg(f"IMG models built for static map blocks: {len(overlay_by_sector_res)}")
@@ -8701,7 +8709,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         )
 
 
-        progress.update(60, "Building exact AERA resource models")
+        progress.update(60, "Importing MDLs...")
         yield None
         LVZ.dbg("[progress] building exact models from master AreaInfo/AERA resources")
         if LVZ.DEBUG is not None:
@@ -8720,7 +8728,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             lvz_path,
             img_name,
             needed_res_ids=visible_placement_res_ids,
-            progress_callback=lambda index, total: progress.update_range(60, 62, index, total, "Building exact AERA resource models"),
+            progress_callback=lambda index, total: progress.update_range(60, 62, index, total, "Importing MDLs..."),
         )
         official_area_resource_count = len(area_direct_objects)
         _aera_watch = build_resource_object_candidate_map(area_direct_objects)
@@ -8737,7 +8745,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         if needed_deep_res_ids and ENABLE_GLOBAL_EXACT_RES_FALLBACK_MDLS:
 
 
-            progress.update(62, "Building global exact-resource models")
+            progress.update(62, "Importing MDLs...")
             yield None
             LVZ.dbg("[progress] building exact IMG resource models from other map blocks")
             if LVZ.DEBUG is not None:
@@ -8756,7 +8764,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 include_alt_12_layouts=False,
                 wanted_res_ids=needed_deep_res_ids,
                 collapse_by_res_id=True,
-                progress_callback=lambda index, total: progress.update_range(62, 67, index, total, "Building global exact-resource models"),
+                progress_callback=lambda index, total: progress.update_range(62, 67, index, total, "Importing MDLs..."),
             )
             ambiguous_global_res_ids = set(getattr(img, "last_ambiguous_overlay_res_ids", set()) or set())
             merged_global_exact = 0
@@ -8804,7 +8812,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             log_overlay_resource_stats(img, "ipl-sector")
 
         if ENABLE_NESTED_CHILD_FALLBACK_MDLS:
-            progress.update(67, "Building nested exact-resource models")
+            progress.update(67, "Importing MDLs...")
             yield None
             LVZ.dbg("[progress] building exact models from child resource records")
             if LVZ.DEBUG is not None:
@@ -8819,7 +8827,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 needed_row_res_keys=needed_deep_row_res_keys,
                 include_alt_12_layouts=False,
                 wanted_res_ids=needed_deep_res_ids,
-                progress_callback=lambda index, total: progress.update_range(67, 71, index, total, "Building nested exact-resource models"),
+                progress_callback=lambda index, total: progress.update_range(67, 71, index, total, "Importing MDLs..."),
             )
             log_overlay_resource_stats(img, "nested")
         elif needed_deep_row_res_keys or needed_deep_res_ids:
@@ -8844,7 +8852,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                     pass
             log_overlay_resource_stats(img, "ipl-nested")
         if ENABLE_ROW_SHARED_FALLBACK_MDLS:
-            progress.update(71, "Building row-shared exact-resource models")
+            progress.update(71, "Importing MDLs...")
             yield None
             LVZ.dbg("[progress] building exact models from shared resource records")
             if LVZ.DEBUG is not None:
@@ -8861,7 +8869,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 needed_row_res_keys=needed_deep_row_res_keys,
                 include_alt_12_layouts=False,
                 wanted_res_ids=needed_deep_res_ids,
-                progress_callback=lambda index, total: progress.update_range(71, 75, index, total, "Building row-shared exact-resource models"),
+                progress_callback=lambda index, total: progress.update_range(71, 75, index, total, "Importing MDLs..."),
             )
             log_overlay_resource_stats(img, "row")
         elif needed_deep_row_res_keys or needed_deep_res_ids:
@@ -8887,7 +8895,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 except Exception:
                     pass
             log_overlay_resource_stats(img, "ipl-row")
-        progress.update(75, "Building AREA direct-resource models")
+        progress.update(75, "Importing MDLs...")
         yield None
         LVZ.dbg("[progress] building exact models from linked AREA records")
         if LVZ.DEBUG is not None:
@@ -8905,7 +8913,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
 
             include_alt_12_layouts=False,
             wanted_res_ids=needed_deep_res_ids,
-            progress_callback=lambda index, total: progress.update_range(75, 79, index, total, "Building linked auxiliary resource models"),
+            progress_callback=lambda index, total: progress.update_range(75, 79, index, total, "Importing MDLs..."),
         )
         area_direct_objects.extend(legacy_area_direct_objects)
         log_overlay_resource_stats(img, "linked-auxiliary")
@@ -9081,7 +9089,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
 
         raw_scan_res_ids = {int(detail[0]) for detail in raw_scan_details if int(detail[0]) >= 0}
         if raw_scan_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
-            progress.update(79, "Checking remaining IMG model data")
+            progress.update(79, "Importing MDLs...")
             yield None
             LVZ.dbg(f"[progress] checking raw IMG model data for {len(raw_scan_res_ids)} exact resource IDs")
             if LVZ.DEBUG is not None:
@@ -9095,7 +9103,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 lvz_path,
                 img_name,
                 placement_details=raw_scan_details,
-                progress_callback=lambda index, total: progress.update_range(79, 80, index, total, "Checking remaining IMG model data"),
+                progress_callback=lambda index, total: progress.update_range(79, 80, index, total, "Importing MDLs..."),
             )
             merged_continued_img = 0
             for key, obj in continued_img_overlay_by_sector_res.items():
@@ -9146,7 +9154,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             planned_model_total = len(planned_model_keys)
             planned_cached_total = max(0, len(details) - planned_model_total)
             progress.configure_map_plan(len(details), planned_model_total, planned_cached_total)
-            progress.update(80, "Placing IMG instances")
+            progress.update(80, "Placing objects...")
             LVZ.dbg(
                 "Leeds Stories map import plan: {} placements, {} exact sector/RES models, {} cached placements".format(
                     len(details), planned_model_total, planned_cached_total
@@ -9163,7 +9171,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                     placed,
                     models,
                     cached,
-                    "Placing IMG instances",
+                    "Placing objects...",
                 )
 
             applied, linked_instances, removed_unplaced = yield from iter_apply_img_instance_transforms(
@@ -9190,7 +9198,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 create_game_dtz_2dfx_helpers=False,
             )
             if create_game_dtz_2dfx_helpers and str(two_dfx_summary.get("status", "")) == "ok":
-                progress.update(98, "Placing GAME.DTZ 2DFX")
+                progress.update(98, "Importing 2DFX...")
                 blds_import_game_entity_2dfx_helpers(
                     model_2dfx_collection,
                     stem,
@@ -9218,7 +9226,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     except Exception as exc:
         LVZ.dbg(f"[placement-report] failed: {exc}")
 
-    progress.update(99, "Finalizing imported objects", force=True)
+    progress.update(99, "Finishing...", force=True)
     elapsed = time.time() - t0
     placed_records = list(globals().get("_CURRENT_PLACED_OBJECT_RECORDS", []) or [])
     resolved_sector_resources = set()

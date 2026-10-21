@@ -1,6 +1,19 @@
-# BLeeds - RenderWare DFF import operator
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
 
@@ -13,7 +26,7 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
     bl_idname = "import_scene.bleeds_dff"
     bl_label = "R* Studios: DFF (.dff)"
-    bl_description = "Import a RenderWare DFF with automatic format detection through the installed DemonFF/DragonFF importer"
+    bl_description = "Import RenderWare .DFF"
     bl_options = {"PRESET", "UNDO"}
 
     filename_ext = ".dff"
@@ -102,7 +115,7 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
 class EXPORT_OT_BLeeds_DFF(Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_dff"
     bl_label = "Export R* Studios DFF"
-    bl_description = "Export DFF through DemonFF/DragonFF with an explicit platform/game profile"
+    bl_description = "Export RenderWare .DFF"
     bl_options = {"PRESET"}
 
     filename_ext = ".dff"

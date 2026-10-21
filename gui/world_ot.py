@@ -1,17 +1,17 @@
-# BLeeds - Blender operator definitions for Leeds world importer
+# BLeeds - Scripts for working with R* Leeds (GTA Stories, Manhunt 2, etc) formats in Blender
 # Author: spicybung
 # Years: 2025 - 2026
-#
+
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
 # the Free Software Foundation, either version 3 of the License, or
 # (at your option) any later version.
-#
+
 # This program is distributed in the hope that it will be useful,
 # but WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
 # GNU General Public License for more details.
-#
+
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
@@ -26,7 +26,7 @@ class IMPORT_OT_leeds_world(Operator, ImportHelper):
 
     bl_idname = "import_scene.leeds_world"
     bl_label = "Import World Level"
-    bl_description = "Import a Rockstar Leeds world level from a WRLD or BSP file"
+    bl_description = "Import Rockstar Leeds .WRLD, .BSP"
     bl_options = {"UNDO"}
     filename_ext = ".wrld"
     filter_glob: StringProperty(
