@@ -108,6 +108,24 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             self.report({'ERROR'}, "No matching bones found")
             return {'CANCELLED'}
 
+        old_rest = {bone.name: bone.matrix_local.copy() for bone in target.data.bones}
+        attached_meshes = []
+        for obj in context.scene.objects:
+            if obj.type != 'MESH' or obj.parent_type == 'BONE':
+                continue
+            bound_to_target = any(
+                modifier.type == 'ARMATURE' and modifier.object == target
+                for modifier in obj.modifiers
+            )
+            if not bound_to_target:
+                continue
+            if obj.data.shape_keys is not None:
+                self.report({'ERROR'}, "Apply shape keys on %s before snapping" % obj.name)
+                return {'CANCELLED'}
+            if obj.data.users > 1:
+                obj.data = obj.data.copy()
+            attached_meshes.append(obj)
+
         previous_mode = target.mode
         try:
             if previous_mode != 'OBJECT':
@@ -129,9 +147,38 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             if previous_mode in {'POSE', 'EDIT'}:
                 bpy.ops.object.mode_set(mode=previous_mode)
 
+        new_rest = {bone.name: bone.matrix_local.copy() for bone in target.data.bones}
+        rest_changes = {}
+        for name, old_matrix in old_rest.items():
+            new_matrix = new_rest.get(name)
+            if new_matrix is not None:
+                rest_changes[name] = new_matrix @ old_matrix.inverted_safe()
+
+        adjusted_vertices = 0
+        for mesh_obj in attached_meshes:
+            mesh_to_armature = target.matrix_world.inverted_safe() @ mesh_obj.matrix_world
+            armature_to_mesh = mesh_to_armature.inverted_safe()
+            group_names = {group.index: group.name for group in mesh_obj.vertex_groups}
+            mesh = mesh_obj.data
+            for vertex in mesh.vertices:
+                weighted_position = Vector((0.0, 0.0, 0.0))
+                total_weight = 0.0
+                position = mesh_to_armature @ vertex.co
+                for group in vertex.groups:
+                    bone_name = group_names.get(group.group)
+                    rest_change = rest_changes.get(bone_name)
+                    if rest_change is None or group.weight <= 0.0:
+                        continue
+                    weighted_position += (rest_change @ position) * group.weight
+                    total_weight += group.weight
+                if total_weight > 0.0:
+                    vertex.co = armature_to_mesh @ (weighted_position / total_weight)
+                    adjusted_vertices += 1
+            mesh.update()
+
         target["bleeds_mdl_force_live_rest_pose"] = True
         target["bleeds_mdl_use_live_armature_rest"] = True
-        self.report({'INFO'}, "Matched %d bones from %s" % (len(transforms), source.name))
+        self.report({'INFO'}, "Matched %d bones and moved %d vertices" % (len(transforms), adjusted_vertices))
         return {'FINISHED'}
 
 
