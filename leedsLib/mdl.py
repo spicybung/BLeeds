@@ -3587,39 +3587,7 @@ def split_ps2_ped_vif_segments(
     if n <= max_verts:
         return [strip] if len(strip) >= 3 else []
 
-    def same_vertex(a: "Ps2Vertex", b: "Ps2Vertex") -> bool:
-        try:
-            return a is b or (
-                float(a.x) == float(b.x) and float(a.y) == float(b.y) and float(a.z) == float(b.z)
-                and float(a.u) == float(b.u) and float(a.v) == float(b.v)
-                and tuple(getattr(a, 'bone_indices', ())) == tuple(getattr(b, 'bone_indices', ()))
-            )
-        except Exception:
-            return a is b
-
-    def find_safe_split(start_index: int, hard_end: int) -> int:
-        for split_index in range(hard_end, start_index + 3, -1):
-            if split_index - 2 < start_index or split_index + 1 >= n:
-                continue
-            if same_vertex(strip[split_index - 2], strip[split_index - 1]) and same_vertex(strip[split_index], strip[split_index + 1]):
-                return split_index
-        for split_index in range(hard_end, start_index + 3, -1):
-            if split_index - 2 >= start_index and same_vertex(strip[split_index - 2], strip[split_index - 1]):
-                return split_index
-        return hard_end
-
-    chunks: List[List["Ps2Vertex"]] = []
-    start = 0
-    while start < n:
-        hard_end = min(n, start + max_verts)
-        end = find_safe_split(start, hard_end) if hard_end < n else hard_end
-        if end <= start + 2:
-            end = hard_end
-        chunk = strip[start:end]
-        if len(chunk) >= 3:
-            chunks.append(chunk)
-        start = end
-    return chunks
+    return split_ps2_tristrip_vertices(strip, max_verts=max_verts, overlap=2)
 
 def trim_ps2_ped_dma_packet_to_vertex_count(packet: bytes, target_vertex_count: int) -> bytearray:
     try:

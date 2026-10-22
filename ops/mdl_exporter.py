@@ -22,6 +22,7 @@ import bpy
 import bmesh
 import math
 import struct
+from collections import Counter
 from mathutils import Vector, Matrix
 
 from ..leedsLib import mdl as mdl_lib
@@ -5605,37 +5606,52 @@ def build_strip_vertices_world(
         built_strips_keys: List[List[tuple]] = []
 
         while unused:
-            seed = next(iter(unused))
-
             best_strip = None
             best_used = None
 
-            for rot in (0, 1, 2):
-                strip_keys, used_tris = try_build_strip_from_seed(
-                    seed_tri_index=seed,
-                    rot=rot,
-                    tris_keys=tris_keys,
-                    directed_edges=directed_edges,
-                    unused_set=unused,
-                )
-                if best_strip is None or (len(strip_keys) > len(best_strip)):
-                    best_strip = strip_keys
-                    best_used = used_tris
+            for seed in sorted(unused)[:16]:
+                for rot in (0, 1, 2):
+                    strip_keys, used_tris = try_build_strip_from_seed(
+                        seed_tri_index=seed,
+                        rot=rot,
+                        tris_keys=tris_keys,
+                        directed_edges=directed_edges,
+                        unused_set=unused,
+                    )
+                    if best_strip is None or len(strip_keys) > len(best_strip):
+                        best_strip = strip_keys
+                        best_used = used_tris
 
             if best_strip is None or best_used is None:
-
-                a, b, c = tris_keys[seed]
+                a, b, c = tris_keys[min(unused)]
                 best_strip = [a, b, c]
-                best_used = {seed}
+                best_used = {min(unused)}
 
             unused.difference_update(best_used)
             built_strips_keys.append(best_strip)
 
         topology_segments: List[List[mdl_lib.Ps2Vertex]] = []
+        emitted_keys = Counter()
         for strip_key_list in built_strips_keys:
+            for triangle_index in range(2, len(strip_key_list)):
+                if triangle_index & 1:
+                    triangle = (strip_key_list[triangle_index - 1],
+                                strip_key_list[triangle_index - 2],
+                                strip_key_list[triangle_index])
+                else:
+                    triangle = (strip_key_list[triangle_index - 2],
+                                strip_key_list[triangle_index - 1],
+                                strip_key_list[triangle_index])
+                if len(set(triangle)) == 3:
+                    emitted_keys[tuple(sorted(triangle))] += 1
             segment = [key_to_vertex[k] for k in strip_key_list if k in key_to_vertex]
             if len(segment) >= 3:
                 topology_segments.append(segment)
+
+        original_keys = Counter(tuple(sorted(triangle)) for triangle in tris_keys
+                                if len(set(triangle)) == 3)
+        if emitted_keys != original_keys:
+            raise RuntimeError("MDL export: generated strips do not match the mesh triangles")
         try:
             build_strip_vertices_world.last_topology_segments = topology_segments
         except Exception:
@@ -6584,8 +6600,12 @@ def export_stories_mdl_ps2(
                         source_cursor = 0
                         for source_count in source_counts_for_stream:
                             count_i = int(source_count)
-                            if count_i >= 3:
-                                prebuilt_sub_strips.append(strip[source_cursor:source_cursor + count_i])
+                            source_segment = strip[source_cursor:source_cursor + count_i]
+                            if len(source_segment) > int(ps2_max_strip_verts):
+                                prebuilt_sub_strips.extend(mdl_lib.split_ps2_ped_vif_segments(
+                                    source_segment, max_verts=int(ps2_max_strip_verts)))
+                            elif len(source_segment) >= 3:
+                                prebuilt_sub_strips.append(source_segment)
                             source_cursor += max(0, count_i)
                 except Exception:
                     prebuilt_sub_strips = None
@@ -6616,23 +6636,40 @@ def export_stories_mdl_ps2(
                 source_stream_used = False
                 prebuilt_sub_strips = None
         else:
-            strip = build_strip_vertices_world(context, mesh_obj, use_normals=use_normals, root_obj=root)
-            topology_segments = list(getattr(build_strip_vertices_world, "last_topology_segments", []) or [])
-            if topology_segments:
-                prebuilt_sub_strips = []
-                for topology_segment in topology_segments:
-                    if len(topology_segment) < 3:
-                        continue
-                    if len(topology_segment) > int(ps2_max_strip_verts):
-                        prebuilt_sub_strips.extend(
-                            mdl_lib.split_ps2_tristrip_vertices(
-                                topology_segment,
-                                max_verts=int(ps2_max_strip_verts),
-                                overlap=2,
+            strip = build_source_point_vertices_world(context, mesh_obj, use_normals=use_normals, root_obj=root)
+            source_stream_used = bool(strip)
+            if source_stream_used:
+                source_counts_for_stream = getMdlSourceStripCounts(mesh_obj)
+                if source_counts_for_stream and sum(int(c) for c in source_counts_for_stream) == len(strip):
+                    prebuilt_sub_strips = []
+                    source_cursor = 0
+                    for source_count in source_counts_for_stream:
+                        count_i = int(source_count)
+                        source_segment = strip[source_cursor:source_cursor + count_i]
+                        if len(source_segment) > int(ps2_max_strip_verts):
+                            prebuilt_sub_strips.extend(mdl_lib.split_ps2_tristrip_vertices(
+                                source_segment, max_verts=int(ps2_max_strip_verts), overlap=2))
+                        elif len(source_segment) >= 3:
+                            prebuilt_sub_strips.append(source_segment)
+                        source_cursor += count_i
+            else:
+                strip = build_strip_vertices_world(context, mesh_obj, use_normals=use_normals, root_obj=root)
+                topology_segments = list(getattr(build_strip_vertices_world, "last_topology_segments", []) or [])
+                if topology_segments:
+                    prebuilt_sub_strips = []
+                    for topology_segment in topology_segments:
+                        if len(topology_segment) < 3:
+                            continue
+                        if len(topology_segment) > int(ps2_max_strip_verts):
+                            prebuilt_sub_strips.extend(
+                                mdl_lib.split_ps2_tristrip_vertices(
+                                    topology_segment,
+                                    max_verts=int(ps2_max_strip_verts),
+                                    overlap=2,
+                                )
                             )
-                        )
-                    else:
-                        prebuilt_sub_strips.append(list(topology_segment))
+                        else:
+                            prebuilt_sub_strips.append(list(topology_segment))
 
         if not strip:
             try:
@@ -6726,6 +6763,22 @@ def export_stories_mdl_ps2(
                     max_verts=int(ps2_max_strip_verts),
                     overlap=2,
                 )
+
+        if not source_stream_used:
+            generated_counts = [len(segment) for segment in sub_strips if len(segment) >= 3]
+            generated_vertices = sum(generated_counts)
+            generated_triangles = sum(max(0, count - 2) for count in generated_counts)
+            for metadata_owner in (mesh_obj, getattr(mesh_obj, "data", None)):
+                if metadata_owner is None:
+                    continue
+                metadata_owner["bleeds_mdl_export_strip_origin"] = "GENERATED_PS2"
+                metadata_owner["bleeds_mdl_export_strip_counts"] = generated_counts
+                metadata_owner["bleeds_mdl_export_vertex_count"] = int(generated_vertices)
+                metadata_owner["bleeds_mdl_export_strip_triangle_capacity"] = int(generated_triangles)
+        else:
+            for metadata_owner in (mesh_obj, getattr(mesh_obj, "data", None)):
+                if metadata_owner is not None:
+                    metadata_owner["bleeds_mdl_export_strip_origin"] = "IMPORTED_PS2"
 
 
         ped_runtime_qwc_cap = 0xFFFF

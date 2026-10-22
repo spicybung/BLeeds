@@ -20,6 +20,7 @@ import base64
 import os
 import struct
 import zlib
+from collections import Counter
 
 import bpy
 from mathutils import Matrix, Vector
@@ -292,8 +293,6 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
         materials = []
         material_slots = {}
         strips = []
-        current = None
-        current_bones = set()
         native_strip = len(mesh.polygons) == len(mesh.vertices) - 2 and len(mesh.vertices) >= 3
         if native_strip:
             for index, polygon in enumerate(mesh.polygons, 2):
@@ -331,7 +330,12 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
                 material = mesh.materials[material_index] if material_index < len(mesh.materials) else None
                 strip = {'material': 0, 'vertices': vertices, 'has_uv': uv_layer is not None,
                          'has_colors': has_colors, 'has_normals': bool(use_normals)}
+                obj['bleeds_psp_export_strip_counts'] = [len(vertices)]
+                obj['bleeds_psp_export_vertex_count'] = len(vertices)
+                obj['bleeds_psp_export_strip_origin'] = 'MESH_ORDER'
                 return [strip], [material]
+        triangle_records = []
+        corner_records = {}
         for triangle in mesh.loop_triangles:
             material_index = int(triangle.material_index)
             if material_index not in material_slots:
@@ -341,7 +345,7 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
             loops = list(triangle.loops)
             if reversed_winding:
                 loops.reverse()
-            vertices = []
+            vertex_keys = []
             triangle_bones = set()
             for loop_index in loops:
                 vertex_index = mesh.loops[loop_index].vertex_index
@@ -354,23 +358,77 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
                           'color': pspCornerColor(mesh, loop_index), 'weights': weights}
                 if not all(math.isfinite(value) for value in record['position'] + record['normal'] + uv):
                     raise ValueError("%s contains non-finite vertex data" % obj.name)
-                vertices.append(record)
+                key = (vertex_index, record['position'], record['normal'], uv,
+                       record['color'], tuple(record['weights']))
+                corner_records[key] = record
+                vertex_keys.append(key)
             if len(triangle_bones) > 8:
                 raise ValueError("%s: triangle %d uses more than eight skin bones" % (obj.name, triangle.index))
             output_material = material_slots[material_index]
-            if (current is None or current['material'] != output_material or
-                    len(current_bones | triangle_bones) > 8 or len(current['vertices']) + 6 > 65537):
-                current = {'material': output_material, 'vertices': [], 'has_uv': uv_layer is not None,
-                           'has_colors': has_colors, 'has_normals': bool(use_normals)}
-                strips.append(current)
-                current_bones = set()
-            if current['vertices']:
-                previous_count = len(current['vertices'])
-                current['vertices'].extend((current['vertices'][-1], vertices[0], vertices[0]))
-                if (previous_count + 3) % 2:
-                    current['vertices'].append(vertices[0])
-            current['vertices'].extend(vertices)
-            current_bones.update(triangle_bones)
+            triangle_records.append((tuple(vertex_keys), output_material, triangle_bones))
+
+        directed_edges = {}
+        for index, (keys, material_index, bones) in enumerate(triangle_records):
+            a, b, c = keys
+            for edge, opposite in (((a, b), c), ((b, c), a), ((c, a), b)):
+                directed_edges.setdefault((material_index, edge), []).append((index, opposite))
+
+        unused = set(range(len(triangle_records)))
+        while unused:
+            best_keys = None
+            best_used = None
+            best_material = 0
+            for seed in sorted(unused)[:16]:
+                triangle_keys, material_index, triangle_bones = triangle_records[seed]
+                for rotation in range(3):
+                    keys = list(triangle_keys[rotation:] + triangle_keys[:rotation])
+                    used = {seed}
+                    bones = set(triangle_bones)
+                    while len(keys) < 65537:
+                        edge = (keys[-1], keys[-2]) if (len(keys) - 2) & 1 else (keys[-2], keys[-1])
+                        picked = None
+                        for candidate, opposite in directed_edges.get((material_index, edge), ()):
+                            if candidate not in unused or candidate in used or opposite in edge:
+                                continue
+                            candidate_bones = triangle_records[candidate][2]
+                            if len(bones | candidate_bones) > 8:
+                                continue
+                            picked = (candidate, opposite, candidate_bones)
+                            break
+                        if picked is None:
+                            break
+                        candidate, opposite, candidate_bones = picked
+                        keys.append(opposite)
+                        bones.update(candidate_bones)
+                        used.add(candidate)
+                    if best_keys is None or len(used) > len(best_used):
+                        best_keys = keys
+                        best_used = used
+                        best_material = material_index
+            if best_keys is None:
+                raise ValueError("%s: could not build PSP strips" % obj.name)
+            strips.append({'material': best_material,
+                           'vertices': [corner_records[key] for key in best_keys],
+                           'has_uv': uv_layer is not None,
+                           'has_colors': has_colors,
+                           'has_normals': bool(use_normals)})
+            unused.difference_update(best_used)
+
+        original_faces = Counter(tuple(sorted(keys)) for keys, _, _ in triangle_records)
+        emitted_faces = Counter()
+        records_by_identity = {id(record): key for key, record in corner_records.items()}
+        for strip in strips:
+            keys = [records_by_identity[id(record)] for record in strip['vertices']]
+            for index in range(2, len(keys)):
+                triangle = ((keys[index - 1], keys[index - 2], keys[index]) if index & 1
+                            else (keys[index - 2], keys[index - 1], keys[index]))
+                if len(set(triangle)) == 3:
+                    emitted_faces[tuple(sorted(triangle))] += 1
+        if emitted_faces != original_faces:
+            raise ValueError("%s: PSP strips do not match the mesh triangles" % obj.name)
+        obj['bleeds_psp_export_strip_counts'] = [len(strip['vertices']) for strip in strips]
+        obj['bleeds_psp_export_vertex_count'] = sum(len(strip['vertices']) for strip in strips)
+        obj['bleeds_psp_export_strip_origin'] = 'GENERATED_PSP'
         if not strips:
             raise ValueError("%s has no triangles to export" % obj.name)
         return strips, materials
