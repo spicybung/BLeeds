@@ -27,7 +27,7 @@ from bpy.props import (
     PointerProperty,
     StringProperty,
 )
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
@@ -112,6 +112,62 @@ def snapBarycentricWeights(point, first, second, third):
     weights = [max(0.0, first_weight), max(0.0, second_weight), max(0.0, third_weight)]
     total = sum(weights)
     return tuple(weight / total for weight in weights)
+
+
+def transformSnapVertex(position, influences):
+    reference_rotation = None
+    real_values = [0.0, 0.0, 0.0, 0.0]
+    dual_values = [0.0, 0.0, 0.0, 0.0]
+    total_weight = 0.0
+    for matrix, weight in influences:
+        if weight <= 0.0:
+            continue
+        rotation = matrix.to_quaternion().normalized()
+        if reference_rotation is None:
+            reference_rotation = rotation
+        sign = -1.0 if rotation.dot(reference_rotation) < 0.0 else 1.0
+        translation = matrix.translation
+        dual = Quaternion((0.0, translation.x, translation.y, translation.z)) @ rotation
+        for index in range(4):
+            real_values[index] += sign * weight * rotation[index]
+            dual_values[index] += sign * weight * 0.5 * dual[index]
+        total_weight += weight
+    if total_weight <= 0.0:
+        return position.copy()
+    real = Quaternion(real_values)
+    length = math.sqrt(sum(component * component for component in real))
+    if length <= 0.000001:
+        return position.copy()
+    real.normalize()
+    dual = Quaternion([component / length for component in dual_values])
+    correction = dual @ real.conjugated()
+    return real @ position + Vector((correction.x, correction.y, correction.z)) * 2.0
+
+
+def correctSnapArmLength(position, destination, bone_influences, old_bones, new_bones, changes):
+    correction = Vector((0.0, 0.0, 0.0))
+    total_weight = 0.0
+    for bone_name, weight in bone_influences:
+        if weight <= 0.0:
+            continue
+        old_bone = old_bones.get(bone_name)
+        new_bone = new_bones.get(bone_name)
+        transform = changes.get(bone_name)
+        if old_bone is None or new_bone is None or transform is None:
+            continue
+        old_head, old_tail = old_bone
+        new_head, new_tail = new_bone
+        old_axis = old_tail - old_head
+        old_length_squared = old_axis.length_squared
+        if old_length_squared < 0.000000000001:
+            continue
+        fraction = max(0.0, min(1.0, (position - old_head).dot(old_axis) / old_length_squared))
+        predicted_tail = transform @ old_tail
+        correction += weight * fraction * (new_tail - predicted_tail)
+        total_weight += weight
+    if total_weight > 0.000001:
+        destination += correction / max(1.0, total_weight)
+    return destination
 
 
 def redistributeSnapReferenceWeights(target, reference, mesh_objects, log_lines):
@@ -326,6 +382,10 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
         )
         log_lines.append("Non-neutral pose bones: reference=%d target=%d" % (source_pose_count, target_pose_count))
         old_rest = {bone.name: bone.matrix_local.copy() for bone in target.data.bones}
+        old_endpoints = {
+            bone.name: (bone.head_local.copy(), bone.tail_local.copy())
+            for bone in target.data.bones
+        }
         pending_bones = {bone.name for bone in target.data.bones if bone.name not in transforms}
         while pending_bones:
             resolved_bones = set()
@@ -386,14 +446,21 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
                 continue
             parent_matrix, parent_head, parent_tail = transforms[parent.name]
             child_head = transforms[bone.name][1]
-            original_gap = bone.head_local - parent.tail_local
-            desired_tail = child_head - original_gap
-            if (desired_tail - parent_tail).length <= 0.0001:
+            original_joint = bone.head_local - parent.head_local
+            new_joint = child_head - parent_head
+            if original_joint.length <= 0.0001 or new_joint.length <= 0.0001:
                 continue
-            if (desired_tail - parent_head).length <= 0.0001:
+            rotation = original_joint.rotation_difference(new_joint)
+            rotation_angle = math.degrees(rotation.angle)
+            if rotation_angle <= 0.01:
                 continue
-            log_lines.append("ARM JOINT: %s -> %s tail shift=%.4f" % (
-                parent.name, bone.name, (desired_tail - parent_tail).length
+            if rotation_angle > 75.0:
+                rotation = rotation.slerp(Quaternion((1.0, 0.0, 0.0, 0.0)), 1.0 - 75.0 / rotation_angle)
+                rotation_angle = 75.0
+            original_tail_vector = parent.tail_local - parent.head_local
+            desired_tail = parent_head + rotation @ original_tail_vector
+            log_lines.append("ARM JOINT: %s -> %s rotation=%.2f degrees" % (
+                parent.name, bone.name, rotation_angle
             ))
             transforms[parent.name] = (parent_matrix, parent_head, desired_tail)
         attached_meshes = []
@@ -444,6 +511,37 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
                 bpy.ops.object.mode_set(mode=previous_mode)
 
         new_rest = {bone.name: bone.matrix_local.copy() for bone in target.data.bones}
+        new_endpoints = {
+            bone.name: (bone.head_local.copy(), bone.tail_local.copy())
+            for bone in target.data.bones
+        }
+        arm_joints = {
+            'bip01_l_clavicle': 'l_upperarm',
+            'l_upperarm': 'l_forearm',
+            'l_forearm': 'l_hand',
+            'bip01_r_clavicle': 'r_upperarm',
+            'r_upperarm': 'r_forearm',
+            'r_forearm': 'r_hand',
+        }
+        arm_old_segments = {}
+        arm_new_segments = {}
+        for bone_name, child_name in arm_joints.items():
+            if bone_name not in old_endpoints or child_name not in old_endpoints:
+                continue
+            if bone_name not in new_endpoints or child_name not in new_endpoints:
+                continue
+            arm_old_segments[bone_name] = (
+                old_endpoints[bone_name][0], old_endpoints[child_name][0]
+            )
+            arm_new_segments[bone_name] = (
+                new_endpoints[bone_name][0], new_endpoints[child_name][0]
+            )
+            old_length = (old_endpoints[child_name][0] - old_endpoints[bone_name][0]).length
+            new_length = (new_endpoints[child_name][0] - new_endpoints[bone_name][0]).length
+            log_lines.append('ARM JOINT LENGTH: %s -> %s original=%.4f reference=%.4f ratio=%.3f' % (
+                bone_name, child_name, old_length, new_length,
+                new_length / old_length if old_length > 0.000001 else 0.0
+            ))
         rest_changes = {}
         for name, old_matrix in old_rest.items():
             new_matrix = new_rest.get(name)
@@ -459,6 +557,30 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
                         name, old_head.x, old_head.y, old_head.z,
                         new_head.x, new_head.y, new_head.z, (new_head - old_head).length, angle
                     ))
+
+        skinning_changes = dict(rest_changes)
+        for hand_name, finger_name in (('l_hand', 'l_finger'), ('r_hand', 'r_finger')):
+            if hand_name not in old_endpoints or finger_name not in old_endpoints:
+                continue
+            if hand_name not in new_endpoints or finger_name not in new_endpoints:
+                continue
+            old_wrist = old_endpoints[hand_name][0]
+            new_wrist = new_endpoints[hand_name][0]
+            original_direction = old_endpoints[finger_name][0] - old_wrist
+            reference_direction = new_endpoints[finger_name][0] - new_wrist
+            if original_direction.length < 0.000001 or reference_direction.length < 0.000001:
+                continue
+            rotation = original_direction.rotation_difference(reference_direction)
+            hand_transform = (
+                Matrix.Translation(new_wrist)
+                @ rotation.to_matrix().to_4x4()
+                @ Matrix.Translation(-old_wrist)
+            )
+            skinning_changes[hand_name] = hand_transform
+            skinning_changes[finger_name] = hand_transform
+            log_lines.append('HAND RIGID: %s wrist shift=%.4f direction rotation=%.2f degrees' % (
+                hand_name, (new_wrist - old_wrist).length, math.degrees(rotation.angle)
+            ))
 
         adjusted_vertices = 0
         vertex_records = []
@@ -486,24 +608,32 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             ))
             for vertex in mesh.vertices:
                 position = mesh_to_armature @ vertex.co
-                weighted_position = Vector((0.0, 0.0, 0.0))
-                total_weight = 0.0
+                influences = []
+                bone_influences = []
                 for group in vertex.groups:
                     bone_name = group_names.get(group.group)
-                    rest_change = rest_changes.get(bone_name)
+                    skinning_bone_name = {
+                        'l_finger': 'l_hand',
+                        'r_finger': 'r_hand',
+                    }.get(bone_name, bone_name)
+                    rest_change = skinning_changes.get(skinning_bone_name)
                     if bone_name not in old_rest or group.weight <= 0.0:
                         if group.weight > 0.0 and bone_name not in old_rest:
                             group_key = "%s/%s" % (mesh_obj.name, bone_name)
                             unmatched_groups[group_key] = unmatched_groups.get(group_key, 0) + 1
                         continue
                     if rest_change is not None:
-                        weighted_position += (rest_change @ position) * group.weight
+                        influences.append((rest_change, group.weight))
+                        bone_influences.append((skinning_bone_name, group.weight))
                     else:
-                        weighted_position += position * group.weight
-                    total_weight += group.weight
-                if total_weight <= 0.0:
+                        influences.append((Matrix.Identity(4), group.weight))
+                if not influences:
                     continue
-                destination = weighted_position / total_weight
+                destination = transformSnapVertex(position, influences)
+                destination = correctSnapArmLength(
+                    position, destination, bone_influences,
+                    arm_old_segments, arm_new_segments, rest_changes
+                )
                 record_index = len(vertex_records)
                 vertex_records.append((mesh_obj, vertex.index, position, destination, armature_to_mesh))
                 key = tuple(round(float(axis) / seam_tolerance) for axis in position)
@@ -534,7 +664,7 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             skeleton_height = max((head.z for head in rest_heads), default=1.0) - min(
                 (head.z for head in rest_heads), default=0.0
             )
-            seam_radius = max(0.0005, abs(skeleton_height) * 0.0075)
+            seam_radius = max(0.00005, abs(skeleton_height) * 0.00006)
             spatial_index = KDTree(len(boundary_records))
             for index, record_index in enumerate(boundary_records):
                 spatial_index.insert(vertex_records[record_index][2], index)
