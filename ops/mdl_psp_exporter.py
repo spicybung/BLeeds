@@ -63,7 +63,9 @@ def collectPspFrames(root, armature, source_context):
             bone_keys[bone.name] = key
             imported = readPspMatrix(bone, 'bleeds_blender_import_global_matrix', bone.matrix_local)
             original = records[key]['world'] if key in records else bone.matrix_local
-            world = bone.matrix_local @ imported.inverted_safe() @ original
+            rest_changed = any(abs(float(bone.matrix_local[row][column]) - float(imported[row][column])) > 1.0e-5
+                               for row in range(4) for column in range(4))
+            world = bone.matrix_local.copy() if rest_changed else original.copy()
             if key in records:
                 bone_id = records[key]['bone_id']
                 bone_type = records[key]['bone_type']

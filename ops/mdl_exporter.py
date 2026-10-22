@@ -1290,6 +1290,20 @@ def armatureRestPoseMatchesImportedMdl(arm_obj: Optional[bpy.types.Object], epsi
     return compared >= 6
 
 
+def armatureRestPoseHasChanged(arm_obj: Optional[bpy.types.Object], epsilon: float = 1.0e-5) -> bool:
+    if arm_obj is None or getattr(arm_obj, "type", None) != 'ARMATURE':
+        return False
+    for bone in getattr(getattr(arm_obj, "data", None), "bones", ()):
+        raw = bone.get("bleeds_blender_import_global_matrix")
+        if raw is None or len(raw) != 16:
+            continue
+        original = matrixFromFlatMdlProperty(raw, Matrix.Identity(4))
+        current = bone.matrix_local
+        if not mdlMatricesNear(original, current, epsilon):
+            return True
+    return False
+
+
 def resolveImportedMdlNativeBasisDelta(mesh_obj: Optional[bpy.types.Object]) -> Tuple[Matrix, str]:
 
     if mesh_obj is None:
@@ -7107,7 +7121,7 @@ def export_stories_mdl_ps2(
         except Exception:
             custom_ped_weight_meshes_present = False
 
-        if custom_ped_weight_meshes_present:
+        if ped_armature is not None:
 
 
             force_live_rest = False
@@ -7149,8 +7163,9 @@ def export_stories_mdl_ps2(
                 except Exception:
                     pass
 
+            rest_pose_changed = armatureRestPoseHasChanged(ped_armature)
             preserve_imported_rest = False
-            if not force_live_rest:
+            if not force_live_rest and not rest_pose_changed:
                 preserve_imported_rest = bool(
                     imported_frame_basis_available
                     or imported_bind_palette_available
@@ -7159,6 +7174,7 @@ def export_stories_mdl_ps2(
 
             ped_atomic_meta_export["preserve_imported_frame_matrices"] = bool(preserve_imported_rest)
             ped_atomic_meta_export["prefer_live_armature_bind_matrices"] = not bool(preserve_imported_rest)
+            ped_atomic_meta_export["armature_rest_pose_changed"] = bool(rest_pose_changed)
 
             if preserve_imported_rest:
                 ped_atomic_meta_export["frame_matrix_authority"] = "UNCHANGED_IMPORTED_STORIES_FRAME_MATRICES"
