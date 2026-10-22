@@ -441,7 +441,10 @@ def process_frame_tree(ctx: StoriesMDLContext, f, frame_ptr: int) -> StoriesArma
         computed_world_mat = parent_world @ local_mat
         global_offset = ptr + 0x50
         global_mat = read_global_matrix(f, global_offset)
-        if is_usable_frame_matrix(global_mat):
+        if ctx.platform == "PS2" and ctx.import_type in (0, 1):
+            world_mat = computed_world_mat
+            world_source = "parent_local"
+        elif is_usable_frame_matrix(global_mat):
             world_mat = global_mat
             world_source = "imported_global_0x50"
         else:
