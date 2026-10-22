@@ -46,6 +46,15 @@ def armatureBoneMatchKey(bone):
     return ("NAME", "".join(character for character in bone.name.lower() if character.isalnum()))
 
 
+def armatureBoneDepth(bone):
+    depth = 0
+    parent = bone.parent
+    while parent is not None:
+        depth += 1
+        parent = parent.parent
+    return depth
+
+
 def writeArmatureSnapLog(lines):
     log_name = "BLeeds Armature Snap Log"
     log = bpy.data.texts.get(log_name)
@@ -277,6 +286,7 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
                 target_bone.matrix_local.to_quaternion().rotation_difference(
                     matrix.to_quaternion()).angle
             )
+            rotation_angle = min(rotation_angle, 360.0 - rotation_angle)
             reference_bone_neutral = pose_bone is None or all(
                 abs(pose_bone.matrix_basis[row][col] - float(row == col)) < 0.0001
                 for row in range(4) for col in range(4)
@@ -337,6 +347,55 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
         log_lines.append("Matched bones: %d; inherited bones: %d; unchanged bones: %d" % (
             matched_bone_count, len(transforms) - matched_bone_count, len(pending_bones)
         ))
+        bones_by_depth = sorted(
+            target.data.bones,
+            key=armatureBoneDepth
+        )
+        for bone in bones_by_depth:
+            if bone.parent is None or bone.name not in transforms or bone.parent.name not in transforms:
+                continue
+            parent = bone.parent
+            original_offset = bone.head_local - parent.tail_local
+            connection_tolerance = max(0.005, parent.length * 0.12)
+            if original_offset.length > connection_tolerance:
+                continue
+            parent_matrix, _, parent_tail = transforms[parent.name]
+            child_matrix, child_head, child_tail = transforms[bone.name]
+            parent_rotation_change = (
+                parent_matrix.to_3x3() @ old_rest[parent.name].to_3x3().inverted_safe()
+            )
+            expected_head = parent_tail + parent_rotation_change @ original_offset
+            correction = expected_head - child_head
+            if correction.length <= 0.0001:
+                continue
+            transforms[bone.name] = (
+                Matrix.Translation(correction) @ child_matrix,
+                child_head + correction,
+                child_tail + correction,
+            )
+            log_lines.append("JOINT ALIGNED: %s -> %s shift=%.4f" % (
+                parent.name, bone.name, correction.length
+            ))
+        for bone in reversed(bones_by_depth):
+            parent = bone.parent
+            if parent is None or bone.name not in transforms or parent.name not in transforms:
+                continue
+            if not any(part in parent.name.lower() for part in (
+                "clavicle", "upperarm", "forearm"
+            )):
+                continue
+            parent_matrix, parent_head, parent_tail = transforms[parent.name]
+            child_head = transforms[bone.name][1]
+            original_gap = bone.head_local - parent.tail_local
+            desired_tail = child_head - original_gap
+            if (desired_tail - parent_tail).length <= 0.0001:
+                continue
+            if (desired_tail - parent_head).length <= 0.0001:
+                continue
+            log_lines.append("ARM JOINT: %s -> %s tail shift=%.4f" % (
+                parent.name, bone.name, (desired_tail - parent_tail).length
+            ))
+            transforms[parent.name] = (parent_matrix, parent_head, desired_tail)
         attached_meshes = []
         for obj in context.scene.objects:
             if obj.type != 'MESH' or obj.parent_type == 'BONE':
@@ -395,6 +454,7 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
                     new_head = new_matrix.translation
                     angle = math.degrees(old_matrix.to_quaternion().rotation_difference(
                         new_matrix.to_quaternion()).angle)
+                    angle = min(angle, 360.0 - angle)
                     log_lines.append("BONE: %s old=(%.4f, %.4f, %.4f) new=(%.4f, %.4f, %.4f) shift=%.4f rotation=%.2f degrees" % (
                         name, old_head.x, old_head.y, old_head.z,
                         new_head.x, new_head.y, new_head.z, (new_head - old_head).length, angle
@@ -524,7 +584,7 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
 
 
 class OBJECT_PT_BLeeds_SnapArmature(bpy.types.Panel):
-    bl_label = "BLeeds Armature"
+    bl_label = "BLeeds - Armature"
     bl_idname = "OBJECT_PT_BLeeds_SnapArmature"
     bl_space_type = 'PROPERTIES'
     bl_region_type = 'WINDOW'
@@ -895,7 +955,7 @@ def getMdlAttributeExpectedCount(mesh: bpy.types.Mesh, domain: str) -> int:
 
 class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
     bl_idname = "EXPORT_PT_MDL_SemanticAttributes"
-    bl_label = "BLeeds MDL Properties / Attributes"
+    bl_label = "BLeeds - Properties/Attributes"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
     bl_context = "object"
@@ -915,8 +975,6 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
             layout.label(text="No BLeeds MDL root found.")
             return
 
-        layout.operator(EXPORT_OT_MDL_StampSemanticAttributes.bl_idname, icon="FILE_REFRESH")
-
         try:
             from ..ops.mdl_exporter import gather_mesh_parts
         except Exception:
@@ -934,12 +992,17 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
             active_mesh_obj = meshes[0]
 
         root_box = layout.box()
-        root_box.label(text="Root MDL Properties")
+        root_box.label(text="Model")
         root_col = root_box.column(align=True)
-        root_col.label(text=f"Root: {root.name}")
-        root_col.label(text=f"Platform: {getattr(root, 'bleeds_mdl_platform', readMdlIdProp(root, 'bleeds_mdl_platform', 'Unknown'))}")
-        root_col.label(text=f"Type: {getattr(root, 'bleeds_mdl_type', readMdlIdProp(root, 'bleeds_mdl_type', 'Unknown'))}")
-        root_col.label(text=f"Mesh parts: {len(meshes)}")
+        for name, value in (
+            ("Name", root.name),
+            ("Platform", getattr(root, 'bleeds_mdl_platform', readMdlIdProp(root, 'bleeds_mdl_platform', 'Unknown'))),
+            ("Type", getattr(root, 'bleeds_mdl_type', readMdlIdProp(root, 'bleeds_mdl_type', 'Unknown'))),
+            ("Meshes", str(len(meshes))),
+        ):
+            row = root_col.row(align=True)
+            row.label(text=name)
+            row.label(text=str(value))
 
         if active_mesh_obj is None:
             layout.label(text="No active mesh part found under this MDL root.")
@@ -947,14 +1010,19 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
 
         mesh = active_mesh_obj.data
         mesh_box = layout.box()
-        mesh_box.label(text="Active Mesh Part")
+        mesh_box.label(text="Mesh")
         mesh_col = mesh_box.column(align=True)
-        mesh_col.label(text=f"Object: {active_mesh_obj.name}")
-        mesh_col.label(text=f"Verts/Faces/Loops: {len(mesh.vertices)} / {len(mesh.polygons)} / {len(mesh.loops)}")
-        mesh_col.label(text=f"Origin: {readMdlIdProp(mesh, 'bleeds_mdl_semantic_attributes_origin', 'none')}")
-        mesh_col.label(text=f"Version: {readMdlIdProp(mesh, 'bleeds_mdl_semantic_attributes_version', 'none')}")
-        mesh_col.label(text=f"Part index: {readMdlIdProp(active_mesh_obj, 'bleeds_mdl_part_index', readMdlIdProp(mesh, 'bleeds_mdl_source_part_index', 'none'))}")
-        mesh_col.label(text=f"Material index: {readMdlIdProp(active_mesh_obj, 'bleeds_mdl_part_material_id', readMdlIdProp(mesh, 'bleeds_mdl_source_material_index', 'none'))}")
+        for name, value in (
+            ("Object", active_mesh_obj.name),
+            ("Vertices", str(len(mesh.vertices))),
+            ("Faces", str(len(mesh.polygons))),
+            ("Loops", str(len(mesh.loops))),
+            ("Part", str(readMdlIdProp(active_mesh_obj, 'bleeds_mdl_part_index', readMdlIdProp(mesh, 'bleeds_mdl_source_part_index', 'none')))),
+            ("Material", str(readMdlIdProp(active_mesh_obj, 'bleeds_mdl_part_material_id', readMdlIdProp(mesh, 'bleeds_mdl_source_material_index', 'none')))),
+        ):
+            row = mesh_col.row(align=True)
+            row.label(text=name)
+            row.label(text=value)
 
         strip_counts = readMdlIdProp(mesh, 'bleeds_mdl_source_strip_counts', [])
         try:
@@ -963,10 +1031,13 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
         except Exception:
             strip_count = 0
             strip_vertex_total = 0
-        mesh_col.label(text=f"Source strips: {strip_count}, strip verts: {strip_vertex_total}")
+        for name, value in (("Strips", strip_count), ("Strip vertices", strip_vertex_total)):
+            row = mesh_col.row(align=True)
+            row.label(text=name)
+            row.label(text=str(value))
 
         attr_box = layout.box()
-        attr_box.label(text="Required Semantic Attributes")
+        attr_box.label(text="Attributes")
         attr_specs = [
             ("bleeds_mdl_part_index", "FACE"),
             ("bleeds_mdl_material_index", "FACE"),
@@ -989,6 +1060,27 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
             ("bleeds_mdl_point_skin_raw2", "POINT"),
             ("bleeds_mdl_point_skin_raw3", "POINT"),
         ]
+        missing = 0
+        invalid = 0
+        for attr_name, domain in attr_specs:
+            attr = get_mesh_attribute(mesh, attr_name)
+            if attr is None:
+                missing += 1
+            else:
+                try:
+                    count = len(attr.data)
+                except (AttributeError, TypeError):
+                    count = -1
+                if count != getMdlAttributeExpectedCount(mesh, domain):
+                    invalid += 1
+        summary_row = attr_box.row(align=True)
+        summary_row.alert = bool(missing or invalid)
+        summary_row.label(text="Present: %d/%d" % (len(attr_specs) - missing, len(attr_specs)))
+        summary_row.label(text="Invalid: %d" % invalid)
+        attr_box.operator(EXPORT_OT_MDL_StampSemanticAttributes.bl_idname, text="Update Attributes", icon="FILE_REFRESH")
+        attr_box.prop(context.scene, "bleeds_show_mdl_attributes", text="Show Details")
+        if not context.scene.bleeds_show_mdl_attributes:
+            return
         attr_col = attr_box.column(align=True)
         for attr_name, domain in attr_specs:
             expected = getMdlAttributeExpectedCount(mesh, domain)
@@ -996,7 +1088,7 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
             row = attr_col.row(align=True)
             if attr is None:
                 row.alert = True
-                row.label(text=f"Missing {domain}: {attr_name}")
+                row.label(text=f"Missing: {attr_name}")
                 continue
             try:
                 actual = len(attr.data)
@@ -1004,7 +1096,7 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
                 actual = -1
             if actual != expected:
                 row.alert = True
-            row.label(text=f"{domain}: {attr_name} ({actual}/{expected})")
+            row.label(text=f"{attr_name} ({actual}/{expected})")
 
 class OBJECT_PT_MDL_Manhunt2Properties(bpy.types.Panel):
     bl_idname = "OBJECT_PT_MDL_Manhunt2Properties"
@@ -1110,6 +1202,8 @@ def register() -> None:
         name="Use Current Pose", default=True)
     bpy.types.Scene.bleeds_reference_weights = BoolProperty(
         name="Use Reference Weights", default=False)
+    bpy.types.Scene.bleeds_show_mdl_attributes = BoolProperty(
+        name="Show Details", default=False)
 
     if not hasattr(bpy.types.Object, "bleeds_is_mdl_root"):
         bpy.types.Object.bleeds_is_mdl_root = BoolProperty(
@@ -1191,7 +1285,7 @@ def register() -> None:
 
 def unregister() -> None:
 
-    for property_name in ("bleeds_reference_armature", "bleeds_reference_use_pose", "bleeds_reference_weights"):
+    for property_name in ("bleeds_reference_armature", "bleeds_reference_use_pose", "bleeds_reference_weights", "bleeds_show_mdl_attributes"):
         if hasattr(bpy.types.Scene, property_name):
             delattr(bpy.types.Scene, property_name)
 

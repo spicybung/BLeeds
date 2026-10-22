@@ -817,6 +817,8 @@ def register():
             name="Use Reference Weights",
             description="Transfer the reference mesh weights to the target when snapping",
             default=False)
+        bpy.types.Scene.bleeds_show_mdl_attributes = BoolProperty(
+            name="Show Details", default=False)
 
         for cls in _classes:
             safe_register_class(cls)
@@ -860,7 +862,7 @@ def register():
         unregister_bleeds_mdl_object_props()
         unregister_bleeds_texture_scene_props()
         unregister_lvz_img_progress_properties()
-        for prop_name in ("bleeds_reference_armature", "bleeds_reference_use_pose", "bleeds_reference_weights"):
+        for prop_name in ("bleeds_reference_armature", "bleeds_reference_use_pose", "bleeds_reference_weights", "bleeds_show_mdl_attributes"):
             if hasattr(bpy.types.Scene, prop_name):
                 delattr(bpy.types.Scene, prop_name)
         print("BLeeds %s registration FAILED: %s" % (__version__, exc))
@@ -881,6 +883,6 @@ def unregister():
     unregister_bleeds_mdl_object_props()
     unregister_bleeds_texture_scene_props()
     unregister_lvz_img_progress_properties()
-    for prop_name in ("bleeds_reference_armature", "bleeds_reference_use_pose", "bleeds_reference_weights"):
+    for prop_name in ("bleeds_reference_armature", "bleeds_reference_use_pose", "bleeds_reference_weights", "bleeds_show_mdl_attributes"):
         if hasattr(bpy.types.Scene, prop_name):
             delattr(bpy.types.Scene, prop_name)
