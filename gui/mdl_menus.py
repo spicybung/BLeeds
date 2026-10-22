@@ -28,6 +28,8 @@ from bpy.props import (
     StringProperty,
 )
 from mathutils import Matrix, Vector
+from mathutils.bvhtree import BVHTree
+from mathutils.kdtree import KDTree
 
 
 def isArmatureObject(self, object):
@@ -42,6 +44,168 @@ def armatureBoneMatchKey(bone):
         except (TypeError, ValueError):
             continue
     return ("NAME", "".join(character for character in bone.name.lower() if character.isalnum()))
+
+
+def writeArmatureSnapLog(lines):
+    log_name = "BLeeds Armature Snap Log"
+    log = bpy.data.texts.get(log_name)
+    if log is None:
+        log = bpy.data.texts.new(log_name)
+    log.clear()
+    log.write("\n".join(lines) + "\n")
+    for line in lines:
+        print("[BLeeds Snap] " + line)
+
+
+def normalizeSnapVertexGroups(mesh_obj, bone_names, log_lines):
+    aliases = {
+        "l_callf": "l_calf",
+        "r_callf": "r_calf",
+    }
+    for old_name, new_name in aliases.items():
+        group = mesh_obj.vertex_groups.get(old_name)
+        if group is None or new_name not in bone_names:
+            continue
+        destination = mesh_obj.vertex_groups.get(new_name)
+        if destination is None:
+            group.name = new_name
+            log_lines.append("GROUP RENAMED: %s %s -> %s" % (mesh_obj.name, old_name, new_name))
+            continue
+        weights = []
+        for vertex in mesh_obj.data.vertices:
+            source_weight = next((entry.weight for entry in vertex.groups if entry.group == group.index), 0.0)
+            destination_weight = next((entry.weight for entry in vertex.groups if entry.group == destination.index), 0.0)
+            if source_weight > 0.0:
+                weights.append((vertex.index, min(1.0, source_weight + destination_weight)))
+        for vertex_index, weight in weights:
+            destination.add([vertex_index], weight, 'REPLACE')
+        mesh_obj.vertex_groups.remove(group)
+        log_lines.append("GROUP MERGED: %s %s -> %s (%d vertices)" % (
+            mesh_obj.name, old_name, new_name, len(weights)
+        ))
+
+
+def snapBarycentricWeights(point, first, second, third):
+    edge_a = second - first
+    edge_b = third - first
+    relative = point - first
+    aa = edge_a.dot(edge_a)
+    ab = edge_a.dot(edge_b)
+    bb = edge_b.dot(edge_b)
+    ra = relative.dot(edge_a)
+    rb = relative.dot(edge_b)
+    determinant = aa * bb - ab * ab
+    if abs(determinant) < 0.000000000001:
+        return (1.0, 0.0, 0.0)
+    second_weight = (bb * ra - ab * rb) / determinant
+    third_weight = (aa * rb - ab * ra) / determinant
+    first_weight = 1.0 - second_weight - third_weight
+    weights = [max(0.0, first_weight), max(0.0, second_weight), max(0.0, third_weight)]
+    total = sum(weights)
+    return tuple(weight / total for weight in weights)
+
+
+def redistributeSnapReferenceWeights(target, reference, mesh_objects, log_lines):
+    reference_objects = [
+        obj for obj in bpy.data.objects
+        if obj.type == 'MESH' and any(
+            modifier.type == 'ARMATURE' and modifier.object == reference
+            for modifier in obj.modifiers
+        )
+    ]
+    if not reference_objects:
+        raise ValueError("Reference armature has no skinned meshes")
+
+    target_bones = {bone.name.lower(): bone.name for bone in target.data.bones}
+    target_ids = {}
+    repeated_ids = set()
+    for bone in target.data.bones:
+        key = armatureBoneMatchKey(bone)
+        if key[0] == 'ID':
+            if key[1] in target_ids:
+                repeated_ids.add(key[1])
+            target_ids[key[1]] = bone.name
+    for bone_id in repeated_ids:
+        target_ids.pop(bone_id, None)
+
+    source_to_target = {}
+    for bone in reference.data.bones:
+        matching = target_bones.get(bone.name.lower())
+        key = armatureBoneMatchKey(bone)
+        if matching is None and key[0] == 'ID':
+            matching = target_ids.get(key[1])
+        if matching is not None:
+            source_to_target[bone.name] = matching
+    source_to_target.update({"l_callf": "l_calf", "r_callf": "r_calf"})
+
+    positions = []
+    triangles = []
+    weights_by_vertex = []
+    for reference_mesh in reference_objects:
+        mesh = reference_mesh.data
+        transform = reference.matrix_world.inverted_safe() @ reference_mesh.matrix_world
+        group_names = {group.index: group.name for group in reference_mesh.vertex_groups}
+        offset = len(positions)
+        for vertex in mesh.vertices:
+            positions.append(transform @ vertex.co)
+            weights = {}
+            for group in vertex.groups:
+                name = source_to_target.get(group_names.get(group.group))
+                if name is not None and group.weight > 0.0:
+                    weights[name] = weights.get(name, 0.0) + group.weight
+            weights_by_vertex.append(weights)
+        mesh.calc_loop_triangles()
+        for triangle in mesh.loop_triangles:
+            indices = tuple(offset + index for index in triangle.vertices)
+            if (positions[indices[1]] - positions[indices[0]]).cross(
+                positions[indices[2]] - positions[indices[0]]
+            ).length_squared > 0.000000000001:
+                triangles.append(indices)
+
+    if not triangles:
+        raise ValueError("Reference meshes contain no usable triangles")
+    tree = BVHTree.FromPolygons(positions, triangles, all_triangles=True)
+    replacements = []
+    for mesh_obj in mesh_objects:
+        transform = target.matrix_world.inverted_safe() @ mesh_obj.matrix_world
+        mesh_weights = {}
+        for vertex in mesh_obj.data.vertices:
+            hit, normal, triangle_index, distance = tree.find_nearest(transform @ vertex.co)
+            if triangle_index is None:
+                continue
+            indices = triangles[triangle_index]
+            factors = snapBarycentricWeights(
+                hit, positions[indices[0]], positions[indices[1]], positions[indices[2]]
+            )
+            result = {}
+            for index, factor in zip(indices, factors):
+                for name, weight in weights_by_vertex[index].items():
+                    result[name] = result.get(name, 0.0) + weight * factor
+            total = sum(result.values())
+            if total > 0.000001:
+                mesh_weights[vertex.index] = {name: weight / total for name, weight in result.items() if weight > 0.000001}
+        replacements.append((mesh_obj, mesh_weights))
+
+    count = 0
+    for mesh_obj, mesh_weights in replacements:
+        if not mesh_weights:
+            continue
+        indices = list(mesh_weights)
+        for group in list(mesh_obj.vertex_groups):
+            if group.name in target_bones.values() or group.name in ("l_callf", "r_callf"):
+                group.remove(indices)
+        for vertex_index, weights in mesh_weights.items():
+            for name, weight in weights.items():
+                group = mesh_obj.vertex_groups.get(name)
+                if group is None:
+                    group = mesh_obj.vertex_groups.new(name=name)
+                group.add([vertex_index], weight, 'REPLACE')
+            count += 1
+        log_lines.append("REFERENCE WEIGHTS: %s %d vertices" % (mesh_obj.name, len(mesh_weights)))
+    log_lines.append("Reference weights transferred: %d vertices from %d meshes" % (
+        count, len(reference_objects)
+    ))
+    return count
 
 
 class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
@@ -64,6 +228,16 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             return {'CANCELLED'}
 
         use_pose = bool(context.scene.bleeds_reference_use_pose)
+        use_reference_weights = bool(context.scene.bleeds_reference_weights)
+        log_lines = [
+            "Target: %s" % target.name,
+            "Reference: %s" % source.name,
+            "Use Current Pose: %s" % use_pose,
+            "Use Reference Weights: %s" % use_reference_weights,
+            "Frame: %d" % context.scene.frame_current,
+            "Target pose display: %s" % target.data.pose_position,
+            "Target animation: %s" % (target.animation_data.action.name if target.animation_data and target.animation_data.action else "none"),
+        ]
         source_by_name = {}
         source_by_id = {}
         duplicate_ids = set()
@@ -78,17 +252,18 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
         for duplicate_id in duplicate_ids:
             source_by_id.pop(duplicate_id, None)
 
-        source_to_target = target.matrix_world.inverted_safe() @ source.matrix_world
+        source_to_target = Matrix.Identity(4)
         transforms = {}
         for target_bone in target.data.bones:
             normalized = "".join(character for character in target_bone.name.lower() if character.isalnum())
             matched = source_by_name.get(normalized)
+            key = armatureBoneMatchKey(target_bone)
+            if matched is None and key[0] == "ID":
+                matched = source_by_id.get(key[1])
             if matched is None:
-                key = armatureBoneMatchKey(target_bone)
-                if key[0] == "ID":
-                    matched = source_by_id.get(key[1])
-            if matched is None:
+                log_lines.append("UNMATCHED: %s (%s)" % (target_bone.name, str(key)))
                 continue
+            log_lines.append("MATCH: %s -> %s (%s)" % (target_bone.name, matched.name, str(key)))
             pose_bone = source.pose.bones.get(matched.name) if use_pose else None
             if pose_bone is not None:
                 matrix = pose_bone.matrix.copy()
@@ -98,6 +273,25 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
                 matrix = matched.matrix_local.copy()
                 head = matched.head_local.copy()
                 tail = matched.tail_local.copy()
+            rotation_angle = math.degrees(
+                target_bone.matrix_local.to_quaternion().rotation_difference(
+                    matrix.to_quaternion()).angle
+            )
+            reference_bone_neutral = pose_bone is None or all(
+                abs(pose_bone.matrix_basis[row][col] - float(row == col)) < 0.0001
+                for row in range(4) for col in range(4)
+            )
+            if (head - target_bone.head_local).length < 0.005 and rotation_angle > 120.0 and reference_bone_neutral:
+                log_lines.append("PRESERVED BONE AXIS: %s (reference differs by %.2f degrees)" % (
+                    target_bone.name, rotation_angle
+                ))
+                matrix = target_bone.matrix_local.copy()
+                head = target_bone.head_local.copy()
+                tail = target_bone.tail_local.copy()
+            if (head - target_bone.head_local).length < 0.00001 and (
+                tail - target_bone.tail_local
+            ).length < 0.00001:
+                matrix = target_bone.matrix_local.copy()
             transforms[target_bone.name] = (
                 source_to_target @ matrix,
                 source_to_target @ head,
@@ -105,10 +299,44 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             )
 
         if not transforms:
+            writeArmatureSnapLog(log_lines)
             self.report({'ERROR'}, "No matching bones found")
             return {'CANCELLED'}
 
+        matched_bone_count = len(transforms)
+        source_pose_count = sum(
+            1 for bone in source.pose.bones
+            if any(abs(bone.matrix_basis[row][col] - float(row == col)) > 0.0001
+                   for row in range(4) for col in range(4))
+        )
+        target_pose_count = sum(
+            1 for bone in target.pose.bones
+            if any(abs(bone.matrix_basis[row][col] - float(row == col)) > 0.0001
+                   for row in range(4) for col in range(4))
+        )
+        log_lines.append("Non-neutral pose bones: reference=%d target=%d" % (source_pose_count, target_pose_count))
         old_rest = {bone.name: bone.matrix_local.copy() for bone in target.data.bones}
+        pending_bones = {bone.name for bone in target.data.bones if bone.name not in transforms}
+        while pending_bones:
+            resolved_bones = set()
+            for bone_name in pending_bones:
+                bone = target.data.bones[bone_name]
+                if bone.parent is None or bone.parent.name not in transforms:
+                    continue
+                parent_matrix = transforms[bone.parent.name][0]
+                parent_change = parent_matrix @ old_rest[bone.parent.name].inverted_safe()
+                transforms[bone_name] = (
+                    parent_change @ bone.matrix_local,
+                    parent_change @ bone.head_local,
+                    parent_change @ bone.tail_local,
+                )
+                resolved_bones.add(bone_name)
+            if not resolved_bones:
+                break
+            pending_bones.difference_update(resolved_bones)
+        log_lines.append("Matched bones: %d; inherited bones: %d; unchanged bones: %d" % (
+            matched_bone_count, len(transforms) - matched_bone_count, len(pending_bones)
+        ))
         attached_meshes = []
         for obj in context.scene.objects:
             if obj.type != 'MESH' or obj.parent_type == 'BONE':
@@ -125,6 +353,15 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             if obj.data.users > 1:
                 obj.data = obj.data.copy()
             attached_meshes.append(obj)
+
+        if use_reference_weights:
+            try:
+                redistributeSnapReferenceWeights(target, source, attached_meshes, log_lines)
+            except (ValueError, RuntimeError) as error:
+                log_lines.append("REFERENCE WEIGHTS FAILED: %s" % error)
+                writeArmatureSnapLog(log_lines)
+                self.report({'ERROR'}, str(error))
+                return {'CANCELLED'}
 
         previous_mode = target.mode
         try:
@@ -153,32 +390,136 @@ class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
             new_matrix = new_rest.get(name)
             if new_matrix is not None:
                 rest_changes[name] = new_matrix @ old_matrix.inverted_safe()
+                if any(part in name.lower() for part in ('spine', 'arm', 'clavicle', 'shoulder', 'pelvis')):
+                    old_head = old_matrix.translation
+                    new_head = new_matrix.translation
+                    angle = math.degrees(old_matrix.to_quaternion().rotation_difference(
+                        new_matrix.to_quaternion()).angle)
+                    log_lines.append("BONE: %s old=(%.4f, %.4f, %.4f) new=(%.4f, %.4f, %.4f) shift=%.4f rotation=%.2f degrees" % (
+                        name, old_head.x, old_head.y, old_head.z,
+                        new_head.x, new_head.y, new_head.z, (new_head - old_head).length, angle
+                    ))
 
         adjusted_vertices = 0
+        vertex_records = []
+        shared_positions = {}
+        seam_tolerance = 0.0001
+        boundary_records = []
+        unmatched_groups = {}
         for mesh_obj in attached_meshes:
+            normalizeSnapVertexGroups(mesh_obj, old_rest, log_lines)
             mesh_to_armature = target.matrix_world.inverted_safe() @ mesh_obj.matrix_world
             armature_to_mesh = mesh_to_armature.inverted_safe()
             group_names = {group.index: group.name for group in mesh_obj.vertex_groups}
             mesh = mesh_obj.data
+            edge_counts = {}
+            for polygon in mesh.polygons:
+                for edge in polygon.edge_keys:
+                    key = tuple(sorted(edge))
+                    edge_counts[key] = edge_counts.get(key, 0) + 1
+            boundary_vertices = set()
+            for edge, count in edge_counts.items():
+                if count == 1:
+                    boundary_vertices.update(edge)
+            log_lines.append("MESH: %s vertices=%d boundary=%d modifiers=%d" % (
+                mesh_obj.name, len(mesh.vertices), len(boundary_vertices), len(mesh_obj.modifiers)
+            ))
             for vertex in mesh.vertices:
+                position = mesh_to_armature @ vertex.co
                 weighted_position = Vector((0.0, 0.0, 0.0))
                 total_weight = 0.0
-                position = mesh_to_armature @ vertex.co
                 for group in vertex.groups:
                     bone_name = group_names.get(group.group)
                     rest_change = rest_changes.get(bone_name)
-                    if rest_change is None or group.weight <= 0.0:
+                    if bone_name not in old_rest or group.weight <= 0.0:
+                        if group.weight > 0.0 and bone_name not in old_rest:
+                            group_key = "%s/%s" % (mesh_obj.name, bone_name)
+                            unmatched_groups[group_key] = unmatched_groups.get(group_key, 0) + 1
                         continue
-                    weighted_position += (rest_change @ position) * group.weight
+                    if rest_change is not None:
+                        weighted_position += (rest_change @ position) * group.weight
+                    else:
+                        weighted_position += position * group.weight
                     total_weight += group.weight
-                if total_weight > 0.0:
-                    vertex.co = armature_to_mesh @ (weighted_position / total_weight)
-                    adjusted_vertices += 1
-            mesh.update()
+                if total_weight <= 0.0:
+                    continue
+                destination = weighted_position / total_weight
+                record_index = len(vertex_records)
+                vertex_records.append((mesh_obj, vertex.index, position, destination, armature_to_mesh))
+                key = tuple(round(float(axis) / seam_tolerance) for axis in position)
+                shared_positions.setdefault(key, []).append(record_index)
+                if vertex.index in boundary_vertices:
+                    boundary_records.append(record_index)
+
+        displacements = [destination - position for _, _, position, destination, _ in vertex_records]
+        for record_indices in shared_positions.values():
+            if len(record_indices) < 2:
+                continue
+            reference_position = vertex_records[record_indices[0]][2]
+            coincident = [
+                index for index in record_indices
+                if (vertex_records[index][2] - reference_position).length <= seam_tolerance
+            ]
+            if len(coincident) < 2:
+                continue
+            common_displacement = sum(
+                (displacements[index] for index in coincident), Vector((0.0, 0.0, 0.0))
+            ) / len(coincident)
+            for index in coincident:
+                displacements[index] = common_displacement.copy()
+
+        stitched_pairs = 0
+        if boundary_records:
+            rest_heads = [bone.head_local for bone in target.data.bones]
+            skeleton_height = max((head.z for head in rest_heads), default=1.0) - min(
+                (head.z for head in rest_heads), default=0.0
+            )
+            seam_radius = max(0.0005, abs(skeleton_height) * 0.0075)
+            spatial_index = KDTree(len(boundary_records))
+            for index, record_index in enumerate(boundary_records):
+                spatial_index.insert(vertex_records[record_index][2], index)
+            spatial_index.balance()
+            original_displacements = [delta.copy() for delta in displacements]
+            seam_adjustments = {}
+            for index, record_index in enumerate(boundary_records):
+                mesh_obj, _, position, _, _ = vertex_records[record_index]
+                neighbors = [
+                    (distance, boundary_records[other_index])
+                    for _, other_index, distance in spatial_index.find_range(position, seam_radius)
+                    if boundary_records[other_index] != record_index
+                    and vertex_records[boundary_records[other_index]][0] != mesh_obj
+                ]
+                if not neighbors:
+                    continue
+                distance, other_record = min(neighbors, key=lambda entry: entry[0])
+                factor = max(0.0, 1.0 - distance / seam_radius)
+                if factor <= 0.0:
+                    continue
+                proposed = original_displacements[record_index].lerp(
+                    original_displacements[other_record], factor * 0.5
+                )
+                seam_adjustments[record_index] = proposed
+                stitched_pairs += 1
+            for record_index, displacement in seam_adjustments.items():
+                displacements[record_index] = displacement
+            log_lines.append("Boundary pairs adjusted: %d (radius %.6f)" % (stitched_pairs, seam_radius))
+
+        log_lines.append("Unmatched vertex groups: %s" % (
+            ", ".join("%s=%d" % (name, count) for name, count in sorted(unmatched_groups.items()))
+            if unmatched_groups else "none"
+        ))
+
+        for index, (mesh_obj, vertex_index, position, _, armature_to_mesh) in enumerate(vertex_records):
+            mesh_obj.data.vertices[vertex_index].co = armature_to_mesh @ (position + displacements[index])
+            adjusted_vertices += 1
+        for mesh_obj in attached_meshes:
+            mesh_obj.data.update()
+        log_lines.append("Vertices adjusted: %d" % adjusted_vertices)
+        writeArmatureSnapLog(log_lines)
 
         target["bleeds_mdl_force_live_rest_pose"] = True
         target["bleeds_mdl_use_live_armature_rest"] = True
-        self.report({'INFO'}, "Matched %d bones and moved %d vertices" % (len(transforms), adjusted_vertices))
+        self.report({'INFO'}, "Matched %d bones and moved %d vertices" % (matched_bone_count, adjusted_vertices))
         return {'FINISHED'}
 
 
@@ -197,6 +538,7 @@ class OBJECT_PT_BLeeds_SnapArmature(bpy.types.Panel):
         layout = self.layout
         layout.prop(context.scene, "bleeds_reference_armature", text="Reference")
         layout.prop(context.scene, "bleeds_reference_use_pose", text="Use Current Pose")
+        layout.prop(context.scene, "bleeds_reference_weights", text="Use Reference Weights")
         layout.operator(OBJECT_OT_BLeeds_SnapArmature.bl_idname, icon='ARMATURE_DATA')
 
 def find_mdl_root(obj: Optional[bpy.types.Object]) -> Optional[bpy.types.Object]:
@@ -766,6 +1108,8 @@ def register() -> None:
         name="Reference Armature", type=bpy.types.Object, poll=isArmatureObject)
     bpy.types.Scene.bleeds_reference_use_pose = BoolProperty(
         name="Use Current Pose", default=True)
+    bpy.types.Scene.bleeds_reference_weights = BoolProperty(
+        name="Use Reference Weights", default=False)
 
     if not hasattr(bpy.types.Object, "bleeds_is_mdl_root"):
         bpy.types.Object.bleeds_is_mdl_root = BoolProperty(
@@ -847,7 +1191,7 @@ def register() -> None:
 
 def unregister() -> None:
 
-    for property_name in ("bleeds_reference_armature", "bleeds_reference_use_pose"):
+    for property_name in ("bleeds_reference_armature", "bleeds_reference_use_pose", "bleeds_reference_weights"):
         if hasattr(bpy.types.Scene, property_name):
             delattr(bpy.types.Scene, property_name)
 
