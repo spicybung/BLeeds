@@ -15,12 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.5.3.2"
+__version__ = "1.5.3.3"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 5, 3, 2),
+    "version": (1, 5, 3, 3),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Importer/Exporter for Leeds Engine & RenderWare formats",
@@ -30,7 +30,7 @@ bl_info = {
 
 import bpy
 from bpy.utils import register_class, unregister_class
-from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, IntProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatVectorProperty, IntProperty, PointerProperty, StringProperty
 
 
 def get_blender_version():
@@ -546,6 +546,8 @@ _classes = [
     gui.EXPORT_PT_MDL_LeedsScalePos,
     gui.EXPORT_OT_MDL_StampSemanticAttributes,
     gui.EXPORT_PT_MDL_SemanticAttributes,
+    gui.OBJECT_OT_BLeeds_SnapArmature,
+    gui.OBJECT_PT_BLeeds_SnapArmature,
     gui.OBJECT_PT_MDL_Manhunt2Properties,
     gui.OBJECT_PT_BLeeds_2DFX,
     gui.DATA_PT_BLeeds_2DFX_Light,
@@ -807,6 +809,10 @@ def register():
         register_bleeds_mdl_object_props()
         register_bleeds_texture_scene_props()
         register_lvz_img_progress_properties()
+        bpy.types.Scene.bleeds_reference_armature = PointerProperty(
+            name="Reference Armature", type=bpy.types.Object, poll=gui.isArmatureObject)
+        bpy.types.Scene.bleeds_reference_use_pose = BoolProperty(
+            name="Use Current Pose", default=True)
 
         for cls in _classes:
             safe_register_class(cls)
@@ -850,6 +856,9 @@ def register():
         unregister_bleeds_mdl_object_props()
         unregister_bleeds_texture_scene_props()
         unregister_lvz_img_progress_properties()
+        for prop_name in ("bleeds_reference_armature", "bleeds_reference_use_pose"):
+            if hasattr(bpy.types.Scene, prop_name):
+                delattr(bpy.types.Scene, prop_name)
         print("BLeeds %s registration FAILED: %s" % (__version__, exc))
         raise
 
@@ -868,3 +877,6 @@ def unregister():
     unregister_bleeds_mdl_object_props()
     unregister_bleeds_texture_scene_props()
     unregister_lvz_img_progress_properties()
+    for prop_name in ("bleeds_reference_armature", "bleeds_reference_use_pose"):
+        if hasattr(bpy.types.Scene, prop_name):
+            delattr(bpy.types.Scene, prop_name)

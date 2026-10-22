@@ -24,9 +24,133 @@ from bpy.props import (
     BoolProperty,
     EnumProperty,
     FloatVectorProperty,
+    PointerProperty,
     StringProperty,
 )
-from mathutils import Vector
+from mathutils import Matrix, Vector
+
+
+def isArmatureObject(self, object):
+    return object is not None and object.type == 'ARMATURE'
+
+
+def armatureBoneMatchKey(bone):
+    for property_name in ("bleeds_hanim_bone_id", "bleeds_mdl_anim_bone_id", "BoneID"):
+        try:
+            if property_name in bone:
+                return ("ID", int(bone[property_name]))
+        except (TypeError, ValueError):
+            continue
+    return ("NAME", "".join(character for character in bone.name.lower() if character.isalnum()))
+
+
+class OBJECT_OT_BLeeds_SnapArmature(bpy.types.Operator):
+    bl_idname = "bleeds.snap_armature_to_reference"
+    bl_label = "Snap Armature"
+    bl_description = "Match the bones to another armature"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        target = context.object
+        source = getattr(context.scene, "bleeds_reference_armature", None)
+        return target is not None and target.type == 'ARMATURE' and source is not None and source != target
+
+    def execute(self, context):
+        target = context.object
+        source = context.scene.bleeds_reference_armature
+        if target == source:
+            self.report({'ERROR'}, "Select a different armature")
+            return {'CANCELLED'}
+
+        use_pose = bool(context.scene.bleeds_reference_use_pose)
+        source_by_name = {}
+        source_by_id = {}
+        duplicate_ids = set()
+        for source_bone in source.data.bones:
+            normalized = "".join(character for character in source_bone.name.lower() if character.isalnum())
+            source_by_name[normalized] = source_bone
+            key = armatureBoneMatchKey(source_bone)
+            if key[0] == "ID":
+                if key[1] in source_by_id:
+                    duplicate_ids.add(key[1])
+                source_by_id[key[1]] = source_bone
+        for duplicate_id in duplicate_ids:
+            source_by_id.pop(duplicate_id, None)
+
+        source_to_target = target.matrix_world.inverted_safe() @ source.matrix_world
+        transforms = {}
+        for target_bone in target.data.bones:
+            normalized = "".join(character for character in target_bone.name.lower() if character.isalnum())
+            matched = source_by_name.get(normalized)
+            if matched is None:
+                key = armatureBoneMatchKey(target_bone)
+                if key[0] == "ID":
+                    matched = source_by_id.get(key[1])
+            if matched is None:
+                continue
+            pose_bone = source.pose.bones.get(matched.name) if use_pose else None
+            if pose_bone is not None:
+                matrix = pose_bone.matrix.copy()
+                head = pose_bone.head.copy()
+                tail = pose_bone.tail.copy()
+            else:
+                matrix = matched.matrix_local.copy()
+                head = matched.head_local.copy()
+                tail = matched.tail_local.copy()
+            transforms[target_bone.name] = (
+                source_to_target @ matrix,
+                source_to_target @ head,
+                source_to_target @ tail,
+            )
+
+        if not transforms:
+            self.report({'ERROR'}, "No matching bones found")
+            return {'CANCELLED'}
+
+        previous_mode = target.mode
+        try:
+            if previous_mode != 'OBJECT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            bpy.ops.object.mode_set(mode='EDIT')
+            for bone_name, (matrix, head, tail) in transforms.items():
+                edit_bone = target.data.edit_bones.get(bone_name)
+                if edit_bone is None:
+                    continue
+                edit_bone.use_connect = False
+                edit_bone.head = head
+                edit_bone.tail = tail if (tail - head).length > 0.00001 else head + Vector((0, 0.1, 0))
+                roll_axis = matrix.to_3x3() @ Vector((0.0, 0.0, 1.0))
+                if roll_axis.length > 0.00001:
+                    edit_bone.align_roll(roll_axis)
+        finally:
+            if target.mode == 'EDIT':
+                bpy.ops.object.mode_set(mode='OBJECT')
+            if previous_mode in {'POSE', 'EDIT'}:
+                bpy.ops.object.mode_set(mode=previous_mode)
+
+        target["bleeds_mdl_force_live_rest_pose"] = True
+        target["bleeds_mdl_use_live_armature_rest"] = True
+        self.report({'INFO'}, "Matched %d bones from %s" % (len(transforms), source.name))
+        return {'FINISHED'}
+
+
+class OBJECT_PT_BLeeds_SnapArmature(bpy.types.Panel):
+    bl_label = "BLeeds Armature"
+    bl_idname = "OBJECT_PT_BLeeds_SnapArmature"
+    bl_space_type = 'PROPERTIES'
+    bl_region_type = 'WINDOW'
+    bl_context = 'object'
+
+    @classmethod
+    def poll(cls, context):
+        return context.object is not None and context.object.type == 'ARMATURE'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(context.scene, "bleeds_reference_armature", text="Reference")
+        layout.prop(context.scene, "bleeds_reference_use_pose", text="Use Current Pose")
+        layout.operator(OBJECT_OT_BLeeds_SnapArmature.bl_idname, icon='ARMATURE_DATA')
 
 def find_mdl_root(obj: Optional[bpy.types.Object]) -> Optional[bpy.types.Object]:
     if obj is None:
@@ -583,11 +707,18 @@ class OBJECT_PT_MDL_Manhunt2Properties(bpy.types.Panel):
 
 
 def register() -> None:
+    bpy.utils.register_class(OBJECT_OT_BLeeds_SnapArmature)
+    bpy.utils.register_class(OBJECT_PT_BLeeds_SnapArmature)
     bpy.utils.register_class(EXPORT_OT_MDL_Bake_LeedsScalePos)
     bpy.utils.register_class(EXPORT_PT_MDL_LeedsScalePos)
     bpy.utils.register_class(EXPORT_OT_MDL_StampSemanticAttributes)
     bpy.utils.register_class(EXPORT_PT_MDL_SemanticAttributes)
     bpy.utils.register_class(OBJECT_PT_MDL_Manhunt2Properties)
+
+    bpy.types.Scene.bleeds_reference_armature = PointerProperty(
+        name="Reference Armature", type=bpy.types.Object, poll=isArmatureObject)
+    bpy.types.Scene.bleeds_reference_use_pose = BoolProperty(
+        name="Use Current Pose", default=True)
 
     if not hasattr(bpy.types.Object, "bleeds_is_mdl_root"):
         bpy.types.Object.bleeds_is_mdl_root = BoolProperty(
@@ -669,11 +800,17 @@ def register() -> None:
 
 def unregister() -> None:
 
+    for property_name in ("bleeds_reference_armature", "bleeds_reference_use_pose"):
+        if hasattr(bpy.types.Scene, property_name):
+            delattr(bpy.types.Scene, property_name)
+
     bpy.utils.unregister_class(OBJECT_PT_MDL_Manhunt2Properties)
     bpy.utils.unregister_class(EXPORT_PT_MDL_SemanticAttributes)
     bpy.utils.unregister_class(EXPORT_OT_MDL_StampSemanticAttributes)
     bpy.utils.unregister_class(EXPORT_PT_MDL_LeedsScalePos)
     bpy.utils.unregister_class(EXPORT_OT_MDL_Bake_LeedsScalePos)
+    bpy.utils.unregister_class(OBJECT_PT_BLeeds_SnapArmature)
+    bpy.utils.unregister_class(OBJECT_OT_BLeeds_SnapArmature)
 
     for prop_name in (
         "bleeds_is_mdl_root",
