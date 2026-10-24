@@ -77,6 +77,7 @@ class CW_MT_ExportChoice(Menu):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator("export_scene.leeds_anim", text="Stories: Animation (.anim)")
         layout.operator(
             "export_scene.bleeds_stories_mdl",
             text="R* Leeds: Model (.mdl)",

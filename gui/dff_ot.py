@@ -46,6 +46,16 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
         options={"HIDDEN"},
     )
 
+    source: EnumProperty(
+        name="Source",
+        items=(("MOBILE", "LCS Mobile", "LCS iOS and Android assets"),
+               ("BETA", "LCS Prototype", "Standard RenderWare geometry from prototype files")),
+        default="MOBILE",
+    )
+
+    def draw(self, context):
+        self.layout.prop(self, "source")
+
     def gatherFilepaths(self):
         paths = []
         directory = str(getattr(self, "directory", "") or "")
@@ -78,22 +88,13 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
             self.report({"ERROR"}, "No DFF files were selected")
             return {"CANCELLED"}
 
-        if not hasattr(bpy.ops.import_scene, "dff"):
-            self.report(
-                {"ERROR"},
-                "No RenderWare DFF importer is registered. Enable DemonFF or DragonFF, then retry.",
-            )
-            return {"CANCELLED"}
-
         imported = 0
         failed = []
         for filepath in filepaths:
             try:
-                result = bpy.ops.import_scene.dff(filepath=filepath)
-                if "FINISHED" in result:
-                    imported += 1
-                else:
-                    failed.append(os.path.basename(filepath))
+                from ..ops.native_mobile import importDff
+                importDff(context, filepath, self.source)
+                imported += 1
             except Exception as exc:
                 failed.append("{}: {}".format(os.path.basename(filepath), exc))
 
@@ -114,77 +115,19 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
 
 class EXPORT_OT_BLeeds_DFF(Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_dff"
-    bl_label = "Export R* Studios DFF"
-    bl_description = "Export RenderWare .DFF"
+    bl_label = "Export LCS Mobile DFF"
+    bl_description = "Export edited LCS mobile DFF meshes, UVs, materials, and skin weights"
     bl_options = {"PRESET"}
 
     filename_ext = ".dff"
     filter_glob: StringProperty(default="*.dff", options={"HIDDEN"}, maxlen=255)
 
-    platform: EnumProperty(
-        name="Platform",
-        description="DFF export target",
-        items=(
-            ("PSP", "PSP DFF", "RenderWare DFF profile for PSP-era Rockstar assets"),
-            ("SA_PC", "GTA San Andreas PC", "RenderWare DFF profile for GTA San Andreas on PC"),
-        ),
-        default="SA_PC",
-    )
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-        layout.prop(self, "platform")
-
     def execute(self, context):
-        if not hasattr(bpy.ops.export_scene, "dff"):
-            self.report({"ERROR"}, "No DFF exporter is registered. Enable DemonFF or DragonFF, then retry.")
-            return {"CANCELLED"}
-
-        op = bpy.ops.export_scene.dff
-        kwargs = {"filepath": self.filepath}
-
         try:
-            rna = op.get_rna_type()
-            prop_names = {prop.identifier for prop in rna.properties}
-        except Exception:
-            prop_names = set()
-
-        if self.platform == "SA_PC":
-            candidates = {
-                "version": "0x36003",
-                "dff_version": "0x36003",
-                "rw_version": "0x36003",
-                "game": "SA",
-                "game_version": "SA",
-                "platform": "PC",
-            }
-        else:
-            candidates = {
-                "version": "0x34003",
-                "dff_version": "0x34003",
-                "rw_version": "0x34003",
-                "game": "LCS",
-                "game_version": "LCS",
-                "platform": "PSP",
-            }
-
-        for name, value in candidates.items():
-            if name in prop_names:
-                kwargs[name] = value
-
-        try:
-            result = op(**kwargs)
-        except TypeError:
-            result = op(filepath=self.filepath)
+            from ..ops.native_mobile import exportDff
+            exportDff(context, self.filepath)
         except Exception as exc:
-            self.report({"ERROR"}, "DFF export failed: {}".format(exc))
+            self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
-
-        if "FINISHED" not in result:
-            self.report({"ERROR"}, "DFF exporter did not finish")
-            return {"CANCELLED"}
-
-        self.report({"INFO"}, "Exported {}: {}".format("PSP DFF" if self.platform == "PSP" else "GTA SA PC DFF", self.filepath))
+        self.report({"INFO"}, "Exported LCS mobile DFF")
         return {"FINISHED"}

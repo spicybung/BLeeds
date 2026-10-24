@@ -16,7 +16,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 from ..ops import mdl_importer
-from ..leedsLib import mdl as mdl_core
+from ..leedsLib import native_mdl as mdl_core
 from ..ops import tex_importer
 
 import os
@@ -33,7 +33,7 @@ from bpy.props import (
 )
 
 def resolve_export_defaults_from_root(context):
-    from ..ops import mdl_exporter
+    from ..ops import native_ps2_mdl as mdl_exporter
 
     try:
         root = mdl_exporter.find_mdl_root(context, create_if_missing=False)
@@ -498,7 +498,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
             col.prop(self, "simple_atomic_hash_key")
 
     def invoke(self, context, event):
-        from ..ops import mdl_exporter
+        from ..ops import native_ps2_mdl as mdl_exporter
 
         root_mdl_type, root_use_normals = resolve_export_defaults_from_root(context)
         if root_mdl_type == "PED":
@@ -569,7 +569,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
             return False
 
     def execute(self, context):
-        from ..ops import mdl_exporter
+        from ..ops import native_ps2_mdl as mdl_exporter
 
         root_mdl_type, root_use_normals = resolve_export_defaults_from_root(context)
         requested_model_format = str(self.mdl_type or "SIMPLE").upper().strip()

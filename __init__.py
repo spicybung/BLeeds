@@ -15,12 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.5.3.3"
+__version__ = "1.5.3.4"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 5, 3, 3),
+    "version": (1, 5, 3, 4),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Importer/Exporter for Leeds Engine & RenderWare formats",
@@ -528,10 +528,16 @@ from .gui import gui
 
 
 _classes = [
+    gui.IMPORT_OT_BLeeds_MobileTxd,
+    gui.EXPORT_OT_BLeeds_MobileTxd,
+    gui.IMPORT_OT_BLeeds_MobileImg,
+    gui.EXPORT_OT_BLeeds_MobileImg,
+    gui.VIEW3D_PT_bleeds_mobile_files,
     gui.IMPORT_OT_Stories_mdl,
     gui.IMPORT_OT_BLeeds_DFF,
     gui.EXPORT_OT_BLeeds_DFF,
     gui.IMPORT_SCENE_OT_leeds_anim,
+    gui.EXPORT_SCENE_OT_leeds_anim,
     gui.IMPORT_SCENE_OT_bleeds_manhunt_ifp,
     gui.DATA_PT_leeds_anim_bone_id,
     gui.IMPORT_OT_COL2,

@@ -24,7 +24,7 @@ from typing import List, Dict, Tuple, Any
 import bpy
 from mathutils import Matrix, Vector
 
-from ..leedsLib import mdl as stories_mdl
+from ..leedsLib import native_mdl as stories_mdl
 from ..leedsLib import lvz_img as embedded_mdl
 from ..data.bone_data import normalizePedSkinBoneName
 from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth, set_mesh_gouraud_shading, stamp_bleeds_entity_type
@@ -3126,6 +3126,8 @@ def assign_ps2_skin(
     writeMdlVertexSkinAssignments(obj, assignments)
 
 def getPspSkinPaletteBoneNames(stories_ctx: Any, arm_obj: bpy.types.Object) -> List[str]:
+    if str(getattr(stories_ctx, "mdl_type", "")).upper() == "PED":
+        return getCanonicalPedSkinPaletteBoneNames(stories_ctx.import_type, arm_obj)
     arm_info = stories_ctx.atomic.armature
     entries = list(getattr(arm_info, 'hierarchy_entries', []) or [])
     frame_bones = arm_obj.get('bleeds_mdl_frame_bone_names', {})

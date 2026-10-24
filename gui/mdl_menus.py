@@ -983,7 +983,7 @@ class EXPORT_PT_MDL_LeedsScalePos(bpy.types.Panel):
 
         try:
 
-            from ..ops.mdl_exporter import gather_mesh_parts
+            from ..ops.native_ps2_mdl import gather_mesh_parts
         except Exception:
             gather_mesh_parts = None
         if gather_mesh_parts is not None and root is not None:
@@ -1037,7 +1037,7 @@ class EXPORT_OT_MDL_StampSemanticAttributes(bpy.types.Operator):
             return {"CANCELLED"}
 
         try:
-            from ..ops.mdl_exporter import gather_mesh_parts, writeMdlSemanticDefaultsForExport, normalizeMdlCustomPedVertexGroupsForExport, writeMdlCanonicalPedIdentityMapProps
+            from ..ops.native_ps2_mdl import gather_mesh_parts, writeMdlSemanticDefaultsForExport, normalizeMdlCustomPedVertexGroupsForExport, writeMdlCanonicalPedIdentityMapProps
         except Exception as exc:
             self.report({"ERROR"}, f"Could not load MDL semantic attribute writer: {exc}")
             return {"CANCELLED"}
@@ -1106,7 +1106,7 @@ class EXPORT_PT_MDL_SemanticAttributes(bpy.types.Panel):
             return
 
         try:
-            from ..ops.mdl_exporter import gather_mesh_parts
+            from ..ops.native_ps2_mdl import gather_mesh_parts
         except Exception:
             gather_mesh_parts = None
 

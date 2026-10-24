@@ -25,7 +25,7 @@ import struct
 from collections import Counter
 from mathutils import Vector, Matrix
 
-from ..leedsLib import mdl as mdl_lib
+from ..leedsLib import native_mdl as mdl_lib
 from ..data.bone_data import normalizePedSkinBoneName
 from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute
 
@@ -5913,7 +5913,7 @@ def build_simple_vertices_world(
 def export_stories_mdl_psp(context, filepath, *, mdl_type="SIM", max_batch_verts=0,
                            rounding_mode="ROUND", use_normals=True,
                            imported_export_mode="REBUILD", export_game="VCS"):
-    from .mdl_psp_exporter import exportPspMdl
+    from .native_psp_mdl import exportPspMdl
     return exportPspMdl(context, filepath, mdl_type=mdl_type, use_normals=use_normals,
                         export_game=export_game)
 

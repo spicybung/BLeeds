@@ -79,14 +79,9 @@ def buildPoseBoneLookup(armature_object) -> Tuple[Dict[int, object], Dict[int, o
     for pose_bone in armature_object.pose.bones:
         data_bone = armature_object.data.bones.get(pose_bone.name)
 
-        name_direct_id = directIdFromBoneName(pose_bone.name)
-        if name_direct_id is not None:
-            by_direct_id[int(name_direct_id)] = pose_bone
-            direct_id_source[int(name_direct_id)] = "canonical bone-name map"
-
         for owner in (pose_bone, data_bone):
             direct_id = getIntCustomProperty(owner, DIRECT_ID_PROPERTY_NAMES)
-            if direct_id is not None and int(direct_id) not in by_direct_id:
+            if direct_id is not None and 0 <= int(direct_id) < 255 and int(direct_id) not in by_direct_id:
                 by_direct_id[int(direct_id)] = pose_bone
                 direct_id_source.setdefault(int(direct_id), "anim-id property")
 
@@ -101,6 +96,12 @@ def buildPoseBoneLookup(armature_object) -> Tuple[Dict[int, object], Dict[int, o
             table_index = getIntCustomProperty(owner, TABLE_INDEX_PROPERTY_NAMES)
             if table_index is not None:
                 by_table_index.setdefault(table_index, pose_bone)
+
+    for pose_bone in armature_object.pose.bones:
+        name_direct_id = directIdFromBoneName(pose_bone.name)
+        if name_direct_id is not None and int(name_direct_id) not in by_direct_id:
+            by_direct_id[int(name_direct_id)] = pose_bone
+            direct_id_source[int(name_direct_id)] = "bone name"
 
     return by_direct_id, by_bone_key, by_hash16, by_table_index, direct_id_source
 
@@ -131,19 +132,21 @@ def findPoseBoneForAnimBone(
     by_direct_id, by_bone_key, by_hash16, by_table_index, direct_id_source = lookup
     resolved_direct_id, resolved_reason = resolvePedAnimBoneId(bone)
 
-    if bone.direct_bone_id is not None and bone.direct_bone_id in by_direct_id:
+    if (bone.direct_bone_id is not None and bone.direct_bone_id in by_direct_id
+            and (use_name_fallback or direct_id_source.get(bone.direct_bone_id) != "bone name")):
         return by_direct_id[bone.direct_bone_id], direct_id_source.get(int(bone.direct_bone_id), "direct-id property")
 
     if bone.bone_key in by_bone_key:
         return by_bone_key[bone.bone_key], "bone-key property"
 
-    if bone.hash16 in by_hash16:
+    if bone.hash16 != 0 and bone.hash16 in by_hash16:
         return by_hash16[bone.hash16], "hash16 property"
 
     if (
         bone.direct_bone_id is None
         and resolved_direct_id is not None
         and resolved_direct_id in by_direct_id
+        and (use_name_fallback or direct_id_source.get(resolved_direct_id) != "bone name")
     ):
         return by_direct_id[resolved_direct_id], f"{resolved_reason} -> {direct_id_source.get(int(resolved_direct_id), 'direct-id property')}"
 
@@ -328,7 +331,7 @@ def buildMappingDiagnosticLines(armature_object, entry: AnimEntry) -> List[str]:
         elif bone.bone_key in by_bone_key:
             target = by_bone_key[bone.bone_key]
             lines.append(f"PIPE OK bone[{bone.table_index:02d}] key 0x{bone.bone_key:08X} -> {getattr(target, 'name', '<unnamed>')!r} via bone-key property")
-        elif bone.hash16 in by_hash16:
+        elif bone.hash16 != 0 and bone.hash16 in by_hash16:
             target = by_hash16[bone.hash16]
             lines.append(f"PIPE OK bone[{bone.table_index:02d}] hash16 0x{bone.hash16:04X} -> {getattr(target, 'name', '<unnamed>')!r} via hash16 property")
         else:
@@ -1428,7 +1431,8 @@ def isNativeLeedsMdlArmature(armature_object) -> bool:
             except Exception:
                 pass
             try:
-                if getArmatureBoneDirectAnimId(bone) >= 0:
+                direct_id = getIntCustomProperty(bone, DIRECT_ID_PROPERTY_NAMES)
+                if direct_id is not None and direct_id >= 0:
                     direct_id_bones += 1
             except Exception:
                 pass
@@ -1699,7 +1703,7 @@ def measureImportedMdlAnimationMotion(
         return False, 0.0, ["DEFORM CHECK: no Blender mesh objects available"]
 
     scene = bpy.context.scene
-    previous_frame = float(scene.frame_current)
+    previous_frame = float(scene.frame_current) + float(scene.frame_subframe)
     depsgraph = bpy.context.evaluated_depsgraph_get()
 
     sample_frames = [float(start_frame)]
@@ -1728,10 +1732,14 @@ def measureImportedMdlAnimationMotion(
             float(end_frame),
         ])
 
+    ordered_frames = sorted(set(sample_frames))
     unique_frames = []
-    for frame in sample_frames:
-        if not any(abs(frame - existing) <= 1.0e-5 for existing in unique_frames):
+    for frame in ordered_frames:
+        if not unique_frames or abs(frame - unique_frames[-1]) > 1.0e-5:
             unique_frames.append(frame)
+    if len(unique_frames) > 9:
+        last_index = len(unique_frames) - 1
+        unique_frames = [unique_frames[round(index * last_index / 8)] for index in range(9)]
 
     try:
         scene.frame_set(int(math.floor(unique_frames[0])), subframe=float(unique_frames[0] - math.floor(unique_frames[0])))
@@ -1829,6 +1837,21 @@ def applyAnimEntryToArmature(
     if armature_object is None or getattr(armature_object, "type", None) != "ARMATURE":
         raise RuntimeError("Select an armature, an imported MDL mesh part, or the imported MDL root before importing ANIM")
 
+    lookup_before_import = buildPoseBoneLookup(armature_object)
+    has_matching_keys = any(
+        bone.frames and findPoseBoneForAnimBone(
+            armature_object, bone,
+            use_name_fallback=use_name_fallback,
+            use_table_index_fallback=use_table_index_fallback,
+            lookup=lookup_before_import,
+        )[0] is not None
+        for bone in entry.bones
+    )
+    if not has_matching_keys:
+        raise ValueError("No animation tracks match the selected armature")
+    if not math.isfinite(fps) or fps <= 0.0 or not math.isfinite(start_frame) or not math.isfinite(translation_scale):
+        raise ValueError("Animation timing and translation scale must be finite, with a positive FPS")
+
     bound_mdl_meshes, binding_lines = repairImportedMdlMeshBindingsForArmature(
         armature_object,
         bpy.context,
@@ -1863,6 +1886,9 @@ def applyAnimEntryToArmature(
         action["bleeds_source_anim_name"] = entry.name
         action["bleeds_source_anim_index"] = int(entry.index)
         action["bleeds_source_anim_total_time"] = float(entry.total_time)
+        action["bleeds_anim_fps"] = float(fps)
+        action["bleeds_anim_start_frame"] = float(start_frame)
+        action["bleeds_anim_translation_scale"] = float(translation_scale)
         action["bleeds_anim_pose_space_mode"] = str(pose_space_mode)
         armature_object.animation_data.action = action
     else:
@@ -1964,13 +1990,15 @@ def applyAnimEntryToArmature(
                         anim_frame,
                         bone,
                         apply_rotation=apply_rotation,
-                        apply_translation=apply_translation,
+                        apply_translation=bool(apply_translation) and (
+                            apply_root_motion or resolvePedAnimBoneId(bone)[0] != 0),
                         translation_scale=translation_scale,
                     )
                     if apply_rotation and bone.has_rotation:
                         previous_quaternion = makePoseQuaternionContinuous(pose_bone, previous_quaternion)
                         pose_bone.keyframe_insert(data_path="rotation_quaternion", frame=frame_number)
-                    if apply_translation and bone.has_translation:
+                    if apply_translation and bone.has_translation and (
+                            apply_root_motion or resolvePedAnimBoneId(bone)[0] != 0):
                         pose_bone.keyframe_insert(data_path="location", frame=frame_number)
                     keyed_count += keyed_here
                 elif mode in ("MDL_REST_DELTA", "DEFAULT", "", "MDL_REST_ROTATION_DELTA", "PED_REST_ROTATION_DELTA", "SAFE_DELTA"):
@@ -2035,7 +2063,8 @@ def applyAnimEntryToArmature(
             if rest_source_for_log:
                 log_lines.append(f"    applied using {rest_source_for_log}")
 
-    end_frame = float(start_frame) + max(0.0, float(entry.total_time)) * float(fps)
+    last_key_time = max((frame.absolute_time for bone in entry.bones for frame in bone.frames), default=0.0)
+    end_frame = float(start_frame) + max(0.0, float(entry.total_time), last_key_time) * float(fps)
     scene = bpy.context.scene
     scene.frame_start = min(int(scene.frame_start), int(start_frame))
     scene.frame_end = max(int(scene.frame_end), int(math.ceil(end_frame)) + 1)

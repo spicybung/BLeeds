@@ -326,6 +326,7 @@ def readAnimBytes(data: bytes, *, use_logical_size: bool = True, verbose: bool =
     for entry in animations:
         bones: List[BoneAnim] = []
         table_off = entry.bone_table_off
+        requireRange(parse_data, table_off, entry.bone_count * 12, f"{entry.name} bone table")
         for bone_index in range(entry.bone_count):
             item_off = table_off + bone_index * 12
             if item_off + 12 > len(parse_data):
@@ -365,6 +366,12 @@ def readAnimBytes(data: bytes, *, use_logical_size: bool = True, verbose: bool =
             stride = calculateFrameStride(bone.flags)
             if stride <= 2:
                 log.warning(f"{entry.name!r} bone {bone.table_index} has no rot/trans/scale flags: flags=0x{bone.flags:04X}")
+            if not bone.frame_count:
+                bone.frames = []
+                continue
+            frame_data_end = reloc_off if reloc_off else len(parse_data)
+            if bone.frames_off < 0x20 or bone.frames_off + bone.frame_count * stride > frame_data_end:
+                raise AnimReadError(f"{entry.name!r} bone {bone.table_index}: incomplete keyframe data")
             if bone.frames_off < 0x20 or bone.frames_off >= len(parse_data):
                 log.warning(f"{entry.name!r} bone {bone.table_index} has bad frames_off=0x{bone.frames_off:08X}")
                 continue
@@ -393,7 +400,9 @@ def readAnimBytes(data: bytes, *, use_logical_size: bool = True, verbose: bool =
                     log.warning(
                         f"{entry.name!r} bone {bone.table_index} frame {frame_index} suspicious delta_time={delta_time!r}"
                     )
-                absolute_time += max(0.0, delta_time)
+                if not math.isfinite(delta_time) or delta_time < 0.0:
+                    raise AnimReadError(f"{entry.name!r} bone {bone.table_index}: invalid frame time")
+                absolute_time += delta_time
 
                 translation = (0.0, 0.0, 0.0)
                 if bone.has_translation:
@@ -406,7 +415,7 @@ def readAnimBytes(data: bytes, *, use_logical_size: bool = True, verbose: bool =
                     pos += 6
 
                 if not isFiniteTuple(rotation + translation + scale):
-                    log.warning(f"{entry.name!r} bone {bone.table_index} frame {frame_index} has non-finite values")
+                    raise AnimReadError(f"{entry.name!r} bone {bone.table_index} frame {frame_index}: non-finite transform")
 
                 frames.append(
                     AnimFrame(
@@ -551,7 +560,7 @@ def sampleBoneAnimFrameAtTime(bone: BoneAnim, time_value: float) -> Optional[Ani
 
     return frames[-1]
 
-def buildAnimationTimeline(entry: AnimEntry, max_key_times: int = 512) -> List[float]:
+def buildAnimationTimeline(entry: AnimEntry, max_key_times: Optional[int] = None) -> List[float]:
     times = {0.0, max(0.0, float(entry.total_time))}
     for bone in entry.bones:
         for anim_frame in bone.frames:
@@ -559,7 +568,7 @@ def buildAnimationTimeline(entry: AnimEntry, max_key_times: int = 512) -> List[f
             if math.isfinite(value) and value >= 0.0:
                 times.add(round(value, 6))
     ordered = sorted(times)
-    if len(ordered) <= int(max_key_times):
+    if max_key_times is None or len(ordered) <= int(max_key_times):
         return ordered
 
     if int(max_key_times) < 2:
@@ -571,3 +580,92 @@ def buildAnimationTimeline(entry: AnimEntry, max_key_times: int = 512) -> List[f
         source_index = max(0, min(len(ordered) - 1, source_index))
         thinned.append(ordered[source_index])
     return sorted(set(thinned))
+
+
+def writeAnimBytes(anim_file: AnimFile) -> bytes:
+    animations = list(anim_file.animations)
+    if not animations:
+        raise ValueError("ANIM must contain at least one animation")
+    header = bytearray(anim_file.header[:32].ljust(32, b"\0"))
+    header[:4] = b"mina"
+    data = header + bytearray(4 * (len(animations) + 1))
+    relocations = []
+
+    def alignData():
+        data.extend(b"\0" * ((-len(data)) % 4))
+
+    def writePointer(offset, target):
+        struct.pack_into("<I", data, offset, target)
+        if target:
+            relocations.append(offset)
+
+    def packHalf(values, label):
+        if not isFiniteTuple(values):
+            raise ValueError(f"{label}: transform contains a non-finite value")
+        try:
+            return struct.pack("<" + "e" * len(values), *values)
+        except (OverflowError, struct.error) as exc:
+            raise ValueError(f"{label}: value exceeds the ANIM half-float range") from exc
+
+    for entry_index, entry in enumerate(animations):
+        try:
+            name = entry.name.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("ANIM names must use ASCII characters") from exc
+        if not name or len(name) > 24 or b"\0" in name or not isPrintableAsciiName(name):
+            raise ValueError("ANIM names must contain 1 to 24 printable ASCII characters")
+        if len(entry.bones) > 65535:
+            raise ValueError(f"{entry.name}: too many bone tracks")
+        alignData()
+        entry_offset = len(data)
+        data.extend(b"\0" * 36)
+        writePointer(32 + entry_index * 4, entry_offset)
+        data[entry_offset + 4:entry_offset + 28] = name.ljust(24, b"\0")
+        struct.pack_into("<HH", data, entry_offset + 28, len(entry.bones), entry.unk0)
+        table_offset = len(data)
+        data.extend(b"\0" * (12 * len(entry.bones)))
+        writePointer(entry_offset, table_offset)
+        last_time = 0.0
+        for bone_index, bone in enumerate(entry.bones):
+            if bone.flags & ~0x1F:
+                raise ValueError(f"{entry.name}: unsupported track flags 0x{bone.flags:04X}")
+            if len(bone.frames) > 65535:
+                raise ValueError(f"{entry.name}: too many keys in bone {bone_index}")
+            item_offset = table_offset + bone_index * 12
+            struct.pack_into("<HH", data, item_offset, bone.flags, len(bone.frames))
+            struct.pack_into("<I", data, item_offset + 8, bone.bone_key)
+            if not bone.frames:
+                continue
+            alignData()
+            writePointer(item_offset + 4, len(data))
+            previous_time = 0.0
+            encoded_time = 0.0
+            for frame in bone.frames:
+                time = float(frame.absolute_time)
+                if not math.isfinite(time) or time < previous_time:
+                    raise ValueError(f"{entry.name}: key times must be finite, nonnegative and ordered")
+                if bone.has_rotation:
+                    data.extend(packHalf(frame.rotation_xyzw, entry.name))
+                packed_time = packHalf((time - previous_time,), entry.name)
+                encoded_time += struct.unpack("<e", packed_time)[0]
+                data.extend(packed_time)
+                if bone.has_translation:
+                    data.extend(packHalf(frame.translation_xyz, entry.name))
+                if bone.has_scale:
+                    data.extend(packHalf(frame.scale_xyz, entry.name))
+                previous_time = time
+            last_time = max(last_time, encoded_time)
+        if not math.isfinite(entry.total_time) or entry.total_time < 0.0:
+            raise ValueError(f"{entry.name}: invalid duration")
+        struct.pack_into("<f", data, entry_offset + 32, max(float(entry.total_time), last_time))
+    alignData()
+    relocation_offset = len(data)
+    data.extend(struct.pack("<" + "I" * len(relocations), *relocations))
+    struct.pack_into("<IIII", data, 8, len(data), relocation_offset, relocation_offset, len(relocations))
+    return bytes(data)
+
+
+def writeAnimFile(path: str, anim_file: AnimFile) -> None:
+    data = writeAnimBytes(anim_file)
+    readAnimBytes(data)
+    Path(path).write_bytes(data)

@@ -28,3 +28,5 @@ from .lvz_img_ot import *
 from .two_dfx_menus import *
 from .world_ot import *
 from .worldblock_ot import *
+
+from .mobile_ot import *

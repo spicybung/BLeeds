@@ -33,9 +33,15 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
 
     filename_ext = ".anim"
     filter_glob: StringProperty(
-        default="*.anim",
+        default="*.anim;*.ANIM",
         options={"HIDDEN"},
         maxlen=255,
+    )
+
+    import_all: BoolProperty(
+        name="Import All Animations",
+        description="Create a separate action for every animation in the file",
+        default=True,
     )
 
     animation_index: IntProperty(
@@ -65,44 +71,44 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
 
     apply_translation: BoolProperty(
         name="Apply Translation",
-        description="Key translation channels from the ANIM file. Off by default for PLR ped weapon/body ANIMs because root translation is game/object motion and will explode an imported armature if double-applied",
-        default=False,
+        description="Key translation channels from the ANIM file. Uses the imported model rest pose; root movement is controlled separately",
+        default=True,
     )
 
     apply_root_motion: BoolProperty(
         name="Apply Root Translation",
-        description="Apply ANIM bone-id 0 translation. Root rotation is still applied by the MDL-rest solver because weapon/body PED ANIMs use it as the parent basis; leave translation off unless testing root/object motion.",
+        description="Include movement of the root bone",
         default=False,
     )
 
     pose_space_mode: EnumProperty(
-        name="Pose Space",
+        name="Pose",
         description="How decoded ANIM local transforms are converted into Blender pose channels",
         items=(
             (
                 "MDL_REST_DELTA",
-                "Blender-Space Rest Delta",
-                "Default for imported BLeeds pedmodels. Weapon/body clips automatically use their first authored key as the Leeds reference pose; other clips use the imported MDL rest-local conversion.",
+                "Imported Model Rest Pose",
+                "Default for imported BLeeds pedmodels. Uses the source bone transforms saved by the model importer.",
             ),
             (
                 "ANIM_FIRST_KEY_DELTA",
-                "Leeds First-Key Reference Delta",
-                "Treat each track's first key as its authored Leeds local reference pose and apply subsequent motion as a Blender-rest-relative delta. This is selected automatically for Stories weapon/body PED clips.",
+                "First Frame as Rest Pose",
+                "Treat each track's first key as its authored Leeds local reference pose and apply subsequent motion as a Blender-rest-relative delta. Use this when the animation was made for a different skeleton.",
             ),
             (
                 "PLR_REST_ROTATION_DELTA",
-                "Raw ANIM Quaternion Delta",
-                "Debug only. Treats decoded ANIM quaternions as raw rest-relative deltas; do not use this for normal Stories weapon PED ANIMs.",
+                "Original Rotation Delta",
+                "Apply each rotation relative to the original model pose.",
             ),
             (
                 "MDL_ABSOLUTE_POSE",
-                "MDL Absolute Pose",
-                "Debug. Solve the whole pose from ANIM local transforms through the imported MDL parent hierarchy, then key Blender pose matrices",
+                "Model Local Pose",
+                "Apply the animation through the complete model hierarchy.",
             ),
             (
                 "RAW_BASIS",
-                "Raw Blender Basis",
-                "Debug/old behavior. Write decoded ANIM quaternions directly to pose bone rotation_quaternion",
+                "Blender Local Pose",
+                "Apply local rotations directly to Blender bones.",
             ),
         ),
         default="MDL_REST_DELTA",
@@ -159,7 +165,9 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
         layout.use_property_decorate = False
 
         col = layout.column(align=True)
-        col.prop(self, "animation_index")
+        col.prop(self, "import_all")
+        if not self.import_all:
+            col.prop(self, "animation_index")
         col.prop(self, "apply_to_selected_armature")
         col.prop(self, "create_text_summary")
 
@@ -197,14 +205,15 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
             self.report({"ERROR"}, "ANIM file parsed but contains no animations")
             return {"CANCELLED"}
 
-        if self.animation_index >= len(anim_file.animations):
+        selected_index = 0 if self.import_all else self.animation_index
+        if selected_index >= len(anim_file.animations):
             self.report(
                 {"ERROR"},
                 f"Animation Index {self.animation_index} is out of range; file has {len(anim_file.animations)} animation(s)",
             )
             return {"CANCELLED"}
 
-        entry = anim_file.animations[self.animation_index]
+        entry = anim_file.animations[selected_index]
         selected_armature = anim_importer.findSelectedArmature(context)
         if self.apply_to_selected_armature and selected_armature is not None:
             try:
@@ -253,6 +262,33 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
                 self.report({"ERROR"}, f"Could not apply ANIM: {exc}")
                 return {"CANCELLED"}
 
+        if self.apply_to_selected_armature and self.import_all and mapped_count:
+            selected_action = selected_armature.animation_data.action
+            selected_action.use_fake_user = True
+            for other_entry in anim_file.animations:
+                if other_entry.index == entry.index:
+                    continue
+                try:
+                    anim_importer.applyAnimEntryToArmature(
+                        selected_armature, other_entry, self.filepath,
+                        fps=self.fps, start_frame=self.start_frame,
+                        apply_rotation=self.apply_rotation,
+                        apply_translation=self.apply_translation,
+                        translation_scale=self.translation_scale,
+                        use_name_fallback=self.use_name_fallback,
+                        use_table_index_fallback=self.use_table_index_fallback,
+                        clear_existing_action=True,
+                        pose_space_mode=self.pose_space_mode,
+                        apply_root_motion=self.apply_root_motion,
+                    )
+                    selected_armature.animation_data.action.use_fake_user = True
+                except Exception as exc:
+                    selected_armature.animation_data.action = selected_action
+                    self.report({"ERROR"}, f"Could not import {other_entry.name}: {exc}")
+                    return {"CANCELLED"}
+            selected_armature.animation_data.action = selected_action
+            context.scene.frame_set(context.scene.frame_current)
+
         if self.create_text_summary:
             text_name = "BLeeds_ANIM_" + Path(self.filepath).stem[:40]
             summary = anim_importer.buildImportSummary(
@@ -276,7 +312,7 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
             else:
                 self.report(
                     {"INFO"},
-                    f"Imported {entry.name}: mapped {mapped_count}/{len(entry.bones)} bones, keyed {keyed_count} channels, unmapped {unmapped}",
+                    f"Imported {len(anim_file.animations) if self.import_all else 1} animation(s); active {entry.name}: {mapped_count}/{len(entry.bones)} bones, {unmapped} unmatched",
                 )
         else:
             self.report({"INFO"}, f"Parsed {Path(self.filepath).name}; created summary only")
@@ -305,3 +341,43 @@ class DATA_PT_leeds_anim_bone_id(Panel):
         layout.label(text=f"bleeds_mdl_hierarchy_node_index: {bone.get('bleeds_mdl_hierarchy_node_index', 'not set')}")
         layout.separator()
         layout.label(text="Stories uses hash/direct IDs; Manhunt IFP uses MH2 Animation BoneID.")
+
+
+from bpy_extras.io_utils import ExportHelper
+from ..ops.anim_exporter import exportArmatureAnimation
+
+
+class EXPORT_SCENE_OT_leeds_anim(Operator, ExportHelper):
+    bl_idname = "export_scene.leeds_anim"
+    bl_label = "Export Stories ANIM"
+    filename_ext = ".anim"
+
+    filter_glob: StringProperty(default="*.anim", options={"HIDDEN"})
+    animation_name: StringProperty(name="Animation Name", default="animation", maxlen=24)
+    start_frame: FloatProperty(name="First Frame", default=1.0)
+    end_frame: FloatProperty(name="Last Frame", default=30.0)
+    fps: FloatProperty(name="FPS", default=30.0, min=1.0, max=240.0)
+
+    def invoke(self, context, event):
+        armature = anim_importer.findSelectedArmature(context)
+        action = armature.animation_data.action if armature and armature.animation_data else None
+        if action:
+            self.animation_name = str(action.get("bleeds_source_anim_name", action.name))[:24]
+            self.start_frame, self.end_frame = action.frame_range
+            self.fps = float(action.get("bleeds_anim_fps", context.scene.render.fps / context.scene.render.fps_base))
+        else:
+            self.start_frame = context.scene.frame_start
+            self.end_frame = context.scene.frame_end
+            self.fps = context.scene.render.fps / context.scene.render.fps_base
+        return ExportHelper.invoke(self, context, event)
+
+    def execute(self, context):
+        try:
+            bones, keys = exportArmatureAnimation(
+                context, self.filepath, start_frame=self.start_frame, end_frame=self.end_frame,
+                fps=self.fps, animation_name=self.animation_name)
+        except Exception as exc:
+            self.report({"ERROR"}, f"Could not export ANIM: {exc}")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Exported {self.animation_name}: {bones} bones, {keys} keys per bone")
+        return {"FINISHED"}

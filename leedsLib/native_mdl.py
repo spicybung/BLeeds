@@ -79,6 +79,10 @@ class StripMeta:
     dma_vertex_count: int = 0
     culling_disabled: bool = False
     source_offset: int = 0
+    source_vertex_offset: int = 0
+    source_uv_offset: int = 0
+    source_normal_offset: int = 0
+    source_skin_offset: int = 0
     vif_destination: int = 0
     adc_flags: List[bool] = field(default_factory=list)
     vif_commands: List[Dict[str, int]] = field(default_factory=list)
@@ -1416,6 +1420,9 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
             split_segment_start = marker_seek
             is_split_segment = (marker == 0x6C018000)
             dma_vertex_count = 0
+            source_uv_offset = 0
+            source_normal_offset = 0
+            source_skin_offset = 0
             culling_disabled = False
             vif_destination = 0
             if not is_split_segment and (marker & 0x60000000) == 0x60000000:
@@ -1579,6 +1586,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                     )
 
                     uvs: List[Tuple[float, float]] = []
+                    source_uv_offset = f.tell()
                     uv_bytes = f.read(cur_strip_tvert_count * 2)
                     for i in range(cur_strip_tvert_count):
                         if (i * 2 + 1) < len(uv_bytes):
@@ -1620,6 +1628,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                             f"   >> PS2 split normal header: b1={nb1:02X}, count={normal_count}, "
                             f"b3={nb3:02X} at 0x{attribute_header_pos:X}"
                         )
+                        source_normal_offset = f.tell()
                         norms: List[Tuple[float, float, float]] = []
                         for _ in range(normal_count):
                             nx = read_i8(f) / 128.0
@@ -1644,6 +1653,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                             f"   >> PED skin header: b1={sb1:02X}, count={skin_count}, "
                             f"b3={sb3:02X} at 0x{skin_header_pos:X}"
                         )
+                        source_skin_offset = f.tell()
                         for i in range(skin_count):
                             raw1 = read_u32(f)
                             raw2 = read_u32(f)
@@ -1786,6 +1796,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
 
                 uvs: List[Tuple[float, float]] = []
 
+                source_uv_offset = f.tell()
                 uv_bytes = f.read(cur_strip_tvert_count * 2)
                 for i in range(cur_strip_tvert_count):
                     if (i * 2 + 1) < len(uv_bytes):
@@ -1850,6 +1861,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
 
                         elif b3 == 0x6A:
                             ctx.log(f"      🧲 Reading {section_count} normals")
+                            source_normal_offset = f.tell()
                             norms: List[Tuple[float, float, float]] = []
                             for i in range(section_count):
                                 nx = read_i8(f) / 128.0
@@ -1867,6 +1879,7 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                                 part.normals.extend(norms)
 
                         elif b3 == 0x6C:
+                            source_skin_offset = f.tell()
                             ctx.log(f"      🦴 Reading {section_count} skin weights")
                             for i in range(section_count):
                                 raw1 = read_u32(f)
@@ -1911,6 +1924,10 @@ def read_ps2_geometry(ctx: StoriesMDLContext, f, geom_ptr: int) -> StoriesGeomet
                 dma_vertex_count=dma_vertex_count or cur_strip_vert_count,
                 culling_disabled=culling_disabled,
                 source_offset=split_segment_start,
+                source_vertex_offset=vertex_data_offset,
+                source_uv_offset=source_uv_offset,
+                source_normal_offset=source_normal_offset,
+                source_skin_offset=source_skin_offset,
                 vif_destination=vif_destination,
                 adc_flags=[],
                 vif_commands=vif_command_metadata,

@@ -25,9 +25,9 @@ from collections import Counter
 import bpy
 from mathutils import Matrix, Vector
 
-from ..leedsLib import mdl
-from ..leedsLib.mdl import PspResource
-from . import mdl_exporter
+from ..leedsLib import native_mdl as mdl
+from ..leedsLib.native_mdl import PspResource
+from . import native_ps2_mdl as mdl_exporter
 
 
 def readPspMatrix(owner, key, fallback):
