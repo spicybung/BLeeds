@@ -41,16 +41,30 @@ def dbg(msg: str) -> None:
 
 def safe_decompress(data: bytes) -> bytes:
 
+    def decompressLimited(payload, wbits):
+        max_size = 256 * 1024 * 1024
+        decoder = zlib.decompressobj(wbits)
+        decoded = decoder.decompress(payload, max_size + 1)
+        if len(decoded) > max_size or decoder.unconsumed_tail:
+            raise ValueError('Leeds world resource expands beyond 256 MiB')
+        if not decoder.eof:
+            raise zlib.error('Incomplete Leeds world resource zlib stream')
+        return decoded
+
     if not data:
         return data
     if len(data) >= 2 and data[0] == 0x78 and data[1] in (0x01, 0x9C, 0xDA):
         try:
-            return zlib.decompress(data)
+            return decompressLimited(data, zlib.MAX_WBITS)
+        except ValueError:
+            raise
         except Exception:
             pass
     for wbits in (16 + zlib.MAX_WBITS, -zlib.MAX_WBITS):
         try:
-            return zlib.decompress(data, wbits)
+            return decompressLimited(data, wbits)
+        except ValueError:
+            raise
         except Exception:
             continue
     return data
@@ -471,13 +485,16 @@ def swizzle_ps2_addr(x: int, y: int, logw: int) -> int:
 
 def unswizzle8_ps2_linearized(src: np.ndarray, w: int, h: int) -> np.ndarray:
 
-    dst = np.empty(w * h, dtype=np.uint8)
     logw = log2_pow2(w)
-    for y in range(h):
-        for x in range(w):
-            s = swizzle_ps2_addr(x, y, logw)
-            dst[y * w + x] = src[s % src.size]
-    return dst
+    x = np.arange(w, dtype=np.int64)[None, :]
+    y = np.arange(h, dtype=np.int64)[:, None]
+    x3 = (x >> 3) & 1
+    y1 = (y >> 1) & 1
+    y2 = (y >> 2) & 1
+    nx = ((x ^ ((y1 ^ y2) << 2)) & 7) | ((x >> 1) & ~7)
+    ny = (y & 1) | ((y >> 1) & ~1)
+    addresses = ((y1 | (x3 << 1)) | (nx << 2) | (ny << (logw + 1))).reshape(-1)
+    return src[addresses % src.size]
 
 def apply_ps2_alpha_scale(palette_rgba: np.ndarray, do_scale: bool) -> np.ndarray:
     if not do_scale:

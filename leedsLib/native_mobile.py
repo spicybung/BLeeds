@@ -33,7 +33,6 @@ class MobileEntry:
     sector_count: int
 
 
-
 def writeAtomic(path, data):
     path = Path(path)
     descriptor, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)

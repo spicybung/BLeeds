@@ -29,6 +29,10 @@ from ..leedsLib import native_mdl as mdl_lib
 from ..data.bone_data import normalizePedSkinBoneName
 from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute
 
+
+def orientedTriangleKey(a, b, c):
+    return min((a, b, c), (b, c, a), (c, a, b))
+
 def natural_sort_key(name: str) -> List[object]:
 
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", name)]
@@ -2496,7 +2500,7 @@ def prepareMdlPedArmatureForExport(arm_obj: Optional[bpy.types.Object], import_t
 
     expected_names = getMdlCanonicalCompactPedNames(import_type_i, prefer_vcs=prefer_vcs)
     semantic_ids = buildMdlCanonicalPedAnimIdByName(import_type_i)
-    runtime_id_map, runtime_type_map = mdl_lib._ped_ps2_runtime_hierarchy_maps(import_type_i)
+    runtime_id_map, runtime_type_map = mdl_lib.pedPs2RuntimeHierarchyMaps(import_type_i)
 
     def readBoneIntProperty(bone: Any, keys: Tuple[str, ...]) -> Optional[int]:
         for key in keys:
@@ -4620,7 +4624,7 @@ def mdlSourcePointStreamMatchesCurrentTopology(mesh_obj: bpy.types.Object) -> bo
         a, b, c = int(a), int(b), int(c)
         if a == b or b == c or c == a:
             return
-        key = tuple(sorted((a, b, c)))
+        key = orientedTriangleKey(a, b, c)
         counter[key] = int(counter.get(key, 0)) + 1
 
     source_triangles = {}
@@ -5237,22 +5241,7 @@ def build_source_corner_vertices_world(
         pass
 
 def stitch_strips_into_one(strip: List[mdl_lib.Ps2Vertex], next_strip: List[mdl_lib.Ps2Vertex]) -> None:
-    if not strip:
-        strip.extend(next_strip)
-        return
-    if not next_strip:
-        return
-
-    last = strip[-1]
-    next_first = next_strip[0]
-
-    strip.append(last)
-    strip.append(next_first)
-
-    strip.extend(next_strip)
-
-    if (len(strip) % 2) == 1:
-        strip.append(next_first)
+    mdl_lib.appendTriangleStrip(strip, next_strip)
 
 def build_strip_vertices_world(
     context: bpy.types.Context,
@@ -5273,10 +5262,6 @@ def build_strip_vertices_world(
             return 255
         return x
 
-    def round_key_f(x: float, places: int = 6) -> float:
-
-        return float(round(float(x), places))
-
     def get_active_vcol_layer(mesh: bpy.types.Mesh):
 
         if hasattr(mesh, "color_attributes"):
@@ -5289,24 +5274,7 @@ def build_strip_vertices_world(
         return None
 
     def stitch_key_strips_into_one(strip_keys: List[tuple], next_keys: List[tuple]) -> None:
-        if not strip_keys:
-            strip_keys.extend(next_keys)
-            return
-        if not next_keys:
-            return
-
-        last = strip_keys[-1]
-        nxt0 = next_keys[0]
-
-        strip_keys.append(last)
-        strip_keys.append(last)
-        strip_keys.append(nxt0)
-        strip_keys.append(nxt0)
-
-        strip_keys.extend(next_keys)
-
-        if (len(strip_keys) % 2) == 1:
-            strip_keys.append(nxt0)
+        mdl_lib.appendTriangleStrip(strip_keys, next_keys)
 
     def build_directed_edge_map(tris_keys: List[tuple]) -> dict:
         directed = {}
@@ -5390,7 +5358,8 @@ def build_strip_vertices_world(
         vcol_layer = get_active_vcol_layer(mesh_eval)
 
         world_mtx: Matrix = resolveMdlPartExportMatrix(mesh_obj, root_obj)
-        normal_mtx: Matrix = world_mtx.to_3x3()
+        normal_mtx: Matrix = world_mtx.to_3x3().inverted_safe().transposed()
+        reversed_winding = world_mtx.to_3x3().determinant() < 0
 
         imported_normals = None
 
@@ -5502,7 +5471,7 @@ def build_strip_vertices_world(
 
         key_to_vertex: dict = {}
 
-        def get_corner_key(loop_index: int, vert_index: int):
+        def get_corner_key(loop_index: int, vert_index: int, material_index: int):
 
 
             try:
@@ -5536,7 +5505,7 @@ def build_strip_vertices_world(
                     except Exception:
                         nx, ny, nz = 0.0, 0.0, 1.0
                 else:
-                    n = mesh_eval.vertices[vi].normal
+                    n = mesh_eval.loops[li].normal
                     nw = (normal_mtx @ n).normalized()
                     nx, ny, nz = float(nw.x), float(nw.y), float(nw.z)
             else:
@@ -5576,12 +5545,13 @@ def build_strip_vertices_world(
                 raw_skin_for_vertex = imported_skin_raw[vi]
 
             key = (
-                vi,
-                round_key_f(u), round_key_f(vv),
+                material_index,
+                float(wp.x), float(wp.y), float(wp.z),
+                float(u), float(vv),
+                (float(nx), float(ny), float(nz)) if use_normals else (),
                 int(ri), int(gi), int(bi), int(ai),
-                int(bone_indices[0]), int(bone_indices[1]), int(bone_indices[2]), int(bone_indices[3]),
-                round_key_f(bone_weights[0]), round_key_f(bone_weights[1]), round_key_f(bone_weights[2]), round_key_f(bone_weights[3]),
-                None,
+                tuple(bone_indices), tuple(bone_weights),
+                tuple(raw_skin_for_vertex) if raw_skin_for_vertex is not None else (),
             )
 
             if key not in key_to_vertex:
@@ -5598,18 +5568,22 @@ def build_strip_vertices_world(
 
         tris_keys: List[tuple] = []
         for tri in mesh_eval.loop_triangles:
-            loops = tri.loops
-            verts = tri.vertices
-            k0 = get_corner_key(int(loops[0]), int(verts[0]))
-            k1 = get_corner_key(int(loops[1]), int(verts[1]))
-            k2 = get_corner_key(int(loops[2]), int(verts[2]))
+            loops = list(tri.loops)
+            verts = list(tri.vertices)
+            if reversed_winding:
+                loops.reverse()
+                verts.reverse()
+            k0 = get_corner_key(int(loops[0]), int(verts[0]), int(tri.material_index))
+            k1 = get_corner_key(int(loops[1]), int(verts[1]), int(tri.material_index))
+            k2 = get_corner_key(int(loops[2]), int(verts[2]), int(tri.material_index))
             if k0 is None or k1 is None or k2 is None:
                 raise RuntimeError(
                     "PS2 PED topology remap failed: Blender loop-triangle indices no longer "
                     "match the evaluated mesh. Export was stopped instead of silently "
                     "dropping geometry."
                 )
-            tris_keys.append((k0, k1, k2))
+            if len({k0, k1, k2}) == 3:
+                tris_keys.append((k0, k1, k2))
 
         if not tris_keys:
             return []
@@ -5657,12 +5631,12 @@ def build_strip_vertices_world(
                                 strip_key_list[triangle_index - 1],
                                 strip_key_list[triangle_index])
                 if len(set(triangle)) == 3:
-                    emitted_keys[tuple(sorted(triangle))] += 1
+                    emitted_keys[orientedTriangleKey(*triangle)] += 1
             segment = [key_to_vertex[k] for k in strip_key_list if k in key_to_vertex]
             if len(segment) >= 3:
                 topology_segments.append(segment)
 
-        original_keys = Counter(tuple(sorted(triangle)) for triangle in tris_keys
+        original_keys = Counter(orientedTriangleKey(*triangle) for triangle in tris_keys
                                 if len(set(triangle)) == 3)
         if emitted_keys != original_keys:
             raise RuntimeError("MDL export: generated strips do not match the mesh triangles")
@@ -5674,6 +5648,15 @@ def build_strip_vertices_world(
         stitched_keys: List[tuple] = []
         for s in built_strips_keys:
             stitch_key_strips_into_one(stitched_keys, s)
+
+        stitched_faces = Counter()
+        for index in range(2, len(stitched_keys)):
+            triangle = ((stitched_keys[index - 1], stitched_keys[index - 2], stitched_keys[index])
+                        if index & 1 else tuple(stitched_keys[index - 2:index + 1]))
+            if len(set(triangle)) == 3:
+                stitched_faces[orientedTriangleKey(*triangle)] += 1
+        if stitched_faces != original_keys:
+            raise RuntimeError("MDL export: joined strips changed the mesh triangles")
 
         out: List[mdl_lib.Ps2Vertex] = []
         for k in stitched_keys:

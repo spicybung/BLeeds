@@ -18,9 +18,12 @@
 import os
 import struct
 import datetime
+import math
 import traceback
+import numpy as np
 
 import bpy
+from .tex import decodeChinatownTex
 
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
@@ -91,6 +94,15 @@ class read_chinatown:
         z = struct.unpack_from("<i", data, offset + 8)[0] / 4096.0
         return (x, y, z)
 
+    @staticmethod
+    def decode_world_uv(u_raw: int, v_raw: int, translation_factor: float,
+                        render_flags: int) -> Tuple[float, float]:
+        # Texture coordinates are stored with a downward-positive V axis.
+        # Apply the render-list U translation once, then flip V for Blender.
+        u_multiplier = 0.0 if render_flags == 4 else 3.0
+        return (u_raw / 2048.0 + translation_factor * u_multiplier,
+                1.0 - v_raw / 2048.0)
+
     @classmethod
     def read_leeds_cw_transform(cls, data: bytes, offset: int,
                                 logf=None) -> "read_chinatown.CWTransform":
@@ -138,31 +150,40 @@ class read_chinatown:
 
     class MaterialBank:
 
-        def __init__(self, current_dir: str, logf=None):
+        def __init__(self, current_dir: str, logf=None, import_textures=True):
+            self.import_textures = bool(import_textures)
             self.current_dir: str = current_dir
             self.logf = logf
             self.material_slots: List[Tuple[str, bpy.types.Material]] = []
             self.material_index_by_texid: Dict[int, int] = {}
+            self.source_dir = os.path.normcase(os.path.abspath(current_dir))
+            self.existing_materials = {}
+            for material in bpy.data.materials:
+                if (material.get('CW_SourceDir') == self.source_dir and
+                        bool(material.get('CW_ImportTextures', True)) == self.import_textures):
+                    texture_id = material.get('CW_TexID')
+                    if texture_id is not None:
+                        try:
+                            self.existing_materials.setdefault(int(texture_id), material)
+                        except (TypeError, ValueError):
+                            continue
 
         def get_slot(self, tex_id: int) -> int:
             if tex_id in self.material_index_by_texid:
                 return self.material_index_by_texid[tex_id]
 
-            mat_name = f"texture{tex_id}"
+            mat_name = f"texture{tex_id}" if self.import_textures else f"texture{tex_id} (No Texture)"
             logf = self.logf
+            source_dir = self.source_dir
+            mat = self.existing_materials.get(tex_id)
+            if mat is not None:
+                slot_index = len(self.material_slots)
+                self.material_slots.append((mat_name, mat))
+                self.material_index_by_texid[tex_id] = slot_index
+                return slot_index
 
-            if mat_name in bpy.data.materials:
-                mat = bpy.data.materials[mat_name]
-                read_chinatown.dprint(
-                    f"    Material '{mat_name}' exists, rebuilding node tree.",
-                    logf,
-                )
-            else:
-                mat = bpy.data.materials.new(name=mat_name)
-                read_chinatown.dprint(
-                    f"    Created new material '{mat_name}' and will build node tree.",
-                    logf,
-                )
+            mat = bpy.data.materials.new(name=mat_name)
+            read_chinatown.dprint(f"    Created material '{mat.name}'.", logf)
 
             mat.use_nodes = True
             nodes = mat.node_tree.nodes
@@ -178,17 +199,23 @@ class read_chinatown:
 
             links = mat.node_tree.links
             links.new(tex_image_node.outputs["Color"], bsdf_node.inputs["Base Color"])
+            links.new(tex_image_node.outputs["Alpha"], bsdf_node.inputs["Alpha"])
             links.new(bsdf_node.outputs["BSDF"], output_node.inputs["Surface"])
 
             output_node.is_active_output = True
 
             image_path = os.path.join(self.current_dir, f"{mat_name}.png")
+            tex_path = os.path.join(self.current_dir, f"{mat_name}.tex")
             read_chinatown.dprint(f"      Checking for image: {image_path}", logf)
-            if os.path.exists(image_path):
+            if self.import_textures and os.path.exists(image_path):
                 try:
                     img = bpy.data.images.load(image_path, check_existing=True)
                     tex_image_node.image = img
                     tex_image_node.interpolation = "Smart"
+                    if hasattr(mat, 'surface_render_method'):
+                        mat.surface_render_method = 'DITHERED'
+                    elif hasattr(mat, 'blend_method'):
+                        mat.blend_method = 'HASHED'
                     read_chinatown.dprint(
                         f"      Loaded texture image: {image_path}", logf
                     )
@@ -196,12 +223,37 @@ class read_chinatown:
                     read_chinatown.dprint(
                         f"      Failed loading image {image_path}: {e}", logf
                     )
+            elif self.import_textures and os.path.isfile(tex_path):
+                try:
+                    source_path = os.path.normcase(os.path.abspath(tex_path))
+                    img = next((candidate for candidate in bpy.data.images
+                                if candidate.get('bleeds_chinatown_tex_path') == source_path), None)
+                    if img is None:
+                        with open(tex_path, 'rb') as source_file:
+                            rgba, format_flags = decodeChinatownTex(source_file.read())
+                        height, width = rgba.shape[:2]
+                        img = bpy.data.images.new(mat_name, width=width, height=height, alpha=True)
+                        img.pixels.foreach_set((np.flipud(rgba).astype(np.float32) / 255.0).ravel())
+                        img['bleeds_chinatown_tex_path'] = source_path
+                        img['bleeds_chinatown_tex_flags'] = format_flags
+                        img.pack()
+                    tex_image_node.image = img
+                    if hasattr(mat, 'surface_render_method'):
+                        mat.surface_render_method = 'DITHERED'
+                    elif hasattr(mat, 'blend_method'):
+                        mat.blend_method = 'HASHED'
+                    read_chinatown.dprint(f"      Decoded Chinatown TEX: {tex_path}", logf)
+                except Exception as e:
+                    read_chinatown.dprint(f"      Could not decode Chinatown TEX {tex_path}: {e}", logf)
             else:
                 read_chinatown.dprint(
                     f"      Texture image not found: {image_path}", logf
                 )
 
             mat["CW_TexID"] = tex_id
+            mat["CW_SourceDir"] = source_dir
+            mat["CW_ImportTextures"] = self.import_textures
+            self.existing_materials[tex_id] = mat
 
             slot_index = len(self.material_slots)
             self.material_slots.append((mat_name, mat))
@@ -213,7 +265,7 @@ class read_chinatown:
                 mesh.materials.append(mat)
 
     @staticmethod
-    def tri_strip_to_tris(vertex_count: int) -> List[Tuple[int, int, int]]:
+    def tri_strip_to_tris(vertex_count: int, positions=None) -> List[Tuple[int, int, int]]:
         faces: List[Tuple[int, int, int]] = []
         if vertex_count < 3:
             return faces
@@ -226,7 +278,18 @@ class read_chinatown:
             else:
                 tri = (i0, i1, i2)
 
-            if len({i0, i1, i2}) == 3:
+            valid = len({i0, i1, i2}) == 3
+            if valid and positions is not None:
+                a, b, c = positions[i0], positions[i1], positions[i2]
+                ab = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+                ac = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+                cross = (
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                )
+                valid = sum(component * component for component in cross) > 1.0e-18
+            if valid:
                 faces.append(tri)
 
             flip = not flip
@@ -239,6 +302,7 @@ class read_chinatown:
         logf = None
 
         world_verts: List[Tuple[float, float, float]] = []
+        world_normals: List[Tuple[float, float, float]] = []
         world_uvs: List[Tuple[float, float]] = []
         world_faces: List[Tuple[int, int, int]] = []
         world_face_material_indices: List[int] = []
@@ -261,6 +325,8 @@ class read_chinatown:
             mesh_offsets_found = set()
 
             for sector_idx in range(4):
+                if sector_ofs + 12 > len(file_bytes):
+                    raise ValueError(f"Missing Chinatown sector header at 0x{sector_ofs:X}")
                 sec = file_bytes[sector_ofs:sector_ofs + 12]
                 cls.dprint(
                     f"\n==== SECTOR {sector_idx} (0x{sector_ofs:02X} - 0x{sector_ofs + 11:02X}) ====",
@@ -279,6 +345,14 @@ class read_chinatown:
                 NumLevels = struct.unpack_from("<h", sec, 6)[0]
                 NumLights = struct.unpack_from("<h", sec, 8)[0]
                 NumTextures = struct.unpack_from("<h", sec, 10)[0]
+
+                counts = (NumInstances, NumShadows, NumLevels, NumLights, NumTextures)
+                if sector_ofs + 12 > len(file_bytes) or any(count < 0 for count in counts):
+                    raise ValueError(f"Invalid Chinatown sector header at 0x{sector_ofs:X}")
+                sector_size = (12 + NumLevels * 16 + NumInstances * 16 +
+                               NumShadows * 20 + NumLights * 20 + NumTextures * 2)
+                if sector_ofs + sector_size > len(file_bytes):
+                    raise ValueError(f"Truncated Chinatown sector at 0x{sector_ofs:X}")
 
                 cls.dprint(
                     f"[0x{sector_ofs:02X}] Bool1: {Bool1} (byte value: {sec[0]:02X})",
@@ -449,9 +523,9 @@ class read_chinatown:
                             logf,
                         )
 
-                        X_raw = struct.unpack_from("<I", file_bytes, l_off + 0)[0]
-                        Y_raw = struct.unpack_from("<I", file_bytes, l_off + 4)[0]
-                        Z_raw = struct.unpack_from("<I", file_bytes, l_off + 8)[0]
+                        X_raw = struct.unpack_from("<i", file_bytes, l_off + 0)[0]
+                        Y_raw = struct.unpack_from("<i", file_bytes, l_off + 4)[0]
+                        Z_raw = struct.unpack_from("<i", file_bytes, l_off + 8)[0]
                         Size_raw = struct.unpack_from("<H", file_bytes, l_off + 12)[0]
                         Id = struct.unpack_from("<B", file_bytes, l_off + 14)[0]
                         R = struct.unpack_from("<B", file_bytes, l_off + 16)[0]
@@ -540,6 +614,10 @@ class read_chinatown:
                     "<f", file_bytes, MeshOffset + 40
                 )[0]
                 scaleFactor = struct.unpack_from("<f", file_bytes, MeshOffset + 44)[0]
+                if (numMaterials <= 0 or numVertices <= 0 or
+                        not math.isfinite(scaleFactor) or scaleFactor == 0.0 or
+                        not math.isfinite(translationFactor)):
+                    raise ValueError(f"Invalid Chinatown mesh header at 0x{MeshOffset:X}")
 
                 cls.dprint(
                     f"  [0x{MeshOffset:02X}] MDL Identifier: {ident_str} ('{mdl_ascii}')",
@@ -610,15 +688,14 @@ class read_chinatown:
 
                     u_raw = struct.unpack_from("<h", file_bytes, v_off + 12)[0]
                     v_raw = struct.unpack_from("<h", file_bytes, v_off + 14)[0]
-                    u = (u_raw / 2048.0) + translationFactor * 2
-                    v = 1.0 - (v_raw / 2048.0)
-
                     all_verts.append((x, y, z))
                     all_normals.append((nx, ny, nz))
-                    all_uvs.append((u, v))
+                    all_uvs.append((u_raw, v_raw))
 
                 vert_offset = 0
                 material_table_offset = vertex_base + (numVertices * stride)
+                if material_table_offset + numMaterials * 12 > len(file_bytes):
+                    raise ValueError(f"Truncated Chinatown mesh vertex/material data at 0x{MeshOffset:X}")
 
                 for mi in range(numMaterials):
                     m_off = material_table_offset + mi * 12
@@ -629,8 +706,6 @@ class read_chinatown:
                     field6 = struct.unpack_from("<B", file_bytes, m_off + 6)[0]
                     field7 = struct.unpack_from("<B", file_bytes, m_off + 7)[0]
                     variance_flags = struct.unpack_from("<i", file_bytes, m_off + 8)[0]
-
-                    uv_mul = 3.0 if render_flags == 4 else 2.0
 
                     cls.dprint(f"---- Mesh Part {mi}: ----", logf)
                     cls.dprint(f"  Texture ID: {tex_id}", logf)
@@ -645,13 +720,17 @@ class read_chinatown:
 
                     for i in range(vertex_count):
                         idx = vert_offset + i
+                        if idx >= numVertices:
+                            raise ValueError(f"Chinatown mesh part exceeds its vertex count at 0x{MeshOffset:X}")
                         world_verts.append(all_verts[idx])
+                        world_normals.append(all_normals[idx])
 
-                        u_norm, v_norm = all_uvs[idx]
-                        u_final = u_norm + translationFactor * uv_mul
-                        world_uvs.append((u_final, v_norm))
+                        u_raw, v_raw = all_uvs[idx]
+                        world_uvs.append(cls.decode_world_uv(u_raw, v_raw, translationFactor, render_flags))
 
-                    local_faces = cls.tri_strip_to_tris(vertex_count)
+                    local_faces = cls.tri_strip_to_tris(
+                        vertex_count, all_verts[vert_offset:vert_offset + vertex_count]
+                    )
 
                     mat_index = material_bank.get_slot(tex_id)
                     for (a, b, c) in local_faces:
@@ -671,6 +750,10 @@ class read_chinatown:
                 mesh = bpy.data.meshes.new(mesh_name)
                 mesh.from_pydata(world_verts, [], world_faces)
                 mesh.update()
+                if hasattr(mesh, 'normals_split_custom_set_from_vertices'):
+                    mesh.normals_split_custom_set_from_vertices(world_normals)
+                    if hasattr(mesh, 'use_auto_smooth'):
+                        mesh.use_auto_smooth = True
 
                 uv_layer = mesh.uv_layers.new(name="UVMap")
                 for poly_idx, poly in enumerate(mesh.polygons):

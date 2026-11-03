@@ -64,7 +64,13 @@ def unwrap_z2hm(data: bytes) -> Tuple[bytes, bool, int]:
     if len(data) < 8 or data[:4] != Z2HM_MAGIC:
         return data, False, len(data)
     declared_size = read_u32(data, 4)
-    payload = zlib.decompress(data[8:])
+    max_decoded_size = 512 * 1024 * 1024
+    if declared_size > max_decoded_size:
+        raise ValueError('BSP Z2HM exceeds the 512 MiB decoded-size limit')
+    decoder = zlib.decompressobj()
+    payload = decoder.decompress(data[8:], max_decoded_size + 1)
+    if len(payload) > max_decoded_size or not decoder.eof or decoder.unconsumed_tail:
+        raise ValueError('Truncated or oversized BSP Z2HM stream')
     if declared_size and len(payload) != declared_size:
         raise ValueError(
             "Z2HM size mismatch: declared %d bytes, decoded %d bytes"
@@ -247,7 +253,7 @@ def decode_rgba5551(value: int) -> Tuple[int, int, int, int]:
     return int(r), int(g), int(b), int(a)
 
 
-def _geometry_header_at(data: bytes, offset: int) -> Optional[BSPGeometryBlock]:
+def geometryHeaderAt(data: bytes, offset: int) -> Optional[BSPGeometryBlock]:
     if offset < 0 or offset + 0x48 > len(data):
         return None
     values = struct.unpack_from("<4I4f3fi3fiIf", data, offset)
@@ -369,7 +375,7 @@ def scan_psp_render_geometry(data: bytes) -> List[BSPGeometryBlock]:
 
 
     for offset in range(0x20, max(0x20, len(data) - 0x48 + 1), 4):
-        block = _geometry_header_at(data, offset)
+        block = geometryHeaderAt(data, offset)
         if block is None:
             continue
         block_end = block.file_offset + block.size
@@ -473,7 +479,7 @@ def parse_tcdt(path: str) -> TCDTDictionary:
     return TCDTDictionary(header=header, textures=textures, data=data)
 
 
-def _read_palette_rgba(data: bytes, offset: int, color_count: int) -> np.ndarray:
+def readPaletteRgba(data: bytes, offset: int, color_count: int) -> np.ndarray:
     byte_count = color_count * 4
     if offset <= 0 or offset + byte_count > len(data):
         raise ValueError("TCDT palette is outside the file")
@@ -498,7 +504,7 @@ def decode_tcdt_texture(dictionary: TCDTDictionary, texture: TCDTTextureRecord) 
         indices = np.empty(width * height, dtype=np.uint8)
         indices[0::2] = packed & 0x0F
         indices[1::2] = packed >> 4
-        palette = _read_palette_rgba(data, texture.palette_offset, 16)
+        palette = readPaletteRgba(data, texture.palette_offset, 16)
         rgba = palette[indices.reshape(height, width)]
     elif bits_per_pixel == 8:
         byte_count = max(width, 16) * padded_height
@@ -507,7 +513,7 @@ def decode_tcdt_texture(dictionary: TCDTDictionary, texture: TCDTTextureRecord) 
         raw = data[texture.data_offset:texture.data_offset + byte_count]
         raw = leeds_tex.unswizzle_psp_8bit(raw, width, height)
         indices = np.frombuffer(raw, dtype=np.uint8).reshape(height, width)
-        palette = _read_palette_rgba(data, texture.palette_offset, 256)
+        palette = readPaletteRgba(data, texture.palette_offset, 256)
         rgba = palette[indices]
     elif bits_per_pixel == 32:
         byte_count = max(width, 4) * 4 * padded_height

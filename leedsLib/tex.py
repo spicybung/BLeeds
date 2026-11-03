@@ -59,7 +59,16 @@ def decompress_mh2_tex_container(data: bytes) -> bytes:
         raise ValueError("Not a Manhunt 2 TEX container")
     if len(data) < 9:
         raise ValueError("Truncated Manhunt 2 Z2HM TEX container")
-    decoded = zlib.decompress(data[8:])
+    max_decoded_size = 512 * 1024 * 1024
+    expected_size = struct.unpack_from('<I', data, 4)[0]
+    if expected_size > max_decoded_size:
+        raise ValueError('Manhunt 2 TEX exceeds the 512 MiB decoded-size limit')
+    decoder = zlib.decompressobj()
+    decoded = decoder.decompress(data[8:], max_decoded_size + 1)
+    if len(decoded) > max_decoded_size or not decoder.eof or decoder.unconsumed_tail:
+        raise ValueError('Truncated or oversized Manhunt 2 TEX zlib stream')
+    if expected_size and len(decoded) != expected_size:
+        raise ValueError('Manhunt 2 TEX decoded size does not match Z2HM header')
     if decoded[:4] != b"TCDT":
         raise ValueError("Z2HM data did not decode to a TCDT texture container")
     return decoded
@@ -73,8 +82,11 @@ def is_mh2_tex_data(data: bytes) -> bool:
     if data[:4] != b"Z2HM":
         return False
     try:
-        return decompress_mh2_tex_container(data)[:4] == b"TCDT"
-    except Exception:
+        if len(data) < 9 or struct.unpack_from('<I', data, 4)[0] > 512 * 1024 * 1024:
+            return False
+        decoder = zlib.decompressobj()
+        return decoder.decompress(data[8:], 4) == b'TCDT'
+    except zlib.error:
         return False
 
 
@@ -175,7 +187,7 @@ def parse_mh2_tex_entries(data: bytes) -> List[Mh2TexEntry]:
             mipmap_count=int(mipmap_count),
             data_offset=int(data_offset),
             data_size=int(data_size),
-            uses_cutout_alpha=dxt1_uses_cutout_alpha(dds_data),
+            uses_cutout_alpha=(dds_data[84:88] in (b"DXT3", b"DXT5") or dxt1_uses_cutout_alpha(dds_data)),
             dds_data=bytes(dds_data),
         ))
 
@@ -230,10 +242,10 @@ def unswizzle_psp_32bit(src: bytes, w: int, h: int, buffer_stride: int = 0) -> b
 
 def expand_nibbles_lo_first(data: bytes) -> np.ndarray:
 
-    out = np.empty(len(data) * 2, dtype=np.uint8)
-    for i, value in enumerate(data):
-        out[2 * i] = value & 0x0F
-        out[2 * i + 1] = (value >> 4) & 0x0F
+    packed = np.frombuffer(data, dtype=np.uint8)
+    out = np.empty(packed.size * 2, dtype=np.uint8)
+    out[::2] = packed & 0x0F
+    out[1::2] = packed >> 4
     return out
 
 def swizzle_ps2(x: int, y: int, logw: int) -> int:
@@ -246,25 +258,23 @@ def swizzle_ps2(x: int, y: int, logw: int) -> int:
 
 def unswizzle_ps2_indices(idx: np.ndarray, w: int, h: int) -> np.ndarray:
 
-    total = w * h
-    dst = np.empty(total, dtype=np.uint8)
-
     logw = 0
     tmp = 1
     while tmp < w:
         tmp <<= 1
         logw += 1
-    for y in range(h):
-        for x in range(w):
-            dst[y * w + x] = idx[swizzle_ps2(x, y, logw) % len(idx)]
-    return dst
+    x = np.arange(w, dtype=np.int64)[None, :]
+    y = np.arange(h, dtype=np.int64)[:, None]
+    nx = ((x ^ (((y >> 1) ^ (y >> 2)) << 2)) & 7) | ((x >> 1) & ~7)
+    ny = (y & 1) | ((y >> 1) & ~1)
+    n = ((y >> 1) & 1) | (((x >> 3) & 1) << 1)
+    addresses = (n | (nx << 2) | (ny << (logw + 1))).reshape(-1)
+    return idx[addresses % len(idx)]
 
 def convert_clut_ps2(data: np.ndarray) -> None:
 
-    mapping = [0x00, 0x10, 0x08, 0x18]
-    for i in range(len(data)):
-        v = int(data[i])
-        data[i] = (v & ~0x18) | mapping[(v & 0x18) >> 3]
+    mapping = np.array([0x00, 0x10, 0x08, 0x18], dtype=np.uint8)
+    data[:] = (data & 0xE7) | mapping[(data & 0x18) >> 3]
 
 @dataclass
 class PspTexHeader:
@@ -737,3 +747,34 @@ def decode_ps2_texture(
             val = int(idx[i] * scale + 0.5)
             rgba[y, x] = (val, val, val, 255)
     return rgba
+
+
+def decodeChinatownTex(data: bytes) -> Tuple[np.ndarray, int]:
+    data = bytes(data)
+    if len(data) < 32:
+        raise ValueError("Chinatown Wars TEX header is truncated")
+
+    for header_offset in (0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80):
+        header = parse_psp_header(data, header_offset)
+        if header is None:
+            continue
+        try:
+            raster_size = len(data) - header.raster_offset
+            image = decode_psp_texture(data, header, raster_size)
+        except (ValueError, IndexError, struct.error):
+            continue
+        if image is not None and image.shape == (header.height, header.width, 4):
+            flags = (header.bpp << 16) | (header.mip_count << 8) | int(bool(header.swizzle_width))
+            return image, flags
+
+    for header_offset in (0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80):
+        header = parse_ps2_header(data, header_offset)
+        if header is None or header.bpp not in (4, 8, 32):
+            continue
+        raster_size = len(data) - header.raster_offset
+        image = decode_ps2_texture(data, header, raster_size)
+        if image is not None and image.shape == (header.height, header.width, 4):
+            return image, header.flags
+
+    raise ValueError("Unrecognized Chinatown Wars TEX raster layout")
+

@@ -15,16 +15,15 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.5.3.4"
+__version__ = "1.5.3.5"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 5, 3, 4),
+    "version": (1, 5, 3, 5),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Importer/Exporter for Leeds Engine & RenderWare formats",
-    "warning": "Work in progress",
     "category": "Import-Export",
 }
 

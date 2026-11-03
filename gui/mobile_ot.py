@@ -18,13 +18,14 @@
 from pathlib import Path
 
 import bpy
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy.types import Operator, Panel
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 
 from ..leedsLib.native_mobile import MobileArchive
 from ..ops.native_mobile import importTextures
-from ..rwLib.txd import MobileTxd
+from ..rwLib.txd import openTextures
+from . import drawImportLogOptions, runImport
 
 
 class IMPORT_OT_BLeeds_MobileTxd(Operator, ImportHelper):
@@ -34,12 +35,25 @@ class IMPORT_OT_BLeeds_MobileTxd(Operator, ImportHelper):
     filename_ext = '.txd'
     filter_glob: StringProperty(default='*.txd;*.TXD', options={'HIDDEN'})
 
+    platform: EnumProperty(name='Platform',items=(('AUTO','Automatic','Detect the texture platform'),('PS2','PS2','Manhunt 2 PS2 textures'),('PSP','PSP','Manhunt 2 PSP textures')),default='AUTO')
+    print_debug_log: BoolProperty(name='Print Debug Log', default=False)
+    print_text_log: BoolProperty(name='Print Text Log', default=False)
+
+    def draw(self, context):
+        self.layout.prop(self, 'platform')
+        drawImportLogOptions(self.layout, self)
+
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         try:
-            images = importTextures(self.filepath)
+            images = importTextures(self.filepath, self.platform)
         except Exception as exc:
+            print('Texture dictionary import failed: {}'.format(exc))
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
+        print('Texture dictionary import: {} images'.format(len(images)))
         self.report({'INFO'}, 'Loaded %d textures' % len(images))
         return {'FINISHED'}
 
@@ -58,7 +72,7 @@ class EXPORT_OT_BLeeds_MobileTxd(Operator, ExportHelper):
         import numpy as np
         try:
             source = str(Path(bpy.path.abspath(self.source)).resolve())
-            dictionary = MobileTxd(Path(source).read_bytes())
+            dictionary = openTextures(Path(source).read_bytes())
             matched = 0
             for image in bpy.data.images:
                 if image.get('bleeds_mobile_txd') != source:
@@ -86,20 +100,28 @@ class IMPORT_OT_BLeeds_MobileImg(Operator, ImportHelper):
     filter_glob: StringProperty(default='*.img;*.IMG', options={'HIDDEN'})
     directory_file: StringProperty(name='File List', description='Optional .dir file; leave blank to use the matching file beside the archive', subtype='FILE_PATH')
     output_directory: StringProperty(name='Extract To', subtype='DIR_PATH')
+    print_debug_log: BoolProperty(name='Print Debug Log', default=False)
+    print_text_log: BoolProperty(name='Print Text Log', default=False)
 
     def draw(self, context):
         self.layout.prop(self, 'directory_file')
         self.layout.prop(self, 'output_directory')
+        drawImportLogOptions(self.layout, self)
 
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         try:
             if not self.output_directory:
                 raise ValueError('Choose a folder for the extracted files')
             archive = MobileArchive(self.filepath, self.directory_file or None)
             archive.extract(bpy.path.abspath(self.output_directory))
         except Exception as exc:
+            print('Archive extraction failed: {}'.format(exc))
             self.report({'ERROR'}, str(exc))
             return {'CANCELLED'}
+        print('Archive extraction: {} files'.format(len(archive.entries)))
         self.report({'INFO'}, 'Extracted %d files' % len(archive.entries))
         return {'FINISHED'}
 
@@ -138,7 +160,7 @@ class EXPORT_OT_BLeeds_MobileImg(Operator, ExportHelper):
 
 
 class VIEW3D_PT_bleeds_mobile_files(Panel):
-    bl_label = 'LCS Mobile'
+    bl_label = 'Archives and Textures'
     bl_idname = 'VIEW3D_PT_bleeds_mobile_files'
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'

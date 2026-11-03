@@ -18,9 +18,10 @@
 import os
 
 import bpy
-from bpy.props import CollectionProperty, EnumProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, StringProperty
 from bpy.types import Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper, ExportHelper
+from . import drawImportLogOptions, runImport
 
 
 class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
@@ -46,15 +47,24 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
         options={"HIDDEN"},
     )
 
+    import_textures: BoolProperty(name="Import Textures", default=True)
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
+
     source: EnumProperty(
         name="Source",
         items=(("MOBILE", "LCS Mobile", "LCS iOS and Android assets"),
-               ("BETA", "LCS Prototype", "Standard RenderWare geometry from prototype files")),
+               ("BETA", "LCS Prototype", "Standard RenderWare geometry from prototype files"),
+               ("MH2_AUTO", "Manhunt 2", "Detect PS2 or PSP geometry"),
+               ("MH2_PS2", "Manhunt 2 PS2", "PS2 PMLC geometry"),
+               ("MH2_PSP", "Manhunt 2 PSP", "PSP PMLC geometry")),
         default="MOBILE",
     )
 
     def draw(self, context):
         self.layout.prop(self, "source")
+        self.layout.prop(self, "import_textures")
+        drawImportLogOptions(self.layout, self)
 
     def gatherFilepaths(self):
         paths = []
@@ -83,6 +93,9 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
         return unique_paths
 
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         filepaths = self.gatherFilepaths()
         if not filepaths:
             self.report({"ERROR"}, "No DFF files were selected")
@@ -93,10 +106,14 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
         for filepath in filepaths:
             try:
                 from ..ops.native_mobile import importDff
-                importDff(context, filepath, self.source)
+                importDff(context, filepath, self.source, import_textures=self.import_textures)
                 imported += 1
+                print("Imported DFF: {}".format(filepath))
             except Exception as exc:
                 failed.append("{}: {}".format(os.path.basename(filepath), exc))
+                print("Failed DFF: {}: {}".format(filepath, exc))
+
+        print("DFF results: {} imported, {} failed".format(imported, len(failed)))
 
         if imported == 0:
             if failed:

@@ -17,10 +17,12 @@
 
 import base64
 import json
+import math
 import struct
 from pathlib import Path
 
 import bpy
+import numpy as np
 from mathutils import Matrix, Vector
 
 from ..rwLib.dff import readDff, writeDff, replaceGeometryVertices, replaceLeedsVertices, replaceLeedsAttributes
@@ -39,8 +41,13 @@ def flattenMatrix(matrix):
     return [float(value) for row in matrix for value in row]
 
 
-def importTextures(path):
-    dictionary = MobileTxd(Path(path).read_bytes())
+def importTextures(path, platform='AUTO'):
+    from ..rwLib.dff import unwrapResource
+    raw = Path(path).read_bytes()
+    if unwrapResource(raw)[:4] == b'TCDT':
+        from .tex_importer import importTextures as importMh2Textures
+        return importMh2Textures(path, platform)
+    dictionary = MobileTxd(raw)
     images = {}
     for texture in dictionary.textures:
         pixels = dictionary.pixels(texture)
@@ -53,10 +60,17 @@ def importTextures(path):
     return images
 
 
-def importDff(context, path, source='MOBILE'):
+def importDff(context, path, source='MOBILE', import_textures=True):
+    from ..rwLib.dff import unwrapResource
+    raw = Path(path).read_bytes()
+    if unwrapResource(raw)[:4] == b'PMLC':
+        from .mdl_importer import importModel
+        platform = {'MH2_PS2':'PS2', 'MH2_PSP':'PSP'}.get(source, 'AUTO')
+        return importModel(context, path, platform, import_textures=import_textures)
+    if source.startswith('MH2'):
+        raise ValueError('Expected a Manhunt 2 PMLC model container')
     if context.object is not None and context.object.mode != 'OBJECT':
         bpy.ops.object.mode_set(mode='OBJECT')
-    raw = Path(path).read_bytes()
     clumps = readDff(raw, source)
     collection = bpy.data.collections.new(Path(path).stem)
     context.scene.collection.children.link(collection)
@@ -69,20 +83,12 @@ def importDff(context, path, source='MOBILE'):
     images = {}
     sidecars = [p for p in Path(path).parent.iterdir()
                 if p.stem.casefold() == Path(path).stem.casefold() and p.suffix.casefold() == '.txd']
-    if source == 'MOBILE' and sidecars:
+    if import_textures and source == 'MOBILE' and sidecars:
         images = importTextures(sidecars[0])
     created = [root]
     for clump_index, clump in enumerate(clumps):
         frames = clump['frames']
-        world = {}
-        def globalFrame(index):
-            if index not in world:
-                frame = frames[index]
-                local = frameMatrix(frame['values'])
-                world[index] = globalFrame(frame['parent']) @ local if frame['parent'] >= 0 else local
-            return world[index]
-        for frame in frames:
-            globalFrame(frame['index'])
+        world = dffFrameWorldMatrices(frames)
         armature = None
         bones = {}
         if any(frame['bone_id'] is not None and frame['bone_id'] >= 0 for frame in frames):
@@ -159,14 +165,17 @@ def importDff(context, path, source='MOBILE'):
                 obj['bleeds_dff_original_matrix'] = flattenMatrix(obj.matrix_local)
                 for material in materials:
                     mesh.materials.append(material)
-                for polygon in mesh.polygons:
-                    source_materials = part.get('face_materials')
-                    polygon.material_index = source_materials[polygon.index] if source_materials else part['material']
+                source_materials = part.get('face_materials')
+                material_indices = (np.asarray(source_materials, dtype=np.int32) if source_materials
+                                    else np.full(len(mesh.polygons), part['material'], dtype=np.int32))
+                mesh.polygons.foreach_set('material_index', material_indices)
+                loop_vertices = np.empty(len(mesh.loops), dtype=np.int32)
+                mesh.loops.foreach_get('vertex_index', loop_vertices)
                 if part['uvs']:
                     layer = mesh.uv_layers.new(name='UVMap')
-                    for loop in mesh.loops:
-                        uv = part['uvs'][loop.vertex_index]
-                        layer.data[loop.index].uv = (uv[0], 1.0 - uv[1])
+                    uv_values = np.asarray(part['uvs'], dtype=np.float32)[loop_vertices].copy()
+                    uv_values[:, 1] = 1.0 - uv_values[:, 1]
+                    layer.data.foreach_set('uv', uv_values.ravel())
                 if part['normals'] and len(part['normals']) == len(mesh.vertices):
                     mesh.normals_split_custom_set_from_vertices(part['normals'])
                     if hasattr(mesh, 'use_auto_smooth'):
@@ -174,28 +183,39 @@ def importDff(context, path, source='MOBILE'):
                 if part['colors'] and len(part['colors']) == len(mesh.vertices):
                     if hasattr(mesh, 'color_attributes'):
                         color_layer = mesh.color_attributes.new(name='Color', type='BYTE_COLOR', domain='POINT')
-                        for index, color in enumerate(part['colors']):
-                            color_layer.data[index].color = tuple(float(channel) / 255.0 for channel in color)
+                        color_values = np.asarray(part['colors'], dtype=np.float32) / 255.0
+                        color_layer.data.foreach_set('color', color_values.ravel())
                     else:
                         color_layer = mesh.vertex_colors.new(name='Color')
-                        for loop in mesh.loops:
-                            color_layer.data[loop.index].color = tuple(float(channel) / 255.0 for channel in part['colors'][loop.vertex_index])
+                        color_values = np.asarray(part['colors'], dtype=np.float32)[loop_vertices] / 255.0
+                        color_layer.data.foreach_set('color', color_values.ravel())
                 native_part = part.get('source')
                 if armature and native_part:
                     by_skin_index = {frame['skin_index']: bones[frame['index']] for frame in frames
                                      if frame['index'] in bones and frame['skin_index'] is not None}
                     groups = {}
+                    weights_by_vertex = {}
                     for strip in native_part.strips_meta:
                         for index, (indices, weights) in enumerate(zip(strip.skin_indices, strip.skin_weights)):
+                            vertex_index = strip.base_vertex_index + index
+                            if vertex_index < 0 or vertex_index >= len(mesh.vertices):
+                                raise ValueError('Mobile skin vertex index is outside the mesh')
+                            accumulated = weights_by_vertex.setdefault(vertex_index, {})
                             for bone_index, weight in zip(indices, weights):
-                                if weight <= 0.0:
+                                if not math.isfinite(float(weight)) or weight <= 0.0:
                                     continue
                                 name = by_skin_index.get(bone_index)
                                 if name is None:
                                     raise ValueError('Mobile skin refers to an unknown bone index: %d' % bone_index)
-                                if name not in groups:
-                                    groups[name] = obj.vertex_groups.new(name=name)
-                                groups[name].add([strip.base_vertex_index + index], float(weight), 'ADD')
+                                accumulated[name] = accumulated.get(name, 0.0) + float(weight)
+                    for vertex_index, influences in weights_by_vertex.items():
+                        total_weight = sum(influences.values())
+                        if not math.isfinite(total_weight) or total_weight <= 0.0:
+                            continue
+                        for name, weight in influences.items():
+                            if name not in groups:
+                                groups[name] = obj.vertex_groups.new(name=name)
+                            groups[name].add([vertex_index], weight / total_weight, 'REPLACE')
                     if groups:
                         modifier = obj.modifiers.new('Armature', 'ARMATURE')
                         modifier.object = armature
@@ -218,14 +238,25 @@ def findDffRoot(obj):
 
 def dffFrameWorldMatrices(frames):
     matrices = {}
-    def resolve(index):
-        if index not in matrices:
+    for start in range(len(frames)):
+        chain = []
+        visiting = set()
+        index = start
+        while index not in matrices:
+            if index < 0 or index >= len(frames):
+                raise ValueError('Mobile frame hierarchy refers to an invalid parent index')
+            if index in visiting:
+                raise ValueError('Mobile frame hierarchy contains a parent cycle')
+            visiting.add(index)
+            chain.append(index)
+            parent = frames[index]['parent']
+            if parent == -1:
+                break
+            index = parent
+        for index in reversed(chain):
             frame = frames[index]
             local = frameMatrix(frame['values'])
-            matrices[index] = resolve(frame['parent']) @ local if frame['parent'] >= 0 else local
-        return matrices[index]
-    for frame in frames:
-        resolve(frame['index'])
+            matrices[index] = matrices[frame['parent']] @ local if frame['parent'] >= 0 else local
     return matrices
 
 

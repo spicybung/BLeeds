@@ -38,11 +38,13 @@ def game_dtz_2dfx_effect_type_name(effect_type: int) -> str:
     return GAME_DTZ_2DFX_EFFECT_TYPE_NAMES.get(int(effect_type), "UNKNOWN")
 
 
-def _decompress_limited(data: bytes, wbits: int, max_output: int) -> bytes:
+def decompressBoundedData(data: bytes, wbits: int, max_output: int) -> bytes:
     decoder = zlib.decompressobj(wbits)
     output = decoder.decompress(data, max_output + 1)
     if len(output) > max_output or decoder.unconsumed_tail:
         raise ValueError("GAME.DTZ decompressed size exceeds safety limit")
+    if not decoder.eof:
+        raise ValueError("GAME.DTZ compressed stream is truncated")
     output += decoder.flush(max_output + 1 - len(output))
     if len(output) > max_output:
         raise ValueError("GAME.DTZ decompressed size exceeds safety limit")
@@ -57,7 +59,7 @@ def decompress_game_dtz(data: bytes, max_output: int = GAME_DTZ_MAX_DECOMPRESSED
     errors = []
     for wbits in (zlib.MAX_WBITS, -zlib.MAX_WBITS, zlib.MAX_WBITS | 32):
         try:
-            decoded = _decompress_limited(raw, wbits, int(max_output))
+            decoded = decompressBoundedData(raw, wbits, int(max_output))
             if decoded[:4] not in (b"GATG", b"GTAG"):
                 raise ValueError("decompressed GAME.DTZ has no GATG/GTAG signature")
             return decoded, True
@@ -66,21 +68,21 @@ def decompress_game_dtz(data: bytes, max_output: int = GAME_DTZ_MAX_DECOMPRESSED
     raise ValueError("unable to decompress GAME.DTZ: " + "; ".join(errors[:3]))
 
 
-def _u32(data: bytes, off: int, default: int = 0) -> int:
+def u32(data: bytes, off: int, default: int = 0) -> int:
     try:
         return struct.unpack_from("<I", data, int(off))[0] if 0 <= int(off) <= len(data) - 4 else default
     except Exception:
         return default
 
 
-def _i16(data: bytes, off: int, default: int = -1) -> int:
+def i16(data: bytes, off: int, default: int = -1) -> int:
     try:
         return struct.unpack_from("<h", data, int(off))[0] if 0 <= int(off) <= len(data) - 2 else default
     except Exception:
         return default
 
 
-def _resolve_offset(data: bytes, raw_offset: int, min_size: int = 1) -> int:
+def resolveOffset(data: bytes, raw_offset: int, min_size: int = 1) -> int:
     raw_offset = int(raw_offset)
     min_size = max(1, int(min_size))
     return raw_offset if 0 <= raw_offset and raw_offset + min_size <= len(data) else -1
@@ -149,8 +151,8 @@ def parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[
     pools = (("BUILDING", 0x24), ("TREADABLE", 0x28), ("DUMMY", 0x2C))
     entities, pool_stats = [], {}
     for pool_name, header_off in pools:
-        pool_ptr = int(_u32(data, header_off, 0))
-        pool_abs = _resolve_offset(data, pool_ptr, 0x20)
+        pool_ptr = int(u32(data, header_off, 0))
+        pool_abs = resolveOffset(data, pool_ptr, 0x20)
         stats = {"pool_pointer": pool_ptr, "size": 0, "allocated": 0, "with_effects": 0, "effect_rows": 0}
         pool_stats[pool_name] = stats
         if pool_abs < 0:
@@ -163,8 +165,8 @@ def parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[
         stats["size"] = size
         if not 0 <= size <= 200000:
             continue
-        items_abs = _resolve_offset(data, int(items_ptr), max(1, size * 0x60))
-        flags_abs = _resolve_offset(data, int(flags_ptr), max(1, size))
+        items_abs = resolveOffset(data, int(items_ptr), max(1, size * 0x60))
+        flags_abs = resolveOffset(data, int(flags_ptr), max(1, size))
         if items_abs < 0 or flags_abs < 0:
             continue
         for entity_index in range(size):
@@ -198,6 +200,43 @@ def parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[
     return entities, pool_stats
 
 
+def readDtzModelNames(data):
+    rows = {}
+    for match in re.finditer(rb'[A-Za-z0-9_]{2,19}\x00', data):
+        offset = match.start()
+        if offset % 4 or offset + 28 > len(data):
+            continue
+        padding = data[match.end():offset + 20]
+        if any(value not in (0, 0xAA) for value in padding):
+            continue
+        rows[offset] = match.group()[:-1].decode('ascii')
+    longest = []
+    for offset in sorted(rows):
+        if offset - 28 in rows:
+            continue
+        names = []
+        unique = set()
+        while offset in rows and len(names) < 4096:
+            name = rows[offset]
+            if name.casefold() in unique:
+                break
+            unique.add(name.casefold())
+            names.append(name)
+            offset += 28
+        if len(names) >= 8 and len(names) > len(longest):
+            longest = names
+    names_by_hash = {}
+    conflicts = set()
+    for name in longest:
+        model_hash = zlib.crc32(name.upper().encode('ascii')) ^ 0xFFFFFFFF
+        if model_hash in names_by_hash and names_by_hash[model_hash].casefold() != name.casefold():
+            conflicts.add(model_hash)
+        names_by_hash[model_hash] = name
+    for model_hash in conflicts:
+        names_by_hash.pop(model_hash, None)
+    return names_by_hash
+
+
 def parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[int, List[Dict[str, object]]], Dict[str, object]]:
     summary: Dict[str, object] = {
         "status": "unparsed", "ide_count": 0, "effect_count": 0,
@@ -214,8 +253,8 @@ def parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[
         summary.update({"status": "bad_signature", "signature_hex": signature.hex()})
         return mapping, summary
 
-    ide_count, ide_ptr_raw = int(_u32(data, 0x38)), int(_u32(data, 0x3C))
-    effect_count, effect_ptr_raw = int(_u32(data, 0x54)), int(_u32(data, 0x58))
+    ide_count, ide_ptr_raw = int(u32(data, 0x38)), int(u32(data, 0x3C))
+    effect_count, effect_ptr_raw = int(u32(data, 0x54)), int(u32(data, 0x58))
     summary.update({
         "signature": signature.decode("ascii", errors="replace"), "ide_count": ide_count,
         "ide_pointer_raw": ide_ptr_raw, "effect_count": effect_count,
@@ -228,8 +267,8 @@ def parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[
         summary["status"] = "effect_count_out_of_range"
         return mapping, summary
 
-    ide_table = _resolve_offset(data, ide_ptr_raw, ide_count * 4)
-    effect_table = _resolve_offset(data, effect_ptr_raw, max(1, effect_count * GAME_DTZ_2DFX_ROW_SIZE)) if effect_count else -1
+    ide_table = resolveOffset(data, ide_ptr_raw, ide_count * 4)
+    effect_table = resolveOffset(data, effect_ptr_raw, max(1, effect_count * GAME_DTZ_2DFX_ROW_SIZE)) if effect_count else -1
     summary.update({"ide_table_abs": ide_table, "effect_table_abs": effect_table})
     if ide_table < 0 or (effect_count and effect_table < 0):
         summary["status"] = "ide_pointer_out_of_bounds" if ide_table < 0 else "effect_pointer_out_of_bounds"
@@ -249,20 +288,22 @@ def parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[
         model_ids = range(ide_count)
     else:
         model_ids = sorted({int(v) for v in wanted_model_ids if 0 <= int(v) < ide_count})
+    names_by_hash = readDtzModelNames(data)
     rejected, entry_total, model_meta_by_id = 0, 0, {}
     for model_id in model_ids:
-        model_ptr_raw = int(_u32(data, ide_table + int(model_id) * 4, 0))
+        model_ptr_raw = int(u32(data, ide_table + int(model_id) * 4, 0))
         if not model_ptr_raw:
             continue
-        model_info = _resolve_offset(data, model_ptr_raw, 0x20)
+        model_info = resolveOffset(data, model_ptr_raw, 0x20)
         if model_info < 0:
             rejected += 1
             continue
-        model_hash = int(_u32(data, model_info + 0x08, 0))
+        model_hash = int(u32(data, model_info + 0x08, 0))
         model_type, num_effects = int(data[model_info + 0x10]), int(data[model_info + 0x11])
-        effect_index = int(_i16(data, model_info + 0x18, -1))
+        effect_index = int(i16(data, model_info + 0x18, -1))
         model_meta_by_id[int(model_id)] = {
             "model_id": int(model_id), "model_hash": model_hash,
+            "model_name": names_by_hash.get(model_hash, ""),
             "model_hash_hex": "0x{:08X}".format(model_hash),
             "model_pointer_raw": model_ptr_raw, "model_info_abs": model_info,
             "model_type": model_type, "num_effects": num_effects, "effect_index": effect_index,
@@ -303,7 +344,7 @@ def parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[
     return mapping, summary
 
 
-def _normalized_copy_stem(stem: str) -> str:
+def normalizedCopyStem(stem: str) -> str:
     value = str(stem or "").strip()
     value = re.sub(r"\s*\(\d+\)$", "", value)
     value = re.sub(r"\s+-\s+copy(?:\s+\d+)?$", "", value, flags=re.IGNORECASE)
@@ -316,13 +357,24 @@ def find_game_dtz(lvz_path: str, explicit_path: str = "") -> str:
         candidates.append(Path(explicit_path).expanduser())
     parent = Path(lvz_path).expanduser().resolve().parent
     try:
-        children = sorted((child for child in parent.iterdir() if child.is_file()), key=lambda child: child.name.lower())
+        directories = [parent]
+        current = parent
+        for depth in range(2):
+            if current.name.casefold() not in ('lvz', 'img', 'models'):
+                break
+            current = current.parent
+            directories.append(current)
+        children = [
+            child for directory in directories
+            for child in sorted(directory.iterdir(), key=lambda item: item.name.casefold())
+            if child.is_file()
+        ]
     except Exception:
         children = []
     candidates.extend(child for child in children if child.name.lower() == "game.dtz")
     candidates.extend(
         child for child in children
-        if child.suffix.lower() == ".dtz" and _normalized_copy_stem(child.stem).lower() == "game"
+        if child.suffix.lower() == ".dtz" and normalizedCopyStem(child.stem).lower() == "game"
     )
     seen = set()
     for candidate in candidates:

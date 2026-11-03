@@ -309,6 +309,8 @@ def readAnimBytes(data: bytes, *, use_logical_size: bool = True, verbose: bool =
         bone_count = readU16(parse_data, anim_off + 28)
         unk0 = readU16(parse_data, anim_off + 30)
         total_time = readF32(parse_data, anim_off + 32)
+        if not math.isfinite(total_time) or total_time < 0.0:
+            raise AnimReadError(f"{name!r}: invalid animation duration")
         if not math.isfinite(total_time) or total_time < 0.0 or total_time > 600.0:
             log.warning(f"animation {name!r} has suspicious total_time={total_time!r}")
         animations.append(
@@ -516,7 +518,7 @@ def interpolateRotationXyzw(a: Sequence[float], b: Sequence[float], factor: floa
     ))
 
 def sampleBoneAnimFrameAtTime(bone: BoneAnim, time_value: float) -> Optional[AnimFrame]:
-    frames = list(getattr(bone, "frames", []) or [])
+    frames = getattr(bone, "frames", None)
     if not frames:
         return None
 
@@ -540,25 +542,26 @@ def sampleBoneAnimFrameAtTime(bone: BoneAnim, time_value: float) -> Optional[Ani
             scale_xyz=tuple(last.scale_xyz),
         )
 
-    prev_frame = frames[0]
-    for next_frame in frames[1:]:
-        if time_value <= float(next_frame.absolute_time) + 0.000001:
-            span = float(next_frame.absolute_time) - float(prev_frame.absolute_time)
-            if abs(span) <= 0.000001:
-                factor = 0.0
-            else:
-                factor = (time_value - float(prev_frame.absolute_time)) / span
-            factor = max(0.0, min(1.0, factor))
-            return AnimFrame(
-                rotation_xyzw=interpolateRotationXyzw(prev_frame.rotation_xyzw, next_frame.rotation_xyzw, factor),
-                delta_time=0.0,
-                absolute_time=time_value,
-                translation_xyz=interpolateTuple3(prev_frame.translation_xyz, next_frame.translation_xyz, factor),
-                scale_xyz=interpolateTuple3(prev_frame.scale_xyz, next_frame.scale_xyz, factor),
-            )
-        prev_frame = next_frame
-
-    return frames[-1]
+    lo = 1
+    hi = len(frames) - 1
+    while lo < hi:
+        middle = (lo + hi) // 2
+        if float(frames[middle].absolute_time) + 0.000001 < time_value:
+            lo = middle + 1
+        else:
+            hi = middle
+    prev_frame = frames[lo - 1]
+    next_frame = frames[lo]
+    span = float(next_frame.absolute_time) - float(prev_frame.absolute_time)
+    factor = (time_value - float(prev_frame.absolute_time)) / span if span > 0.000001 else 0.0
+    factor = max(0.0, min(1.0, factor))
+    return AnimFrame(
+        rotation_xyzw=interpolateRotationXyzw(prev_frame.rotation_xyzw, next_frame.rotation_xyzw, factor),
+        delta_time=0.0,
+        absolute_time=time_value,
+        translation_xyz=interpolateTuple3(prev_frame.translation_xyz, next_frame.translation_xyz, factor),
+        scale_xyz=interpolateTuple3(prev_frame.scale_xyz, next_frame.scale_xyz, factor),
+    )
 
 def buildAnimationTimeline(entry: AnimEntry, max_key_times: Optional[int] = None) -> List[float]:
     times = {0.0, max(0.0, float(entry.total_time))}
@@ -646,7 +649,7 @@ def writeAnimBytes(anim_file: AnimFile) -> bytes:
                     raise ValueError(f"{entry.name}: key times must be finite, nonnegative and ordered")
                 if bone.has_rotation:
                     data.extend(packHalf(frame.rotation_xyzw, entry.name))
-                packed_time = packHalf((time - previous_time,), entry.name)
+                packed_time = packHalf((max(0.0, time - encoded_time),), entry.name)
                 encoded_time += struct.unpack("<e", packed_time)[0]
                 data.extend(packed_time)
                 if bone.has_translation:
@@ -665,7 +668,13 @@ def writeAnimBytes(anim_file: AnimFile) -> bytes:
     return bytes(data)
 
 
-def writeAnimFile(path: str, anim_file: AnimFile) -> None:
+def writeAnimFile(path: str, anim_file: AnimFile, *, game=None, platform=None) -> None:
+    if game is not None or platform is not None:
+        if game not in {'LCS', 'VCS'} or platform not in {'PS2', 'PSP'}:
+            raise ValueError("ANIM export requires LCS or VCS and PS2 or PSP")
     data = writeAnimBytes(anim_file)
+    if platform in {'PS2', 'PSP'}:
+        # Both consoles use the same little-endian ANIM layout.
+        data += bytes((-len(data)) % 2048)
     readAnimBytes(data)
     Path(path).write_bytes(data)

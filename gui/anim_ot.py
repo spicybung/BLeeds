@@ -24,6 +24,7 @@ from bpy_extras.io_utils import ImportHelper
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from ..ops import anim_importer
+from . import drawImportLogOptions, runImport
 
 class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
     bl_idname = "import_scene.leeds_anim"
@@ -153,11 +154,8 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
         default=True,
     )
 
-    verbose_parse_log: BoolProperty(
-        name="Verbose Parse Log",
-        description="Include internal parser diagnostics in the Text summary",
-        default=False,
-    )
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
 
     def draw(self, context):
         layout = self.layout
@@ -192,12 +190,20 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
         col.prop(self, "use_name_fallback")
         col.prop(self, "use_table_index_fallback")
         col.prop(self, "clear_existing_action")
-        col.prop(self, "verbose_parse_log")
+        drawImportLogOptions(layout, self)
 
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         try:
-            anim_file = anim_importer.readAnimFile(self.filepath, use_logical_size=True, verbose=self.verbose_parse_log)
+            anim_file = anim_importer.readAnimFile(
+                self.filepath,
+                use_logical_size=True,
+                verbose=self.print_debug_log or self.print_text_log,
+            )
         except Exception as exc:
+            print("ANIM import failed: {}".format(exc))
             self.report({"ERROR"}, f"Failed to read ANIM: {exc}")
             return {"CANCELLED"}
 
@@ -289,7 +295,7 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
             selected_armature.animation_data.action = selected_action
             context.scene.frame_set(context.scene.frame_current)
 
-        if self.create_text_summary:
+        if self.create_text_summary or self.print_debug_log or self.print_text_log:
             text_name = "BLeeds_ANIM_" + Path(self.filepath).stem[:40]
             summary = anim_importer.buildImportSummary(
                 anim_file,
@@ -300,7 +306,10 @@ class IMPORT_SCENE_OT_leeds_anim(Operator, ImportHelper):
                 keyed_count=keyed_count,
                 mapping_lines=mapping_lines,
             )
-            anim_importer.ensureTextBlock(text_name, summary)
+            if self.create_text_summary:
+                anim_importer.ensureTextBlock(text_name, summary)
+            if self.print_debug_log or self.print_text_log:
+                print(summary)
 
         if self.apply_to_selected_armature:
             unmapped = len(entry.bones) - mapped_count
@@ -344,7 +353,7 @@ class DATA_PT_leeds_anim_bone_id(Panel):
 
 
 from bpy_extras.io_utils import ExportHelper
-from ..ops.anim_exporter import exportArmatureAnimation
+from ..ops.anim_exporter import exportArmatureAnimation, animationTargetFromArmature
 
 
 class EXPORT_SCENE_OT_leeds_anim(Operator, ExportHelper):
@@ -353,6 +362,8 @@ class EXPORT_SCENE_OT_leeds_anim(Operator, ExportHelper):
     filename_ext = ".anim"
 
     filter_glob: StringProperty(default="*.anim", options={"HIDDEN"})
+    game: EnumProperty(name="Game", items=(('LCS', 'LCS', ''), ('VCS', 'VCS', '')), default='VCS')
+    platform: EnumProperty(name="Platform", items=(('PS2', 'PS2', ''), ('PSP', 'PSP', '')), default='PS2')
     animation_name: StringProperty(name="Animation Name", default="animation", maxlen=24)
     start_frame: FloatProperty(name="First Frame", default=1.0)
     end_frame: FloatProperty(name="Last Frame", default=30.0)
@@ -360,6 +371,11 @@ class EXPORT_SCENE_OT_leeds_anim(Operator, ExportHelper):
 
     def invoke(self, context, event):
         armature = anim_importer.findSelectedArmature(context)
+        game, platform = animationTargetFromArmature(armature)
+        if game in {'LCS', 'VCS'}:
+            self.game = game
+        if platform in {'PS2', 'PSP'}:
+            self.platform = platform
         action = armature.animation_data.action if armature and armature.animation_data else None
         if action:
             self.animation_name = str(action.get("bleeds_source_anim_name", action.name))[:24]
@@ -371,11 +387,18 @@ class EXPORT_SCENE_OT_leeds_anim(Operator, ExportHelper):
             self.fps = context.scene.render.fps / context.scene.render.fps_base
         return ExportHelper.invoke(self, context, event)
 
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        for property_name in ('game', 'platform', 'animation_name', 'start_frame', 'end_frame', 'fps'):
+            layout.prop(self, property_name)
+
     def execute(self, context):
         try:
             bones, keys = exportArmatureAnimation(
                 context, self.filepath, start_frame=self.start_frame, end_frame=self.end_frame,
-                fps=self.fps, animation_name=self.animation_name)
+                fps=self.fps, animation_name=self.animation_name, game=self.game, platform=self.platform)
         except Exception as exc:
             self.report({"ERROR"}, f"Could not export ANIM: {exc}")
             return {"CANCELLED"}

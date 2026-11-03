@@ -18,6 +18,13 @@
 import io
 import math
 import struct
+import zlib
+from pathlib import Path
+
+import numpy as np
+
+from .vif import Ps2VifStreamDecoder
+from ..leedsLib.native_mobile import writeAtomic
 
 from .chunks import readChunks, readMobileDffChunks
 
@@ -263,9 +270,9 @@ def readDff(data, source='MOBILE'):
                         raise ValueError('This standard RenderWare skin layout is not implemented yet; no static substitute was imported')
                 if not decoded['morphs'] or not decoded['morphs'][0]['vertices']:
                     raise ValueError('DFF has no vertex positions')
-                parts = [dict(vertices=decoded['morphs'][0]['vertices'], faces=decoded['faces'],
-                              uvs=decoded['uvs'][0] if decoded['uvs'] else [],
-                              colors=decoded['colors'], normals=decoded['morphs'][0]['normals'],
+                parts = [dict(vertices=decoded['morphs'][0]['vertices'], faces=decoded['faces'], 
+                              uvs=decoded['uvs'][0] if decoded['uvs'] else [], 
+                              colors=decoded['colors'], normals=decoded['morphs'][0]['normals'], 
                               material=0, face_materials=decoded['materials'])]
             atomics.append(dict(chunk=section, children=children, geometry=geometry,
                                 frame=frame_index, parts=parts, materials=readMaterialNames(material_sections),
@@ -342,7 +349,7 @@ def replaceLeedsAttributes(chunk, attributes):
                         raise ValueError('Each mobile skinned vertex needs one to four bone weights')
                     total = sum(weight for bone, weight in influences)
                     influences = [(bone, weight / total) for bone, weight in influences]
-                    words = [native_mdl._encode_ps2_ped_skin_word(bone, weight) for bone, weight in influences]
+                    words = [native_mdl.encodePs2PedSkinWord(bone, weight) for bone, weight in influences]
                     words.extend([0] * (4 - len(words)))
                     offset = strip.source_skin_offset - 32 + index * 16
                     if offset < 0 or offset + 16 > len(payload):
@@ -356,3 +363,507 @@ def replaceLeedsAttributes(chunk, attributes):
             struct.pack_into('<H', payload, offset, material)
     chunk.payload = bytes(payload)
     return chunk
+
+
+def unwrapResource(data):
+    data = bytes(data)
+    if data[:4] == b'Z2HM':
+        if len(data) < 8:
+            raise ValueError('Truncated MH2 compressed header')
+        expected = struct.unpack_from('<I', data, 4)[0]
+        max_size = 512 * 1024 * 1024
+        if expected > max_size:
+            raise ValueError('MH2 resource exceeds the 512 MiB decompression limit')
+        decoder = zlib.decompressobj()
+        data = decoder.decompress(data[8:], max_size + 1)
+        if len(data) > max_size or not decoder.eof or decoder.unconsumed_tail:
+            raise ValueError('MH2 compressed resource is truncated or exceeds the decompression limit')
+        if expected and len(data) != expected:
+            raise ValueError('MH2 decompressed size does not match its header')
+    return data
+
+
+
+class Resource:
+    def __init__(self, data, magic):
+        self.compressed = bytes(data[:4]) == b'Z2HM'
+        self.data = unwrapResource(data)
+        if len(self.data) < 48 or self.data[:4] != magic:
+            raise ValueError('Expected MH2 %s container' % magic.decode('ascii'))
+        self.end = self.uint(16)
+        count = self.uint(20)
+        self.check(self.end, count * 4, payload=False)
+        if self.end < 48:
+            raise ValueError('Invalid MH2 payload boundary')
+        for index in range(count):
+            field = self.uint(self.end + index * 4, payload=False)
+            self.check(field, 4)
+            target = self.uint(field)
+            if target:
+                self.check(target, 1)
+
+    def check(self, offset, size, payload=True):
+        end = self.end if payload else len(self.data)
+        if offset < 0 or size < 0 or offset + size > end:
+            raise ValueError('MH2 data outside container at 0x%X' % offset)
+
+    def uint(self, offset, payload=True):
+        if hasattr(self, 'end'):
+            self.check(offset, 4, payload)
+        return struct.unpack_from('<I', self.data, offset)[0]
+
+    def values(self, fmt, offset):
+        self.check(offset, struct.calcsize(fmt))
+        return struct.unpack_from(fmt, self.data, offset)
+
+    def string(self, offset, length=64):
+        if not offset:
+            return ''
+        self.check(offset, 1)
+        return self.data[offset:min(offset + length, self.end)].split(b'\0', 1)[0].decode('ascii', 'replace')
+
+    def write(self, path, data=None):
+        payload = self.data if data is None else bytes(data)
+        Resource(payload, self.data[:4])
+        if self.compressed:
+            payload = b'Z2HM' + struct.pack('<I', len(payload)) + zlib.compress(payload, 9)
+        writeAtomic(path, payload)
+
+
+
+def readMaterials(resource, offset, count):
+    if count > 65536:
+        raise ValueError('Invalid MH2 material count')
+    resource.check(offset, count * 12)
+    materials = []
+    for index in range(count):
+        row = offset + index * 12
+        materials.append(dict(name=resource.string(resource.uint(row), 128),
+                              color=resource.values('<4B', row + 5)))
+    return materials
+
+
+
+def stripFaces(vertices, start, count):
+    faces = []
+    for index in range(2, count):
+        a, b, c = start + index - 2, start + index - 1, start + index
+        if index & 1:
+            a, b = b, a
+        if vertices[a] != vertices[b] and vertices[b] != vertices[c] and vertices[a] != vertices[c]:
+            faces.append((a, b, c))
+    return faces
+
+
+
+def ps2Header(resource, offset):
+    resource.check(offset, 64)
+    packed, flags = resource.values('<2I', offset + 16)
+    size, count = packed & 0xFFFFF, packed >> 20
+    first = resource.values('<H', offset + 26)[0]
+    if (resource.data[offset + 64:offset + 68] != b'D2SP'
+            or not count or count > 4096
+            or size < 80 + count * 48
+            or first < 80 + count * 48 or first >= size):
+        raise ValueError('Invalid MH2 PS2 geometry header at 0x%X' % offset)
+    resource.check(offset, size)
+    scale = resource.values('<3f', offset + 40)
+    translation = resource.values('<3f', offset + 52)
+    if not all(math.isfinite(value) for value in scale + translation) or flags > 255:
+        raise ValueError('Invalid MH2 PS2 geometry transform')
+    return size, count, first, scale, translation
+
+
+
+def readPs2Geometry(resource, offset):
+    size, count, first, scale, translation = ps2Header(resource, offset)
+    parts = []
+    for index in range(count):
+        row = offset + 80 + index * 48
+        us, vs = resource.values('<2f', row + 16)
+        relative = resource.uint(row + 28)
+        material = resource.values('<H', row + 34)[0]
+        start = offset + first + relative
+        finish = offset + size
+        if index + 1 < count:
+            finish = offset + first + resource.uint(row + 48 + 28)
+        resource.check(start, finish - start)
+        if resource.uint(start) & 0x70000000 == 0x60000000:
+            start += 16
+        decoder = Ps2VifStreamDecoder()
+        records = decoder.feed(resource.data[start:finish], final=True)
+        part = dict(vertices=[], faces=[], uvs=[], normals=[], colors=[], weights=[], material=material,
+                    position_sources=[], scale=scale, translation=translation, offset=offset)
+        batch = {}
+        def flush():
+            positions = batch.get(0x79)
+            if positions is None:
+                batch.clear()
+                return
+            vertex_count = positions.num
+            base = len(part['vertices'])
+            resource.check(start + positions.stream_offset + 4, vertex_count * 6)
+            for command, bytes_per_vertex in ((0x79, 6), (0x76, 2), (0x6A, 3), (0x6E, 4), (0x6C, 16)):
+                record = batch.get(command)
+                if record is not None and command != 0x6C and record.num < vertex_count:
+                    raise ValueError('MH2 PS2 VIF attribute 0x%02X has too few vertices' % command)
+                if record is not None and (command != 0x6C or record.num == vertex_count) and len(record.payload) < vertex_count * bytes_per_vertex:
+                    raise ValueError('Truncated MH2 PS2 VIF vertex attribute 0x%02X' % command)
+            for vertex_index in range(vertex_count):
+                raw = struct.unpack_from('<3h', positions.payload, vertex_index * 6)
+                part['vertices'].append(tuple(raw[axis] / 32768.0 * scale[axis] + translation[axis] for axis in range(3)))
+                part['position_sources'].append(start + positions.stream_offset + 4 + vertex_index * 6)
+                uv = batch.get(0x76)
+                part['uvs'].append((uv.payload[vertex_index * 2] / 128.0 * us, uv.payload[vertex_index * 2 + 1] / 128.0 * vs) if uv else (0.0, 0.0))
+                normal = batch.get(0x6A)
+                part['normals'].append(tuple(value / 128.0 for value in struct.unpack_from('<3b', normal.payload, vertex_index * 3)) if normal else (0.0, 0.0, 1.0))
+                color = batch.get(0x6E)
+                rgba = struct.unpack_from('<4B', color.payload, vertex_index * 4) if color else (255, 255, 255, 128)
+                part['colors'].append(tuple(rgba[:3]) + (min(255, rgba[3] * 255 // 128),))
+                skin = batch.get(0x6C)
+                influences = []
+                if skin and skin.num == vertex_count:
+                    for word in struct.unpack_from('<4I', skin.payload, vertex_index * 16):
+                        weight = struct.unpack('<f', struct.pack('<I', word & 0xFFFFFF00))[0]
+                        if math.isfinite(weight) and weight > 0:
+                            influences.append(((word & 255) // 4, weight))
+                total = sum(weight for bone, weight in influences)
+                part['weights'].append([(bone, weight / total) for bone, weight in influences] if total else [])
+            part['faces'].extend(stripFaces(part['vertices'], base, vertex_count))
+            batch.clear()
+        for record in records:
+            if record.command == 0x79:
+                flush()
+            if record.command in (0x79, 0x76, 0x6A, 0x6E) or record.command == 0x6C and record.num > 1:
+                batch[record.command] = record
+            if record.command in (0x14, 0x15, 0x17):
+                flush()
+        flush()
+        if not part['vertices']:
+            raise ValueError('MH2 PS2 geometry part has no decoded positions')
+        parts.append(part)
+    return parts
+
+
+
+def pspLayout(flags):
+    fields = {}
+    cursor = 0
+    alignment = 1
+    def add(name, size, components):
+        nonlocal cursor, alignment
+        cursor = (cursor + size - 1) // size * size
+        fields[name] = (cursor, size, components)
+        cursor += size * components
+        alignment = max(alignment, size)
+    weight_format = (flags >> 9) & 3
+    if weight_format:
+        add('weights', (0, 1, 2, 4)[weight_format], ((flags >> 14) & 7) + 1)
+    uv_format = flags & 3
+    if uv_format:
+        add('uv', (0, 1, 2, 4)[uv_format], 2)
+    color_format = (flags >> 2) & 7
+    if color_format:
+        if color_format not in (4, 5, 6, 7):
+            raise ValueError('Unsupported MH2 PSP vertex color format')
+        add('color', 4 if color_format == 7 else 2, 1)
+    normal_format = (flags >> 5) & 3
+    if normal_format:
+        add('normal', (0, 1, 2, 4)[normal_format], 3)
+    position_format = (flags >> 7) & 3
+    if not position_format or flags & 0x1C0000:
+        raise ValueError('Unsupported MH2 PSP position or morph format')
+    add('position', (0, 1, 2, 4)[position_format], 3)
+    return fields, (cursor + alignment - 1) // alignment * alignment
+
+
+
+def readPspGeometry(resource, offset, world=False):
+    size, flags, strip_count = resource.values('<3I', offset)
+    if not strip_count or strip_count > 4096:
+        raise ValueError('Invalid MH2 PSP strip count')
+    fields, stride = pspLayout(flags)
+    vertex_count = resource.uint(offset + 44)
+    buffer = resource.uint(offset + 64)
+    if buffer < 80 + strip_count * 32 or size < buffer + vertex_count * stride:
+        raise ValueError('Invalid MH2 PSP vertex buffer')
+    resource.check(offset, size)
+    scale = resource.values('<3f', offset + 32)
+    translation = resource.values('<3f', offset + 48)
+    if not all(math.isfinite(value) for value in scale + translation):
+        raise ValueError('MH2 PSP geometry contains non-finite transforms')
+    parts = []
+    cursor = 0
+    for strip in range(strip_count):
+        descriptor = offset + 80 + strip * 32
+        count, material = resource.values('<2H', descriptor + 16)
+        if cursor + count > vertex_count:
+            raise ValueError('MH2 PSP strip exceeds its declared vertex buffer')
+        us = resource.values('<f', descriptor + 20)[0] or 1.0
+        vs = resource.values('<f', descriptor + 24)[0] if world else us
+        if not math.isfinite(us):
+            raise ValueError('MH2 PSP strip contains invalid UV scale')
+        if not math.isfinite(vs) or abs(vs) < 1e-30:
+            vs = us
+        part = dict(vertices=[], faces=[], uvs=[], normals=[], colors=[], weights=[], material=material,
+                    position_sources=[], scale=scale, translation=translation, offset=offset)
+        for index in range(count):
+            vertex = offset + buffer + (cursor + index) * stride
+            resource.check(vertex, stride)
+            position_offset, component_size, unused = fields['position']
+            fmt = {1:'b', 2:'h', 4:'f'}[component_size]
+            raw = resource.values('<3' + fmt, vertex + position_offset)
+            divisor = {1:128.0, 2:32768.0, 4:1.0}[component_size]
+            part['vertices'].append(tuple(raw[axis] / divisor * scale[axis] + translation[axis] for axis in range(3)))
+            part['position_sources'].append(vertex + position_offset)
+            part['position_size'] = component_size
+            uv = (0.0, 0.0)
+            if 'uv' in fields:
+                address, width, unused = fields['uv']
+                raw_uv = resource.values('<2' + {1:'B', 2:'H', 4:'f'}[width], vertex + address)
+                uv_divisor = {1:128.0, 2:32768.0, 4:1.0}[width]
+                uv = (raw_uv[0] / uv_divisor * us, raw_uv[1] / uv_divisor * vs)
+            part['uvs'].append(uv)
+            normal = (0.0, 0.0, 1.0)
+            if 'normal' in fields:
+                address, width, unused = fields['normal']
+                normal = tuple(value / {1:128.0, 2:32768.0, 4:1.0}[width] for value in resource.values('<3' + {1:'b', 2:'h', 4:'f'}[width], vertex + address))
+            part['normals'].append(normal)
+            rgba = (255, 255, 255, 255)
+            if 'color' in fields:
+                address, width, unused = fields['color']
+                if width == 4:
+                    rgba = resource.values('<4B', vertex + address)
+                else:
+                    value = resource.values('<H', vertex + address)[0]
+                    form = (flags >> 2) & 7
+                    if form == 4:
+                        rgba = ((value & 31) * 255 // 31, ((value >> 5) & 63) * 255 // 63, ((value >> 11) & 31) * 255 // 31, 255)
+                    elif form == 5:
+                        rgba = ((value & 31) * 255 // 31, ((value >> 5) & 31) * 255 // 31, ((value >> 10) & 31) * 255 // 31, 255 if value & 32768 else 0)
+                    else:
+                        rgba = tuple(((value >> shift) & 15) * 17 for shift in (0, 4, 8, 12))
+            part['colors'].append(rgba)
+            influences = []
+            if 'weights' in fields:
+                address, width, number = fields['weights']
+                if number > 8:
+                    raise ValueError('MH2 PSP bone palette exceeds strip descriptor')
+                raw_weights = resource.values('<' + str(number) + {1:'B', 2:'H', 4:'f'}[width], vertex + address)
+                for token, weight in enumerate(raw_weights):
+                    if not math.isfinite(float(weight)):
+                        raise ValueError('MH2 PSP skin contains non-finite weight values')
+                    if weight > 0:
+                        influences.append((resource.data[descriptor + 24 + token], float(weight)))
+            total = sum(weight for bone, weight in influences)
+            if not math.isfinite(total):
+                raise ValueError('MH2 PSP skin weights overflow')
+            part['weights'].append([(bone, weight / total) for bone, weight in influences] if total else [])
+        part['faces'] = stripFaces(part['vertices'], 0, count)
+        parts.append(part)
+        cursor += count
+    if cursor != vertex_count:
+        raise ValueError('MH2 PSP strip counts do not match vertex buffer')
+    return parts
+
+
+
+def boneIdFromName(name):
+    mapping = {
+        'bip01': 1000, 
+        'root': 1000, 
+        'head': 1001, 
+        'l_calf': 1002, 
+        'bip01_l_clavicle': 1003, 
+        'l_clavicle': 1003, 
+        'l_finger0': 1004, 
+        'l_finger1': 1005, 
+        'l_finger01': 1006, 
+        'l_finger2': 1008, 
+        'l_finger11': 1011, 
+        'l_finger21': 1013, 
+        'l_foot': 1019, 
+        'l_forearm': 1020, 
+        'l_hand': 1021, 
+        'l_thigh': 1023, 
+        'l_toe': 1024, 
+        'l_toe0': 1024, 
+        'l_upperarm': 1039, 
+        'neck': 1040, 
+        'pelvis': 1045, 
+        'r_calf': 1056, 
+        'bip01_r_clavicle': 1057, 
+        'r_clavicle': 1057, 
+        'r_finger0': 1058, 
+        'r_finger1': 1059, 
+        'r_finger01': 1060, 
+        'r_finger2': 1062, 
+        'r_finger11': 1065, 
+        'r_finger21': 1067, 
+        'r_foot': 1073, 
+        'r_forearm': 1074, 
+        'r_hand': 1075, 
+        'r_thigh': 1077, 
+        'r_toe': 1078, 
+        'r_toe0': 1078, 
+        'r_upperarm': 1093, 
+        'spine': 1094, 
+        'spine1': 1095, 
+        'spine2': 1096, 
+    }
+    normalized = str(name).strip().lower().replace(" ", "_").replace("-", "_")
+    if normalized.startswith("bip01_"):
+        normalized = normalized[6:]
+    return mapping.get(normalized)
+
+
+
+def readModel(data, platform='AUTO'):
+    resource = Resource(data, b'PMLC')
+    entries = []
+    entry = resource.uint(32)
+    visited = set()
+    while entry:
+        if entry in visited:
+            raise ValueError('MH2 clump entry list loops')
+        visited.add(entry)
+        resource.check(entry, 16)
+        body = resource.uint(entry + 8)
+        resource.check(body, 28)
+        bones = []
+        pending = [resource.uint(body)]
+        seen_bones = set()
+        while pending:
+            bone = pending.pop()
+            if not bone or bone in seen_bones:
+                continue
+            seen_bones.add(bone)
+            resource.check(bone, 192)
+            bones.append(dict(offset=bone, parent=resource.uint(bone + 8), name=resource.string(bone + 24, 40),
+                              matrix=resource.values('<16f', bone + 128), identifier=None))
+            pending.extend([resource.uint(bone + 4), resource.uint(bone + 16)])
+        by_offset = {bone['offset']:index for index, bone in enumerate(bones)}
+        bones_by_identifier = {}
+        for bone_index, bone in enumerate(bones):
+            identifier = boneIdFromName(bone['name'])
+            if identifier is not None:
+                bones_by_identifier.setdefault(identifier, []).append(bone_index)
+        palette = []
+        for bone in bones:
+            binding = resource.uint(bone['offset'] + 20)
+            if not binding:
+                continue
+            resource.check(binding, 24)
+            number = resource.uint(binding)
+            root = resource.uint(binding + 8)
+            table = resource.uint(binding + 12)
+            if number == 0 or number > 4096 or root not in by_offset:
+                continue
+            resource.check(table, number * 8)
+            hierarchy_order_valid = by_offset[root] + number <= len(bones)
+            for index in range(number):
+                candidate = by_offset[root] + index
+                identifier = resource.values('<h', table + index * 8)[0]
+                target = resource.uint(table + index * 8 + 4)
+                if candidate >= len(bones):
+                    hierarchy_order_valid = False
+                    break
+                known = boneIdFromName(bones[candidate]['name'])
+                if known is not None and identifier != known or target and target != bones[candidate]['offset']:
+                    hierarchy_order_valid = False
+                    break
+            for index in range(number):
+                identifier = resource.values('<h', table + index * 8)[0]
+                target = resource.uint(table + index * 8 + 4)
+                resolved = by_offset.get(target)
+                if resolved is None and not target:
+                    if hierarchy_order_valid:
+                        resolved = by_offset[root] + index
+                    elif index == 0 and identifier == 8889:
+                        resolved = by_offset[root]
+                    else:
+                        matching = bones_by_identifier.get(identifier, [])
+                        resolved = matching[0] if len(matching) == 1 else None
+                palette.append(resolved)
+                if resolved is not None:
+                    bones[resolved]['identifier'] = identifier
+            break
+        for bone in bones:
+            if bone['identifier'] is None:
+                bone['identifier'] = boneIdFromName(bone['name'])
+        objects = []
+        current = resource.uint(body + 20)
+        sentinel = body + 20
+        seen_objects = set()
+        while current and current != sentinel:
+            if current in seen_objects:
+                raise ValueError('MH2 atomic list loops')
+            seen_objects.add(current)
+            resource.check(current, 28)
+            mesh = resource.uint(current + 12)
+            resource.check(mesh, 96)
+            materials = readMaterials(resource, resource.uint(mesh), resource.uint(mesh + 4))
+            detected = 'PS2' if resource.data[mesh + 80:mesh + 84] == b'D2SP' else 'PSP'
+            if platform != 'AUTO' and platform != detected:
+                raise ValueError('Selected %s, but model contains %s geometry' % (platform, detected))
+            parts = readPs2Geometry(resource, mesh + 16) if detected == 'PS2' else readPspGeometry(resource, mesh + 16)
+            for part in parts:
+                if part['material'] >= len(materials):
+                    raise ValueError('MH2 strip refers to missing material')
+                for influences in part['weights']:
+                    for token, weight in influences:
+                        if not math.isfinite(weight) or weight < 0.0:
+                            raise ValueError('MH2 skin contains an invalid bone weight')
+                        if weight == 0.0:
+                            continue
+                        if token < 0 or token >= len(palette) or palette[token] is None:
+                            raise ValueError('MH2 skin refers to an unresolved bone palette entry')
+            objects.append(dict(offset=current, parent=resource.uint(current + 8), parts=parts, materials=materials, platform=detected))
+            if current == resource.uint(body + 24):
+                break
+            current = resource.uint(current)
+        entries.append(dict(name=resource.string(resource.uint(entry + 12), 128) or (bones[0]['name'] if bones else 'Clump'), 
+                            bones=bones, palette=palette, objects=objects))
+        if entry == resource.uint(36):
+            break
+        entry = resource.uint(entry)
+    if not entries:
+        raise ValueError('MH2 model contains no clumps')
+    return resource, entries
+
+
+
+def readWorld(data, platform='AUTO'):
+    resource = Resource(data, b'DLRW')
+    materials = readMaterials(resource, resource.uint(80), resource.uint(84))
+    geometry = []
+    cursor = 96
+    while cursor + 80 <= resource.end:
+        detected = None
+        if resource.uint(cursor + 4) & 0x180 == 0x100:
+            try:
+                parts = readPspGeometry(resource, cursor, world=True)
+                size = resource.uint(cursor)
+                detected = 'PSP'
+            except (ValueError, struct.error, IndexError):
+                pass
+        if detected is None:
+            try:
+                size, count, first, scale, translation = ps2Header(resource, cursor)
+                if resource.uint(cursor + first) & 0x70000000 != 0x60000000:
+                    raise ValueError('Not a PS2 DMA geometry packet')
+                parts = readPs2Geometry(resource, cursor)
+                detected = 'PS2'
+            except (ValueError, struct.error, IndexError):
+                pass
+        if detected:
+            if platform != 'AUTO' and platform != detected:
+                raise ValueError('Selected BSP platform does not match its geometry')
+            if any(part['material'] >= len(materials) for part in parts):
+                raise ValueError('MH2 BSP strip refers to missing material')
+            geometry.append(dict(offset=cursor, parts=parts, platform=detected))
+            cursor = (cursor + size + 3) & ~3
+        else:
+            cursor += 4
+    return resource, materials, geometry
+

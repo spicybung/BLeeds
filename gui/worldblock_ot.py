@@ -19,6 +19,7 @@ import traceback
 import os
 import struct
 import datetime
+import math
 import bpy
 
 from bpy_extras.io_utils import ImportHelper, ExportHelper
@@ -26,8 +27,13 @@ from bpy.props import StringProperty, CollectionProperty, BoolProperty
 
 from ..leedsLib.worldblock import read_chinatown as RC
 from ..ops.worldblock_importer import worldblock_importer
+from . import drawImportLogOptions, runImport
 
-def _ensure_bytes(d):
+
+class CWImportCancelled(Exception):
+    pass
+
+def ensureBytes(d):
     if isinstance(d, (bytes, bytearray, memoryview)):
         return bytes(d)
     if isinstance(d, str):
@@ -42,12 +48,20 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
     filename_ext = ".wbl"
     filter_glob: StringProperty(default="*.wbl", options={'HIDDEN'})
     files: CollectionProperty(type=bpy.types.PropertyGroup)
+    import_textures: BoolProperty(name="Import Textures", default=True)
     import_as_mdls: BoolProperty(name="Import as MDLs", default=False)
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
 
     def draw(self, context):
         self.layout.prop(self, "import_as_mdls")
+        self.layout.prop(self, "import_textures")
+        drawImportLogOptions(self.layout, self)
 
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
 
         fps = []
         if self.files:
@@ -58,22 +72,32 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
             fps.append(self.filepath)
 
         for fp in fps:
-            result = self._import_one(fp, context)
+            result = self.importOne(fp, context)
             if result != {'FINISHED'}:
                 return result
 
         return {'FINISHED'}
 
-    def _import_one(self, filepath, context):
-        logf = None
-        if RC.DEBUG_MODE:
-            logf = open(RC.get_debug_logfile(filepath), "w", encoding="utf-8")
-            RC.dprint(f"==== DEBUG LOG START {datetime.datetime.now()} ====", logf)
+    def importOne(self, filepath, context):
+        from ..ops.mdl_importer import mh2ImportCleanup
+
         try:
+            with mh2ImportCleanup():
+                result = self.importOneFile(filepath, context)
+                if result != {'FINISHED'}:
+                    raise CWImportCancelled()
+                return result
+        except CWImportCancelled:
+            return {'CANCELLED'}
+
+    def importOneFile(self, filepath, context):
+        logf = None
+        try:
+            RC.dprint(f"==== DEBUG LOG START {datetime.datetime.now()} ====", logf)
 
             with open(filepath, "rb") as fh:
                 file_bytes = fh.read()
-            b = _ensure_bytes(file_bytes)
+            b = ensureBytes(file_bytes)
 
             hdr = RC.read_leeds_cw_transform(b, 0x00, logf)
             PX, PY, PZ = hdr.pos
@@ -89,7 +113,7 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                 if coll.name not in {c.name for c in bpy.context.scene.collection.children}:
                     bpy.context.scene.collection.children.link(coll)
 
-            mat_bank = RC.MaterialBank(cur, logf)
+            mat_bank = RC.MaterialBank(cur, logf, import_textures=self.import_textures)
 
             mesh_offsets = set()
             lights = []
@@ -97,7 +121,7 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
             sector_ofs = 0x28
             for sector_idx in range(4):
                 if sector_ofs + 12 > len(b):
-                    break
+                    raise ValueError(f"Missing Chinatown sector header at 0x{sector_ofs:X}")
 
                 header_bytes = b[sector_ofs:sector_ofs + 12]
                 Bool1 = bool(header_bytes[0])
@@ -107,6 +131,10 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                 NumLevels = struct.unpack_from("<h", header_bytes, 6)[0]
                 NumLights = struct.unpack_from("<h", header_bytes, 8)[0]
                 NumTextures = struct.unpack_from("<h", header_bytes, 10)[0]
+
+                counts = (NumInstances, NumShadows, NumLevels, NumLights, NumTextures)
+                if any(count < 0 for count in counts):
+                    raise ValueError(f"Negative Chinatown sector count at 0x{sector_ofs:X}")
 
                 RC.dprint(
                     f"[sector {sector_idx}] Bool1={Bool1} Bool2={Bool2} "
@@ -120,6 +148,11 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                 shadows_block_size = NumShadows * 20
                 lights_block_size = NumLights * 20
                 textures_block_size = NumTextures * 2
+
+                sector_size = (12 + level_block_size + instances_block_size +
+                               shadows_block_size + lights_block_size + textures_block_size)
+                if sector_ofs + sector_size > len(b):
+                    raise ValueError(f"Truncated Chinatown sector at 0x{sector_ofs:X}")
 
                 level_ofs = sector_ofs + 12
                 inst_base = level_ofs + level_block_size
@@ -136,9 +169,9 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                 for light_idx in range(NumLights):
                     l_off = light_base + light_idx * 20
 
-                    X_raw = struct.unpack_from("<I", b, l_off + 0)[0]
-                    Y_raw = struct.unpack_from("<I", b, l_off + 4)[0]
-                    Z_raw = struct.unpack_from("<I", b, l_off + 8)[0]
+                    X_raw = struct.unpack_from("<i", b, l_off + 0)[0]
+                    Y_raw = struct.unpack_from("<i", b, l_off + 4)[0]
+                    Z_raw = struct.unpack_from("<i", b, l_off + 8)[0]
                     Size_raw = struct.unpack_from("<H", b, l_off + 12)[0]
                     Id = struct.unpack_from("<B", b, l_off + 14)[0]
                     R = struct.unpack_from("<B", b, l_off + 16)[0]
@@ -161,14 +194,6 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                         }
                     )
 
-                sector_size = (
-                    12
-                    + level_block_size
-                    + instances_block_size
-                    + shadows_block_size
-                    + lights_block_size
-                    + textures_block_size
-                )
                 sector_ofs += sector_size
 
             for light_index, light in enumerate(lights):
@@ -194,7 +219,7 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                 RC.dprint("no mesh offsets found in worldblock", logf)
 
             if not self.import_as_mdls:
-                self._build_merged(
+                self.buildMerged(
                     b,
                     sorted(mesh_offsets),
                     (PX, PY, PZ),
@@ -225,26 +250,30 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
             print(tb_str)
             return {'CANCELLED'}
         finally:
-            if logf:
-                RC.dprint("==== DEBUG LOG END ====", logf)
-                logf.close()
+            RC.dprint("==== DEBUG LOG END ====", logf)
         return {'FINISHED'}
 
-    def _build_merged(self, b, mesh_offsets, pos, stem, mat_bank, coll, logf=None):
-        b = _ensure_bytes(b)
+    def buildMerged(self, b, mesh_offsets, pos, stem, mat_bank, coll, logf=None):
+        b = ensureBytes(b)
         PX, PY, PZ = pos
-        wv, wuv, wf = [], [], []
+        wv, wuv, wn, wf = [], [], [], []
         wf_mats = []
         for MeshOffset in mesh_offsets:
             numMaterials = struct.unpack_from('<b', b, MeshOffset + 5)[0]
             numVertices  = struct.unpack_from('<h', b, MeshOffset + 6)[0]
             translationFactor = struct.unpack_from('<f', b, MeshOffset + 40)[0]
             scaleFactor  = struct.unpack_from('<f', b, MeshOffset + 44)[0]
+            if (numMaterials <= 0 or numVertices <= 0 or
+                    not math.isfinite(scaleFactor) or scaleFactor == 0.0 or
+                    not math.isfinite(translationFactor)):
+                raise ValueError(f"Invalid Chinatown mesh header at 0x{MeshOffset:X}")
 
             stride      = 16
             vertex_base = MeshOffset + 48
 
-            all_verts, all_uvs = [], []
+            if vertex_base + numVertices * stride + numMaterials * 12 > len(b):
+                raise ValueError(f"Truncated Chinatown mesh at 0x{MeshOffset:X}")
+            all_verts, all_uvs, all_normals = [], [], []
             for vi in range(numVertices):
                 off = vertex_base + vi*stride
                 x_raw = struct.unpack_from('<h', b, off+0)[0]
@@ -253,7 +282,9 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                 u_raw = struct.unpack_from('<h', b, off+12)[0]
                 v_raw = struct.unpack_from('<h', b, off+14)[0]
                 all_verts.append((x_raw/scaleFactor + PX, y_raw/scaleFactor + PY, z_raw/scaleFactor + PZ))
-                all_uvs.append(((u_raw/2048.0) + translationFactor*2, 1.0 - (v_raw/2048.0)))
+                normal_raw = struct.unpack_from('<3h', b, off+6)
+                all_normals.append(tuple(component / 32768.0 for component in normal_raw))
+                all_uvs.append((u_raw, v_raw))
 
             vert_offset = 0
             mtab = vertex_base + numVertices*stride
@@ -263,17 +294,16 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
                 vertex_count = struct.unpack_from('<H', b, m_off+2)[0]
                 render_flags = struct.unpack_from('<B', b, m_off+4)[0]
 
-                uv_mul = -2.0 if render_flags == 4 else 1.0
-
                 base = len(wv)
                 for i in range(vertex_count):
                     idx = vert_offset + i
+                    if idx >= numVertices:
+                        raise ValueError(f"Chinatown mesh part exceeds its vertex count at 0x{MeshOffset:X}")
                     wv.append(all_verts[idx])
-                    u_norm, v_norm = all_uvs[idx]
-                    u_final = u_norm + translationFactor * uv_mul
-                    wuv.append((u_final, v_norm))
+                    wn.append(all_normals[idx])
+                    wuv.append(RC.decode_world_uv(*all_uvs[idx], translationFactor, render_flags))
 
-                local = RC.tri_strip_to_tris(vertex_count)
+                local = RC.tri_strip_to_tris(vertex_count, all_verts[vert_offset:vert_offset + vertex_count])
                 mslot = mat_bank.get_slot(tex_id)
                 for (ia, ib, ic) in local:
                     wf.append((base+ia, base+ib, base+ic))
@@ -289,6 +319,10 @@ class IMPORT_OT_CW_wbl(bpy.types.Operator, ImportHelper):
         mesh = bpy.data.meshes.new(name)
         mesh.from_pydata(wv, [], wf)
         mesh.update()
+        if hasattr(mesh, 'normals_split_custom_set_from_vertices'):
+            mesh.normals_split_custom_set_from_vertices(wn)
+            if hasattr(mesh, 'use_auto_smooth'):
+                mesh.use_auto_smooth = True
 
         uv_layer = mesh.uv_layers.new(name="UVMap")
         for pi, poly in enumerate(mesh.polygons):
@@ -310,6 +344,16 @@ class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
 
     def execute(self, context):
         try:
+            # A WBL writer is not part of this source tree. Do not pretend a
+            # selected mesh can be exported with missing serialization code.
+            from ..leedsLib import worldblock
+            writer = getattr(worldblock, 'write_chinatown', None)
+            if writer is None:
+                raise NotImplementedError(
+                    'Chinatown Wars WBL writing is not implemented in this build; '
+                    'no output file was created'
+                )
+
             sel = [o for o in context.selected_objects if o.type in {'MESH', 'EMPTY', 'LIGHT'}]
             if not sel:
                 raise RuntimeError("select objects (mesh/light) to export")
@@ -322,8 +366,8 @@ class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
 
             for o in sel:
                 if o.type == 'MESH':
-                    verts, uvs, parts, sf, uvo = WC.extract_mesh_to_mdl_payload(o)
-                    blob = WC.write_mdl_bytes(
+                    verts, uvs, parts, sf, uvo = writer.extract_mesh_to_mdl_payload(o)
+                    blob = writer.write_mdl_bytes(
                         vertices_worldspace=verts, uvs=uvs, parts=parts,
                         scaleFactor=sf, translationFactor=uvo, base_transform_pos=(0,0,0)
                     )
@@ -343,13 +387,13 @@ class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
                     "ResourceID": 0, "MeshRef": idx, "Pointer": 0
                 })
 
-            blob = WC.write_wbl_bytes(
+            blob = writer.write_wbl_bytes(
                 transform_header=hdr,
                 sectors=sectors,
                 textures_by_sector=textures_by_sector,
                 mdls=mdls
             )
-            WC.write_file(self.filepath, blob)
+            writer.write_file(self.filepath, blob)
             self.report({'INFO'}, f"Exported WBL: {self.filepath}")
             return {'FINISHED'}
         except Exception as e:

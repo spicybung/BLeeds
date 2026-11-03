@@ -374,6 +374,10 @@ def restore_active_import_undo_state():
 
 def finish_active_import_progress(context=None, succeeded=True, message=None):
     global _ACTIVE_IMPORT_PROGRESS
+    global _ACTIVE_IMPORT_ROOT_COLLECTION
+    global _ACTIVE_IMPORT_OBJECTS_COLLECTION
+    global _ACTIVE_IMPORT_LINKED_COLLECTION
+    global _ACTIVE_IMPORT_2DFX_COLLECTION
     progress = _ACTIVE_IMPORT_PROGRESS
     if progress is not None:
         progress.finish(succeeded=succeeded, message=message)
@@ -388,13 +392,36 @@ def finish_active_import_progress(context=None, succeeded=True, message=None):
             except Exception:
                 pass
     restore_active_import_undo_state()
+    # These are import-session caches, not persistent scene state. Keeping
+    # Blender object references here prevents deleted/reimported meshes from
+    # being released until the next import.
+    for cache_name in (
+        "REFERENCE_DFF_CACHE", "REFERENCE_DFF_STATS_CACHE", "REFERENCE_DFF_MISS_CACHE",
+        "REFERENCE_DFF_DEBUG_ROWS", "REFERENCE_DFF_COMPARE_ROWS",
+        "CONTINUES_IN_IMG_PROOF_CACHE", "_CURRENT_PLACED_OBJECT_RECORDS",
+        "_CURRENT_PLACEMENT_REPORT_ROWS", "_PREVIOUS_MISSING_ROW_KEYS",
+    ):
+        cache = globals().get(cache_name)
+        if isinstance(cache, (dict, list, set)):
+            cache.clear()
+    reset_aggregate_group_parts()
+    _ACTIVE_IMPORT_ROOT_COLLECTION = None
+    _ACTIVE_IMPORT_OBJECTS_COLLECTION = None
+    _ACTIVE_IMPORT_LINKED_COLLECTION = None
+    _ACTIVE_IMPORT_2DFX_COLLECTION = None
+    if LVZ.DEBUG is not None:
+        try:
+            LVZ.DEBUG.close()
+        except Exception:
+            pass
+        LVZ.DEBUG = None
 
 
 UNPACK_BYTES = struct.pack("<I", LVZ.read_lvz.UNPACK)
 IMG_MDL_SCAN_LIMIT = 0x240
 IMG_MDL_MAX_IMPORT = 4096
 IMPORT_IMG_MDL_PAYLOADS_BY_DEFAULT = False
-IMPORT_LOD_PASSES_BY_DEFAULT = False
+IMPORT_LOD_PASSES_BY_DEFAULT = True
 IMPORT_DEBUG_VERBOSE_RESOURCE_DUMPS = False
 IMPORT_WRITE_DEBUG_CSVS = False
 IMPORT_DEBUG_MATRIX_SET_LIMIT = 96
@@ -681,72 +708,12 @@ def read_img_from_zip(candidate: Path) -> Tuple[Optional[bytes], Optional[str]]:
             return None, None
         return zf.read(member_name), candidate.name
 
-def read_img_next_to_lvz(lvz_path: str) -> Tuple[Optional[bytes], Optional[str]]:
-    lvz_p = Path(lvz_path)
-    folder = lvz_p.parent
-    exact_stem = lvz_p.stem
-    base_stem = normalized_copy_stem(exact_stem)
-
-    candidates: List[Path] = []
-    seen = set()
-
-    def add_candidate(candidate: Path):
-        key = str(candidate).lower()
-        if key in seen:
-            return
-        seen.add(key)
-        candidates.append(candidate)
-
-    for stem in (exact_stem, base_stem):
-        if not stem:
-            continue
-        add_candidate(folder / f"{stem}.img")
-        add_candidate(folder / f"{stem}.IMG")
-        add_candidate(folder / f"{stem}.img.zip")
-        add_candidate(folder / f"{stem}.IMG.zip")
-
-    if folder.exists():
-        for child in folder.iterdir():
-            if not child.is_file():
-                continue
-
-            lower_name = child.name.lower()
-            child_stem = None
-            if lower_name.endswith(".img"):
-                child_stem = child.stem
-            elif lower_name.endswith(".img.zip"):
-                child_stem = Path(child.stem).stem
-
-            if child_stem is None:
-                continue
-
-            if normalized_copy_stem(child_stem).lower() == base_stem.lower():
-                add_candidate(child)
-
-    for candidate in candidates:
-        if not candidate.exists():
-            continue
-
-        try:
-            if candidate.name.lower().endswith(".zip"):
-                img_bytes, img_name = read_img_from_zip(candidate)
-                if img_bytes is not None:
-                    return img_bytes, img_name
-            else:
-                return candidate.read_bytes(), candidate.name
-        except Exception:
-            continue
-
-    if folder.exists():
-        for child in folder.iterdir():
-            if not child.is_file():
-                continue
-            if child.suffix.lower() != ".rar":
-                continue
-            if normalized_copy_stem(child.stem).lower() == base_stem.lower():
-                return None, f"RAR archive found beside LVZ: {child.name}. Extract the .img beside the .lvz; BLeeds does not read RAR files directly."
-
-    return None, None
+def read_img_next_to_lvz(lvz_path):
+    from .world_selection import matchingWorldImg
+    img_path = matchingWorldImg(lvz_path)
+    if not img_path:
+        return None, None
+    return LVZ.read_img_file_bytes(img_path), img_path
 
 
 def read_ide_object_id_map_next_to_lvz(lvz_path: str, explicit_path: str = "", stem: str = ""):
@@ -1271,7 +1238,7 @@ def make_stories_model_name(stem: str, model_id: int) -> str:
     clean_stem = clean_stem[:1].upper() + clean_stem[1:]
     return f"{clean_stem}{int(model_id)}"
 
-def _candidate_reference_dff_roots():
+def candidateReferenceDffRoots():
     roots = []
     try:
         src_path = globals().get("_CURRENT_IMPORT_LVZ_PATH", "")
@@ -1297,7 +1264,7 @@ def _candidate_reference_dff_roots():
             pass
     return out
 
-def _candidate_reference_dff_zips():
+def candidateReferenceDffZips():
     zips = []
     try:
         src_path = globals().get("_CURRENT_IMPORT_LVZ_PATH", "")
@@ -1337,7 +1304,7 @@ def find_reference_dff_for_model(stem: str, model_id: int):
         f"lodch{model_id}.dff",
     ]
     roots_checked = []
-    for root in _candidate_reference_dff_roots():
+    for root in candidateReferenceDffRoots():
         for name in names:
             try:
                 p = root / name
@@ -1351,7 +1318,7 @@ def find_reference_dff_for_model(stem: str, model_id: int):
             except Exception:
                 pass
     zip_checked = []
-    for zp in _candidate_reference_dff_zips():
+    for zp in candidateReferenceDffZips():
         try:
             zip_checked.append(str(zp))
             with zipfile.ZipFile(zp, "r") as zf:
@@ -1379,7 +1346,7 @@ def find_reference_dff_for_model(stem: str, model_id: int):
         pass
     return None, "", roots_checked + [f"zip:{z}" for z in zip_checked]
 
-def _rw_section_iter(data: bytes, start: int = 0, end: Optional[int] = None):
+def rwSectionIter(data: bytes, start: int = 0, end: Optional[int] = None):
     if end is None or end > len(data):
         end = len(data)
     off = int(start)
@@ -1395,20 +1362,20 @@ def _rw_section_iter(data: bytes, start: int = 0, end: Optional[int] = None):
         yield int(sid), int(body), int(size), int(ver), int(off)
         off = next_off
 
-def _find_rw_sections_recursive(data: bytes, want_id: int, start: int = 0, end: Optional[int] = None, depth: int = 0):
+def findRwSectionsRecursive(data: bytes, want_id: int, start: int = 0, end: Optional[int] = None, depth: int = 0):
     if end is None or end > len(data):
         end = len(data)
     if depth > 16:
         return
-    for sid, body, size, ver, hdr in _rw_section_iter(data, start, end):
+    for sid, body, size, ver, hdr in rwSectionIter(data, start, end):
         if sid == int(want_id):
             yield (sid, body, size, ver, hdr)
 
 
         if size >= 12:
-            yield from _find_rw_sections_recursive(data, want_id, body, body + size, depth + 1)
+            yield from findRwSectionsRecursive(data, want_id, body, body + size, depth + 1)
 
-def _parse_rw_geometry_struct_candidates(data: bytes, body: int, size: int):
+def parseRwGeometryStructCandidates(data: bytes, body: int, size: int):
     end = int(body) + int(size)
     out = []
 
@@ -1480,15 +1447,15 @@ def _parse_rw_geometry_struct_candidates(data: bytes, body: int, size: int):
             continue
     return out
 
-def _parse_reference_dff_meshes_lightweight(dff_path: Path):
+def parseReferenceDffMeshesLightweight(dff_path: Path):
     data = Path(dff_path).read_bytes()
     meshes = []
-    for sid, body, size, ver, hdr in _find_rw_sections_recursive(data, 0x0F):
+    for sid, body, size, ver, hdr in findRwSectionsRecursive(data, 0x0F):
 
-        for csid, cbody, csize, cver, chdr in _rw_section_iter(data, body, body + size):
+        for csid, cbody, csize, cver, chdr in rwSectionIter(data, body, body + size):
             if csid != 0x01:
                 continue
-            for verts, faces, flags, uv_sets in _parse_rw_geometry_struct_candidates(data, cbody, csize):
+            for verts, faces, flags, uv_sets in parseRwGeometryStructCandidates(data, cbody, csize):
                 meshes.append((verts, faces, flags, uv_sets))
             break
     return meshes
@@ -1519,7 +1486,7 @@ def reference_dff_proof_stats_only(stem: str, model_id: int):
         })
         return None, ""
     try:
-        meshes = _parse_reference_dff_meshes_lightweight(Path(dff_path))
+        meshes = parseReferenceDffMeshesLightweight(Path(dff_path))
         all_verts = []
         all_faces = []
         for verts, faces, flags, uv_sets in meshes:
@@ -1535,7 +1502,7 @@ def reference_dff_proof_stats_only(stem: str, model_id: int):
                 "checked": " | ".join(map(str, checked[:40])),
             })
             return None, ""
-        stats = _proof_stats_from_vertices_faces(all_verts, all_faces, "reference")
+        stats = proofStatsFromVerticesFaces(all_verts, all_faces, "reference")
         stats["source"] = str(source)
         stats["path"] = str(dff_path)
         stats["import_mode"] = "stat_only_internal_lightweight_rw_dff"
@@ -1576,8 +1543,8 @@ def reference_dff_proof_stats_only(stem: str, model_id: int):
             pass
         return None, ""
 
-def _build_reference_dff_object_lightweight(stem: str, model_id: int, dff_path: Path, source: str):
-    meshes = _parse_reference_dff_meshes_lightweight(dff_path)
+def buildReferenceDffObjectLightweight(stem: str, model_id: int, dff_path: Path, source: str):
+    meshes = parseReferenceDffMeshesLightweight(dff_path)
     if not meshes:
         return None
     all_verts = []
@@ -1625,7 +1592,7 @@ def _build_reference_dff_object_lightweight(stem: str, model_id: int, dff_path: 
         pass
     return obj
 
-def _try_registered_dff_operator(dff_path: Path):
+def tryRegisteredDffOperator(dff_path: Path):
 
     candidates = (
         ("import_scene", "dff"),
@@ -1676,7 +1643,7 @@ def import_reference_dff_model_base(stem: str, model_id: int):
     operator_source = ""
     import_mode = ""
     try:
-        obj, new_objs, operator_source = _try_registered_dff_operator(Path(dff_path))
+        obj, new_objs, operator_source = tryRegisteredDffOperator(Path(dff_path))
     except Exception:
         obj = None
         new_objs = []
@@ -1694,7 +1661,7 @@ def import_reference_dff_model_base(stem: str, model_id: int):
                 pass
     else:
         try:
-            obj = _build_reference_dff_object_lightweight(stem, model_id, Path(dff_path), source)
+            obj = buildReferenceDffObjectLightweight(stem, model_id, Path(dff_path), source)
             if obj is not None:
                 import_mode = "internal_lightweight_rw_dff"
         except Exception as exc:
@@ -2712,7 +2679,7 @@ def cluster_sorted_ids_for_submodels(values, gap_limit=128):
         clusters.append(current)
     return clusters
 
-def _register_global_wrld_submodel_part(rid: int, part: dict, group_count: int):
+def registerGlobalWrldSubmodelPart(rid: int, part: dict, group_count: int):
     if not ENABLE_GLOBAL_WRLD_SUBMODEL_ID_RECOVERY:
         return
     try:
@@ -2722,7 +2689,7 @@ def _register_global_wrld_submodel_part(rid: int, part: dict, group_count: int):
     if rid < 0 or not isinstance(part, dict):
         return
     prev = WRLD_SUBMODEL_GROUP_GLOBAL_LOOKUP.get(rid)
-    def _score(p):
+    def scoreSubmodelPart(p):
         try:
             gc = int(p.get("submodel_parent_group_count", group_count))
         except Exception:
@@ -2732,7 +2699,7 @@ def _register_global_wrld_submodel_part(rid: int, part: dict, group_count: int):
         except Exception:
             verts = 0
         return (gc, verts)
-    if prev is None or _score(part) > _score(prev):
+    if prev is None or scoreSubmodelPart(part) > scoreSubmodelPart(prev):
         WRLD_SUBMODEL_GROUP_GLOBAL_LOOKUP[rid] = part
 
 def is_light_placement_pass(pass_name) -> bool:
@@ -2832,7 +2799,7 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                     part["submodel_range_start"] = int(start)
                     part["submodel_parent_group_count"] = int(group_count)
                     WRLD_SUBMODEL_GROUP_LOOKUP[(int(sector_index), int(rid))] = part
-                    _register_global_wrld_submodel_part(int(rid), part, int(group_count))
+                    registerGlobalWrldSubmodelPart(int(rid), part, int(group_count))
                     mapped += 1
             missing_ids.difference_update(set(int(v) for v in covered))
             WRLD_SUBMODEL_GROUP_ROWS.append({
@@ -2896,7 +2863,7 @@ def build_wrld_submodel_group_lookup(details, has_direct_exact_resource):
                     part["submodel_range_start"] = int(range_start)
                     part["submodel_parent_group_count"] = int(group_count)
                     WRLD_SUBMODEL_GROUP_LOOKUP[(int(sector_index), int(rid))] = part
-                    _register_global_wrld_submodel_part(int(rid), part, int(group_count))
+                    registerGlobalWrldSubmodelPart(int(rid), part, int(group_count))
                     mapped += 1
             unused_ids.difference_update(set(int(v) for v in covered))
             WRLD_SUBMODEL_GROUP_ROWS.append({
@@ -2921,13 +2888,13 @@ def get_wrld_submodel_part_descriptor_for_res_id(sector_index: int, res_id: int)
     return part, global_fallback
 
 
-def _proof_format_vec(vec):
+def proofFormatVec(vec):
     try:
         return ",".join(f"{float(v):.6f}" for v in vec)
     except Exception:
         return ""
 
-def _proof_stats_from_vertices_faces(vertices, faces, prefix: str):
+def proofStatsFromVerticesFaces(vertices, faces, prefix: str):
     out = {
         f"{prefix}_verts": int(len(vertices) if vertices is not None else 0),
         f"{prefix}_faces": int(len(faces) if faces is not None else 0),
@@ -2961,9 +2928,9 @@ def _proof_stats_from_vertices_faces(vertices, faces, prefix: str):
         h.update(f"verts={len(pts)};faces={len(faces or [])};".encode("ascii"))
         for x, y, z in sorted((round(x, 4), round(y, 4), round(z, 4)) for x, y, z in pts):
             h.update(f"{x:.4f},{y:.4f},{z:.4f};".encode("ascii"))
-        out[f"{prefix}_bbox_min"] = _proof_format_vec(mn)
-        out[f"{prefix}_bbox_max"] = _proof_format_vec(mx)
-        out[f"{prefix}_center"] = _proof_format_vec(center)
+        out[f"{prefix}_bbox_min"] = proofFormatVec(mn)
+        out[f"{prefix}_bbox_max"] = proofFormatVec(mx)
+        out[f"{prefix}_center"] = proofFormatVec(center)
         out[f"{prefix}_radius"] = float(radius)
         out[f"{prefix}_diag"] = float(diag)
         out[f"{prefix}_mesh_hash"] = h.hexdigest()[:16]
@@ -2975,18 +2942,18 @@ def proof_stats_for_mesh_object(obj, prefix: str):
     try:
         mesh = getattr(obj, "data", None)
         if mesh is None:
-            return _proof_stats_from_vertices_faces([], [], prefix)
+            return proofStatsFromVerticesFaces([], [], prefix)
         verts = [(float(v.co.x), float(v.co.y), float(v.co.z)) for v in getattr(mesh, "vertices", [])]
         faces = [tuple(int(i) for i in getattr(poly, "vertices", [])) for poly in getattr(mesh, "polygons", [])]
-        return _proof_stats_from_vertices_faces(verts, faces, prefix)
+        return proofStatsFromVerticesFaces(verts, faces, prefix)
     except Exception:
-        return _proof_stats_from_vertices_faces([], [], prefix)
+        return proofStatsFromVerticesFaces([], [], prefix)
 
 def proof_stats_for_wrld_submodel_part(part, prefix: str = "lvz"):
     verts = []
     faces = []
     if not isinstance(part, dict):
-        return _proof_stats_from_vertices_faces([], [], prefix)
+        return proofStatsFromVerticesFaces([], [], prefix)
     group = part.get("group")
     try:
         for strip in getattr(group, "strips", []) or []:
@@ -3007,7 +2974,7 @@ def proof_stats_for_wrld_submodel_part(part, prefix: str = "lvz"):
                     faces.append((base + i, base + i + 1, base + i + 2))
     except Exception:
         pass
-    return _proof_stats_from_vertices_faces(verts, faces, prefix)
+    return proofStatsFromVerticesFaces(verts, faces, prefix)
 
 def proof_verdict_for_reference_vs_lvz(ref_stats, lvz_stats):
     try:
@@ -3204,20 +3171,22 @@ def get_or_create_missing_lvz_material(texture_id: int):
 def add_material_slots(obj, material_by_res_index: Dict[int, bpy.types.Material], material_list: LVZ.MDLMaterialList, face_ranges):
     resid_to_slot: Dict[int, int] = {}
     slots_added = 0
+    existing_slots = {
+        material.name: index
+        for index, material in enumerate(obj.data.materials)
+        if material is not None
+    }
     if material_list.materials:
         for material_record in material_list.materials:
             texture_id = int(material_record.texture_id)
             material = material_by_res_index.get(texture_id)
             if material is None:
                 material = get_or_create_missing_lvz_material(texture_id)
-            existing_slot = None
-            for slot_index, existing_material in enumerate(obj.data.materials):
-                if existing_material and existing_material.name == material.name:
-                    existing_slot = slot_index
-                    break
+            existing_slot = existing_slots.get(material.name)
             if existing_slot is None:
                 obj.data.materials.append(material)
                 existing_slot = len(obj.data.materials) - 1
+                existing_slots[material.name] = existing_slot
                 slots_added += 1
             resid_to_slot[texture_id] = existing_slot
 
@@ -3234,15 +3203,11 @@ def add_material_slots(obj, material_by_res_index: Dict[int, bpy.types.Material]
                     polygons[poly_index].material_index = slot
     return slots_added
 
-def img_chunk_end(img_bytes: bytes, ordered_conts: List[int], cont: int) -> int:
+def img_chunk_end(img_bytes: bytes, cont: int, next_cont: Optional[int] = None) -> int:
     img_len = len(img_bytes)
     end = img_len
-    try:
-        index = ordered_conts.index(cont)
-        if index + 1 < len(ordered_conts):
-            end = min(end, int(ordered_conts[index + 1]))
-    except ValueError:
-        pass
+    if next_cont is not None:
+        end = min(end, int(next_cont))
     if 0 <= cont + 4 <= img_len:
         declared = LVZ.read_u32(img_bytes, cont)
         if 0x20 <= declared <= 0x04000000:
@@ -3293,8 +3258,9 @@ def collect_img_mdl_candidates(img_reader: LVZ.read_img) -> List[Dict[str, int]]
         if 0 <= cont < len(img_bytes) and cont not in first_record_by_cont:
             first_record_by_cont[cont] = record
 
-    for cont in ordered_conts:
-        end = img_chunk_end(img_bytes, ordered_conts, cont)
+    for index, cont in enumerate(ordered_conts):
+        next_cont = ordered_conts[index + 1] if index + 1 < len(ordered_conts) else None
+        end = img_chunk_end(img_bytes, cont, next_cont)
         base = find_img_mdl_payload_start(img_bytes, cont, end)
         if base is None:
             continue
@@ -3454,7 +3420,7 @@ def build_img_mdl_objects(stem: str, img_bytes: bytes, img_reader: LVZ.read_img,
         obj["blds_img_child_index"] = int(candidate.get("child_index", -1))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
-            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+            obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
         built_by_cont[cont] = obj
         LVZ.dbg(
             f"[img-mdl {import_index:04d}] cont=0x{cont:08X} payload=0x{payload:08X} "
@@ -3468,7 +3434,7 @@ def build_img_mdl_objects(stem: str, img_bytes: bytes, img_reader: LVZ.read_img,
     return built_by_cont
 
 
-def _probe_ps2_img_descriptor_for_continuation(img_bytes: bytes, off: int) -> Optional[dict]:
+def probePs2ImgDescriptorForContinuation(img_bytes: bytes, off: int) -> Optional[dict]:
 
     try:
         n = len(img_bytes)
@@ -3667,7 +3633,7 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
         del values[max(1, int(CONTINUES_IN_IMG_MAX_VARIANTS_PER_RES)):]
 
     for off in candidate_descriptor_offsets():
-        descriptor = _probe_ps2_img_descriptor_for_continuation(img_bytes, off)
+        descriptor = probePs2ImgDescriptorForContinuation(img_bytes, off)
         if descriptor is None:
             continue
         scanned_descriptors += 1
@@ -3848,7 +3814,7 @@ def iter_build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes:
         obj["blds_img_continues_material_ids"] = ",".join(str(int(x)) for x in sorted(tex_ids))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
-            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+            obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
         key = (-200000 - int(global_index), int(res_id))
         out[key] = obj
         if logged < int(CONTINUES_IN_IMG_MAX_LOG_ROWS):
@@ -4039,7 +4005,7 @@ def iter_build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reade
         obj["blds_img_overlay_raw_ptr"] = int(overlay.get("raw_ptr", 0))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
-            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+            obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
         overlay_by_sector_res[key] = obj
         parsed += 1
         if IMPORT_VERBOSE_RESOURCE_BUILD_LOGS and parsed <= 64:
@@ -4130,7 +4096,7 @@ def iter_build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: L
         obj["blds_img_overlay_raw_ptr"] = int(overlay.get("raw_ptr", 0))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
-            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+            obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
         row_overlay_by_res[key] = obj
         parsed += 1
         if IMPORT_VERBOSE_RESOURCE_BUILD_LOGS and parsed <= 64:
@@ -4257,7 +4223,7 @@ def iter_build_nested_child_mdl_objects(stem: str, img_bytes: bytes, lvz_reader:
         obj["blds_img_nested_cont"] = int(overlay.get("cont", 0))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
-            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+            obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
 
         nested_by_row_res[key] = obj
         parsed += 1
@@ -4368,7 +4334,7 @@ def iter_build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
         obj["blds_img_area_cont"] = int(row.get("cont", 0))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
-            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+            obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
         objects.append(obj)
 
         if res_id in (1179, 1725, 1802, 1828, 1881, 1887, 1989, 2184, 3528) or len(objects) <= 16:
@@ -4451,7 +4417,7 @@ def iter_build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_re
         obj["blds_img_area_cont"] = int(overlay.get("cont", 0))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
-            obj["blds_source_img_path"] = str(Path(source_lvz_path).with_name(img_name))
+            obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
         area_objects.append(obj)
 
         if len(area_objects) <= 64:
@@ -4491,7 +4457,7 @@ def stamp_source_paths(objects_by_res: Dict[int, bpy.types.Object], lvz_path: st
         try:
             obj["blds_source_lvz_path"] = str(lvz_path)
             if img_name:
-                obj["blds_source_img_path"] = str(Path(lvz_path).with_name(img_name))
+                obj["blds_source_img_path"] = str((Path(lvz_path).parent / img_name))
         except Exception:
             pass
 
@@ -4626,7 +4592,7 @@ def blds_prepare_import_collection_tree(lvz_path: str, img_name: Optional[str]):
     try:
         root["blds_kind"] = "LVZ_IMG_IMPORT_ROOT"
         root["blds_source_lvz_path"] = str(lvz_path)
-        root["blds_source_img_path"] = str(Path(lvz_path).with_name(img_name)) if img_name else ""
+        root["blds_source_img_path"] = str((Path(lvz_path).parent / img_name)) if img_name else ""
         root["blds_import_pair_name"] = str(base)
         objects["blds_kind"] = "LVZ_IMG_OBJECTS_COLLECTION"
         linked["blds_kind"] = "LVZ_IMG_LINKED_COLLECTION"
@@ -5402,7 +5368,7 @@ def blds_write_placement_res_report(lvz_path: str, details, report_rows_by_key: 
     LVZ.dbg(f"[placement-report] rows={len(ordered_rows)} statuses={dict(sorted(status_counts.items()))}")
     return out_path
 
-def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None, ide_res_to_model_id: Optional[Dict[int, int]] = None, ide_res_to_name: Optional[Dict[int, str]] = None, placement_identity_by_key: Optional[Dict[Tuple[int, int, int, int], Dict[str, object]]] = None, progress_callback=None, model_2dfx_by_game_model_id: Optional[Dict[int, List[Dict[str, object]]]] = None, model_2dfx_summary: Optional[Dict[str, object]] = None, model_2dfx_collection=None, create_game_dtz_2dfx_helpers: bool = True):
+def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object], details, overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, extra_resource_objects: Optional[List[bpy.types.Object]] = None, row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_overlay_by_sector_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_row_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_nested_overlay_by_res: Optional[Dict[Tuple[int, int], bpy.types.Object]] = None, ipl_extra_resource_objects: Optional[List[bpy.types.Object]] = None, import_stem: str = "beach", ide_ipl_to_res: Optional[Dict[int, int]] = None, ide_ipl_to_name: Optional[Dict[int, str]] = None, ide_res_to_model_id: Optional[Dict[int, int]] = None, ide_res_to_name: Optional[Dict[int, str]] = None, placement_identity_by_key: Optional[Dict[Tuple[int, int, int, int], Dict[str, object]]] = None, progress_callback=None, model_2dfx_by_game_model_id: Optional[Dict[int, List[Dict[str, object]]]] = None, model_2dfx_summary: Optional[Dict[str, object]] = None, model_2dfx_collection=None, create_game_dtz_2dfx_helpers: bool = True, import_vegetation: bool = True, import_generics: bool = True):
     if not details:
         return 0, 0, 0
 
@@ -6620,6 +6586,19 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
         keep_world_baked_submodel_matrix = bool(base_is_wrld_submodel_group and base_is_world_baked_for_matrix and should_preserve_world_baked_submodel_matrix(base_obj, matrix))
 
 
+        if not import_vegetation or not import_generics:
+            from .world_selection import worldObjectCategory
+            category = worldObjectCategory(base_obj, game_model_name)
+            excluded = ((category == 'VEGETATION' and not import_vegetation)
+                        or (category == 'GENERICS' and not import_generics))
+            if excluded:
+                blds_report_mark_status(placement_report_row, 'SKIPPED_CATEGORY', category)
+                if model_2dfx_summary is not None and game_model_id >= 0:
+                    excluded_ids = model_2dfx_summary.setdefault('excluded_world_model_ids', [])
+                    if game_model_id not in excluded_ids:
+                        excluded_ids.append(game_model_id)
+                continue
+
         if instance_index == 0:
             obj = base_obj
             used_object_ids.add(base_id)
@@ -6648,6 +6627,9 @@ def iter_apply_img_instance_transforms(built_by_res: Dict[int, bpy.types.Object]
                 pass
         else:
             obj.name = make_exact_placement_object_name(import_stem, detail, int(source_model_id_for_row if source_model_id_for_row >= 0 else (ipl_id if used_ipl_model_fallback else res_id)), instance_index, exact_missing=False)
+
+        if game_model_name:
+            obj.name = '%s [%s]' % (game_model_name, obj.name)
 
         try:
             obj["blds_visible_placement_instance"] = True
@@ -7725,6 +7707,8 @@ def blds_import_game_entity_2dfx_helpers(collection, import_stem: str, model_eff
     if collection is None or not model_effects:
         return 0
     entities = list(summary.get("effect_entities", []) or [])
+    from .world_selection import namedWorldCategory
+    model_metadata = summary.get('model_meta_by_id', {})
     active_cells = {
         (int(record.get("sector_x", 0)), int(record.get("sector_y", 0)))
         for record in (sector_records or [])
@@ -7736,6 +7720,13 @@ def blds_import_game_entity_2dfx_helpers(collection, import_stem: str, model_eff
     selected_by_pool = {}
     selected_by_reason = {}
     for entity in entities:
+        model_id = int(entity.get('model_id', -1))
+        category = namedWorldCategory(model_metadata.get(model_id, {}).get('model_name', ''))
+        if ((category == 'VEGETATION' and not summary.get('import_vegetation', True))
+                or (category == 'GENERICS' and not summary.get('import_generics', True))):
+            continue
+        if int(entity.get('model_id', -1)) in summary.get('excluded_world_model_ids', set()):
+            continue
         try:
             x, y, z = entity.get("position", (0.0, 0.0, 0.0))
             sector_xy = blds_nearest_sector_xy_for_world_position(x, y, game_hint)
@@ -8215,7 +8206,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             )
     return made
 
-def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True):
+def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True, import_textures: bool = True, import_lods: bool = IMPORT_LOD_PASSES_BY_DEFAULT, import_vegetation: bool = True, import_generics: bool = True):
     if not lvz_path:
         operator.report({'ERROR'}, "No LVZ selected.")
         return {'CANCELLED'}
@@ -8226,7 +8217,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     stem = normalized_copy_stem(Path(lvz_path).stem) or Path(lvz_path).stem
     globals()["_CURRENT_IMPORT_STEM"] = stem
     globals()["_CURRENT_PLACED_OBJECT_RECORDS"] = []
-    log_path = str(Path(lvz_path).with_suffix("")) + "_blds_import.log" if write_debug_log else None
+    log_path = str(Path(lvz_path).with_suffix("")) + "_blds_import.txt" if write_debug_log else None
     LVZ.DEBUG = LVZ.DebugOut(debug_print, write_debug_log, log_path)
     LVZ.dbg(f"[log] live import log: {LVZ.DEBUG.file_path if LVZ.DEBUG is not None else log_path}")
     globals()["_CURRENT_IMPORT_LVZ_PATH"] = lvz_path
@@ -8366,7 +8357,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     use_swizzle = platform_uses_ps2_swizzle(platform)
     lvz.use_swizzle = use_swizzle
     LVZ.dbg(f"[platform] auto-detected {platform}; texture swizzle={'PS2' if use_swizzle else 'PSP/no-PS2-swizzle'}")
-    LVZ.dbg(f"[img] importing LOD/SUPERLOD passes: {IMPORT_LOD_PASSES_BY_DEFAULT}")
+    LVZ.dbg(f"[img] importing LOD/SUPERLOD passes: {import_lods}")
     LVZ.dbg("")
 
     LVZ.dbg("— Slave Group Table —")
@@ -8402,6 +8393,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     yield None
     lvz.decode_textures(
         rows,
+        decode_pixels=import_textures,
         progress_callback=lambda index, total: progress.update_range(18, 22, index, total, "Importing textures..."),
     )
 
@@ -8419,7 +8411,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         LVZ.dbg(f"[img] extra AREA/triggered candidate containers: {len(extra_container_records)}")
         sector_details = img.enumerate_sector_details(
             max_resource_id=res_count,
-            include_lod=IMPORT_LOD_PASSES_BY_DEFAULT,
+            include_lod=import_lods,
             dedupe_visible=True,
             progress_callback=lambda index, total: progress.update_range(22, 26, index, total, "Reading placements..."),
         )
@@ -8449,7 +8441,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         try:
             from collections import Counter
             pass_counts = Counter(str(detail[14]).upper() for detail in details if len(detail) > 14)
-            pass_order = ("UNDERWATER", "ROADS", "NORMAL", "NOZWRITE", "LIGHTS", "TRANSPARENT")
+            pass_order = ("SUPERLOD", "UNDERWATER", "LOD", "ROADS", "NORMAL", "NOZWRITE", "LIGHTS", "TRANSPARENT")
             pass_text = ", ".join(f"{name}={int(pass_counts.get(name, 0))}" for name in pass_order if pass_counts.get(name, 0))
             if pass_text:
                 LVZ.dbg(f"Placements by render pass: {pass_text}")
@@ -8556,6 +8548,15 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         wanted_model_ids=None,
     )
     two_dfx_summary["helpers_enabled"] = bool(create_game_dtz_2dfx_helpers)
+    two_dfx_summary["import_vegetation"] = import_vegetation
+    two_dfx_summary["import_generics"] = import_generics
+    model_metadata = two_dfx_summary.get('model_meta_by_id', {})
+    for identity in placement_identity_by_key.values():
+        metadata = model_metadata.get(identity['game_model_id'], {})
+        identity['model_name'] = metadata.get('model_name', '')
+    LVZ.dbg('[identity] DTZ hash-matched model names: %d' % sum(
+        bool(identity['model_name']) for identity in placement_identity_by_key.values()
+    ))
     two_dfx_summary["identity_basis"] = "GAME_DTZ_CENTITY_MODEL_INDEX"
     two_dfx_summary["identity_matches"] = int(matched_identity_rows)
     two_dfx_summary["area_model_info_mapped_res_ids"] = len(area_model_info_by_res)
@@ -9196,6 +9197,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 model_2dfx_summary=two_dfx_summary,
                 model_2dfx_collection=model_2dfx_collection,
                 create_game_dtz_2dfx_helpers=False,
+                import_vegetation=import_vegetation,
+                import_generics=import_generics,
             )
             if create_game_dtz_2dfx_helpers and str(two_dfx_summary.get("status", "")) == "ok":
                 progress.update(98, "Importing 2DFX...")
@@ -9348,6 +9351,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             LVZ.DEBUG.flush()
     operator.report({'INFO'}, f"Imported LVZ+IMG: {len(details)} map placements, {linked_instances} linked copies, {len(built_by_res)} LVZ models, {len(overlay_by_sector_res)} IMG models, {int(two_dfx_summary.get('effects_imported', 0))} model 2DFX helpers, {removed_unplaced} unused model bases cleaned up ({platform}).")
     progress.finish(succeeded=True, message="Import complete")
+    finish_active_import_progress(context, succeeded=True)
     return {'FINISHED'}
 
 

@@ -21,6 +21,7 @@ import bpy
 from bpy.types import Operator
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import StringProperty, BoolProperty
+from . import drawImportLogOptions
 from ..leedsLib import lvz_img as LVZ
 from ..ops import lvz_img_importer
 from ..ops.world_selection import iterImportWorldSelection
@@ -35,15 +36,15 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
 
     filename_ext = ".lvz"
 
-    debug_print: BoolProperty(
+    print_debug_log: BoolProperty(
         name="Print Debug Log",
         description="Print the full LVZ+IMG import trace in Blender's system console",
         default=False,
     )
-    write_debug_log: BoolProperty(
-        name="Export Log",
-        description="Write a concise live import log beside the selected LVZ",
-        default=True,
+    print_text_log: BoolProperty(
+        name="Print Text Log",
+        description="Save the LVZ+IMG import trace to a text file beside the selected world",
+        default=False,
     )
 
     filter_glob: StringProperty(
@@ -52,10 +53,33 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         maxlen=255,
     )
 
+    import_textures: BoolProperty(name="Import Textures", default=True)
+    import_lods: BoolProperty(
+        name="Import LODs and SuperLODs",
+        description="Include LOD and SuperLOD models used at a distance",
+        default=True,
+    )
+
+    import_vegetation: BoolProperty(
+        name="Import Vegetation",
+        description="Include trees and plants. Models that cannot be identified are kept",
+        default=True,
+    )
+    import_generics: BoolProperty(
+        name="Import Generics",
+        description="Include lamps, benches, bins, and other identified props",
+        default=True,
+    )
+
     def draw(self, context):
         layout = self.layout
-        layout.prop(self, "write_debug_log")
-        layout.prop(self, "debug_print")
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        layout.prop(self, "import_textures")
+        layout.prop(self, "import_lods")
+        layout.prop(self, "import_vegetation")
+        layout.prop(self, "import_generics")
+        drawImportLogOptions(layout, self)
 
     def execute(self, context):
         self._import_iterator = iterImportWorldSelection(
@@ -63,15 +87,19 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
             context=context,
             filepath=self.filepath,
             apply_img_transforms=True,
-            debug_print=self.debug_print,
-            write_debug_log=self.write_debug_log,
+            debug_print=self.print_debug_log,
+            write_debug_log=self.print_text_log,
             import_game_dtz_2dfx=True,
+            import_textures=self.import_textures,
+            import_lods=self.import_lods,
+            import_vegetation=self.import_vegetation,
+            import_generics=self.import_generics,
         )
         self._timer = context.window_manager.event_timer_add(0.05, window=context.window)
         context.window_manager.modal_handler_add(self)
         return {'RUNNING_MODAL'}
 
-    def _stop_timer(self, context):
+    def stopTimer(self, context):
         try:
             if getattr(self, "_timer", None) is not None:
                 context.window_manager.event_timer_remove(self._timer)
@@ -85,7 +113,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
                 self._import_iterator.close()
             except Exception:
                 pass
-            self._stop_timer(context)
+            self.stopTimer(context)
             lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import cancelled")
             self.report({'WARNING'}, "LVZ + IMG import cancelled")
             return {'CANCELLED'}
@@ -96,7 +124,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         try:
             next(self._import_iterator)
         except StopIteration as finished:
-            self._stop_timer(context)
+            self.stopTimer(context)
             result = finished.value if finished.value is not None else {'FINISHED'}
             lvz_img_importer.finish_active_import_progress(context, succeeded=('FINISHED' in result))
             if 'FINISHED' in result:
@@ -107,7 +135,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
                 self._import_iterator.close()
             except Exception:
                 pass
-            self._stop_timer(context)
+            self.stopTimer(context)
             lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import failed")
             self.report({'ERROR'}, "LVZ + IMG import failed: {}".format(exc))
             return {'CANCELLED'}
@@ -118,7 +146,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
             self._import_iterator.close()
         except Exception:
             pass
-        self._stop_timer(context)
+        self.stopTimer(context)
         lvz_img_importer.finish_active_import_progress(context, succeeded=False, message="Import cancelled")
 
 class EXPORT_SCENE_OT_stories_lvz_img(Operator, ExportHelper):
@@ -137,45 +165,45 @@ class EXPORT_SCENE_OT_stories_lvz_img(Operator, ExportHelper):
 
     source_lvz_path: StringProperty(
         name="Source LVZ",
-        description="Original LVZ to use as the LVZ carrier/base. Imported objects stamp this automatically.",
+        description="Original LVZ file. Filled in from the imported world",
         default="",
         subtype='FILE_PATH',
     )
 
     source_img_path: StringProperty(
         name="Source IMG",
-        description="Original IMG to rewrite. If empty, BLeeds looks next to Source LVZ.",
+        description="Original IMG file. Leave blank to find the matching file",
         default="",
         subtype='FILE_PATH',
     )
 
     selected_only: BoolProperty(
-        name="Selected objects only",
-        description="Only update IMG rows for selected imported LVZ objects",
+        name="Selected Objects Only",
+        description="Export changes to selected objects only",
         default=False,
     )
 
     update_transforms: BoolProperty(
-        name="Write IMG transforms",
-        description="Write live Blender object matrix_world values back into IMG instance rows",
+        name="Save Position, Rotation and Scale",
+        description="Save object positions, rotations, and scales",
         default=True,
     )
 
     update_bounds: BoolProperty(
-        name="Write IMG bounds",
-        description="Recalculate the IMG half-float bounding sphere from each mesh object's local vertices",
+        name="Update Model Bounds",
+        description="Update each model’s bounds to fit its mesh",
         default=True,
     )
 
     update_all_matching_instances: BoolProperty(
-        name="Update all matching RES instances",
-        description="When an object has no exact IMG row stamp, update every IMG row with the same RES id instead of only the first one",
+        name="Update All Copies",
+        description="When the original placement is unknown, update all copies of that model",
         default=False,
     )
 
     update_textures: BoolProperty(
-        name="Write LVZ textures marked dirty",
-        description="Only re-encode LVZ textures whose material/image is explicitly marked dirty/exportable; unchanged textures are preserved",
+        name="Save Edited Textures",
+        description="Save textures marked for export",
         default=False,
     )
 
@@ -186,13 +214,15 @@ class EXPORT_SCENE_OT_stories_lvz_img(Operator, ExportHelper):
     )
 
     write_debug_log: BoolProperty(
-        name="Write export log",
+        name="Print Text Log",
         description="Write an LVZ+IMG export log next to the output LVZ",
         default=True,
     )
 
     def draw(self, context):
         layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
         layout.prop(self, "source_lvz_path")
         layout.prop(self, "source_img_path")
         layout.separator()
@@ -200,13 +230,8 @@ class EXPORT_SCENE_OT_stories_lvz_img(Operator, ExportHelper):
         layout.prop(self, "update_transforms")
         layout.prop(self, "update_bounds")
         layout.prop(self, "update_all_matching_instances")
-        layout.separator()
         layout.prop(self, "update_textures")
-        if self.update_textures:
-            box = layout.box()
-            box.label(text="Only textures marked dirty/exportable are rewritten.")
-            box.label(text="Unmarked LVZ texture blobs are preserved.")
-            box.label(text="Texture swizzle is auto-detected from the LVZ platform.")
+        layout.separator()
         layout.prop(self, "write_debug_log")
 
     def invoke(self, context, event):

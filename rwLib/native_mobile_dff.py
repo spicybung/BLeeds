@@ -256,11 +256,11 @@ def rebuildMobileGeometry(chunk, surfaces, material_list=None):
     lower, upper, sphere = geometryBounds(vertices)
     bbox = encodePosition(lower, scale, translation) + encodePosition(upper, scale, translation)
     flags = source.leeds_global_header['vertex_section_flags']
-    payload = bytearray(struct.pack('<4fIIHH6h6f', *sphere, geometry_size | (part_count << 20), flags,
+    payload = bytearray(struct.pack('<4fIIHH6h6f', *sphere, geometry_size | (part_count << 20), flags, 
                                     runtime_count, header_size, *bbox, *scale, *translation))
     offset = 0
     for part in parts:
-        payload.extend(struct.pack('<4f2fIIHH6h', *part['sphere'], *part['uv_scale'], part['flags'],
+        payload.extend(struct.pack('<4f2fIIHH6h', *part['sphere'], *part['uv_scale'], part['flags'], 
                                    offset, part['count'], part['material'], *part['bbox']))
         offset += len(part['packet'])
     for part in parts:
@@ -320,7 +320,7 @@ def buildMobileMaterialList(descriptions, source_sections):
                 texture.payload = b''.join(child.toBytes() for child in texture_children)
             else:
                 texture = RenderWareChunk(6, version, b''.join(child.toBytes() for child in (
-                    RenderWareChunk(1, version, struct.pack('<I', 0x1106)),
+                    RenderWareChunk(1, version, struct.pack('<I', 0x1106)), 
                     RenderWareChunk(2, version, name), RenderWareChunk(2, version, bytes(4)),
                     RenderWareChunk(3, version, b''))))
                 children.insert(1, texture)

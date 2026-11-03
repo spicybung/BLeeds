@@ -20,9 +20,10 @@ import os
 import bpy
 from bpy.types import Operator, Panel
 from bpy_extras.io_utils import ImportHelper, ExportHelper
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, StringProperty
 
 from ..ops import tex_importer
+from . import drawImportLogOptions, runImport
 
 
 class IMPORT_OT_tex(Operator, ImportHelper):
@@ -40,7 +41,16 @@ class IMPORT_OT_tex(Operator, ImportHelper):
         maxlen=255,
     )
 
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
+
+    def draw(self, context):
+        drawImportLogOptions(self.layout, self)
+
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         try:
             images = tex_importer.decode_chk_to_blender_images(
                 self.filepath,
@@ -48,15 +58,18 @@ class IMPORT_OT_tex(Operator, ImportHelper):
                 prefix="",
             )
         except Exception as exc:
+            print("Texture import failed: {}".format(exc))
             self.report({"ERROR"}, f"Failed to import textures: {exc}")
             return {"CANCELLED"}
 
         name = bpy.path.display_name_from_filepath(self.filepath)
         count = len(images)
+        print("Decoded {} textures from {}".format(count, self.filepath))
         model_objects = [obj for obj in context.scene.objects
                          if obj.get("bleeds_mdl_detected_game") or obj.get("bleeds_model_game")]
         if images and model_objects:
             tex_importer.apply_images_to_imported_mdl_materials(images, model_objects)
+            print("Applied textures to {} imported model objects".format(len(model_objects)))
             from ..ops.uv_playback import requestNativeUvPlayback
             requestNativeUvPlayback(context)
         if count == 0:

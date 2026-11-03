@@ -91,16 +91,17 @@ def object_should_export_as_box(obj, force_aabb: bool = False) -> bool:
         return True
     return False
 
-def collect_mesh_faces(obj):
+def collect_mesh_faces(obj, world_vertices=None):
     verts = []
     faces = []
     if obj.type != "MESH" or obj.data is None:
         return verts, faces
 
     mesh = obj.data
-    for vertex in mesh.vertices:
-        co = obj.matrix_world @ vertex.co
-        verts.append((float(co.x), float(co.y), float(co.z)))
+    if world_vertices is not None and len(world_vertices) == len(mesh.vertices):
+        verts = world_vertices
+    else:
+        verts = world_points_from_object(obj)
 
     for poly in mesh.polygons:
         indices = list(poly.vertices)
@@ -140,7 +141,7 @@ def build_export_models(context, selected_only: bool = True, force_selected_to_a
             })
             continue
 
-        verts, faces = collect_mesh_faces(obj)
+        verts, faces = collect_mesh_faces(obj, world_vertices=points)
         if verts and faces:
             models.append({
                 "name": obj.name,

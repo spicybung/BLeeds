@@ -28,16 +28,40 @@ def worldArchiveStem(path):
     return re.sub(r'\s*\(\d+(?:-\d+)?\)$', '', stem).casefold()
 
 
+def worldCompanionDirectories(path):
+    parent = Path(path).parent
+    directories = [parent]
+    if parent.name.casefold() in ('lvz', 'img', 'models'):
+        directories.append(parent.parent)
+    for base in (parent, parent.parent):
+        if not base.is_dir():
+            continue
+        for child in sorted(base.iterdir()):
+            if child.is_dir() and child.name.casefold() in ('lvz', 'img', 'models'):
+                directories.append(child)
+                for nested in sorted(child.iterdir()):
+                    if nested.is_dir() and nested.name.casefold() in ('lvz', 'img'):
+                        directories.append(nested)
+    return list(dict.fromkeys(directories))
+
+
 def matchingWorldImg(lvz_path):
     lvz = Path(lvz_path)
-    exact = [lvz.with_suffix(suffix) for suffix in ('.img', '.IMG', '.img.zip', '.IMG.zip')]
-    for candidate in exact:
-        if candidate.is_file():
-            return str(candidate)
-    matches = sorted(child for child in lvz.parent.iterdir() if child.is_file()
-                     and (child.suffix.lower() == '.img' or child.name.lower().endswith('.img.zip'))
-                     and worldArchiveStem(child) == worldArchiveStem(lvz))
-    return str(matches[0]) if len(matches) == 1 else ''
+    for directory in worldCompanionDirectories(lvz):
+        matches = sorted(
+            child for child in directory.iterdir()
+            if child.is_file()
+            and (child.suffix.casefold() == '.img' or child.name.casefold().endswith('.img.zip'))
+            and worldArchiveStem(child) == worldArchiveStem(lvz)
+        )
+        exact = [child for child in matches if child.name.casefold() == lvz.stem.casefold() + '.img']
+        if len(exact) == 1:
+            return str(exact[0])
+        if len(matches) == 1:
+            return str(matches[0])
+        if matches:
+            raise ValueError('More than one IMG matches %s in %s' % (lvz.name, directory))
+    return ''
 
 
 def resolveWorldSelection(filepath):
@@ -47,18 +71,21 @@ def resolveWorldSelection(filepath):
     extension = selected.suffix.lower()
     if extension == '.lvz':
         return [str(selected)], ''
-    lvz_files = sorted(child for child in selected.parent.iterdir()
-                       if child.is_file() and child.suffix.lower() == '.lvz')
+    lvz_files = sorted({
+        child for directory in worldCompanionDirectories(selected)
+        for child in directory.iterdir()
+        if child.is_file() and child.suffix.casefold() == '.lvz'
+    })
     if extension == '.img':
         matches = [child for child in lvz_files if worldArchiveStem(child) == worldArchiveStem(selected)]
         if len(matches) != 1:
-            raise ValueError("Put the matching same-name LVZ beside %s." % selected.name)
+            raise ValueError("No unique matching LVZ was found for %s in the world folders." % selected.name)
         return [str(matches[0])], ''
     if extension == '.dtz':
         decompress_game_dtz(selected.read_bytes())
         paired = [str(child) for child in lvz_files if matchingWorldImg(child)]
         if not paired:
-            raise ValueError("GAME.DTZ needs its LVZ/IMG world files beside it. Put the matching pairs in the same folder.")
+            raise ValueError("No matching LVZ/IMG pairs were found beside GAME.DTZ or in its LVZ, IMG, or MODELS folders.")
         return paired, str(selected)
     raise ValueError("Choose GAME.DTZ, an LVZ, or its IMG companion.")
 
@@ -73,3 +100,35 @@ def iterImportWorldSelection(operator, context, filepath, **options):
         if result is not None and 'CANCELLED' in result:
             return result
     return {'FINISHED'}
+
+
+def namedWorldCategory(name):
+    name = Path(str(name).replace('\\', '/')).stem.casefold()
+    name = re.sub(r'^(?:slod|lod)[_\-]*', '', name)
+    if re.match(r'^(?:vegetation|veg|tree|palm|bush|shrub|hedge|fern|plant|grass)(?:[_\-0-9]|$)', name):
+        return 'VEGETATION'
+    if re.match(r'^(?:generic|gen|lamppost|lampost|streetlamp|trafficlight|traffic_light|bench|bin|bollard|hydrant|phonebooth|mailbox)(?:[_\-0-9]|$)', name):
+        return 'GENERICS'
+    return 'UNKNOWN'
+
+
+def worldObjectCategory(obj, model_name=''):
+    category = str(obj.get('blds_world_category', '')).upper()
+    if category in ('VEGETATION', 'GENERICS'):
+        return category
+    for name in (model_name, obj.get('blds_game_model_name', ''), obj.name):
+        category = namedWorldCategory(name)
+        if category != 'UNKNOWN':
+            return category
+    categories = []
+    for material in getattr(getattr(obj, 'data', None), 'materials', ()):
+        if material is None:
+            return 'UNKNOWN'
+        name = material.get('bleeds_texture_name', '') or material.name
+        # Grass materials can belong to terrain, so they do not classify a mesh.
+        if str(name).casefold().startswith('grass'):
+            return 'UNKNOWN'
+        categories.append(namedWorldCategory(name))
+    if categories and len(set(categories)) == 1:
+        return categories[0]
+    return 'UNKNOWN'

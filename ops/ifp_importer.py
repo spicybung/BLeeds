@@ -28,7 +28,10 @@ except Exception:
     Quaternion = None
     Vector = None
 
-from .anim_importer import findSelectedArmature, getBlenderRestLocalMatrix, ensureTextBlock
+from .anim_importer import (
+    findSelectedArmature, getBlenderRestLocalMatrix, ensureTextBlock,
+    iterActionCurves, makePoseQuaternionContinuous,
+)
 from ..leedsLib.ifp import ManhuntIfpAnimation, ManhuntIfpFile, ManhuntIfpTrack, readManhuntIfpFile
 
 
@@ -287,11 +290,11 @@ def resetArmaturePose(armature_object) -> int:
     return count
 
 
-def setActionInterpolation(action, interpolation: str = "LINEAR") -> None:
+def setActionInterpolation(action, interpolation: str = "LINEAR", slot=None) -> None:
     if action is None:
         return
     try:
-        for curve in action.fcurves:
+        for curve in iterActionCurves(action, slot):
             for point in curve.keyframe_points:
                 point.interpolation = interpolation
     except Exception:
@@ -319,6 +322,8 @@ def applyManhuntIfpAnimation(
         raise RuntimeError("Blender modules are not available")
     if armature_object is None or getattr(armature_object, "type", None) != "ARMATURE":
         raise RuntimeError("Select a Manhunt armature or one of its child meshes before importing IFP")
+    if not math.isfinite(fps) or fps <= 0.0 or not math.isfinite(start_frame):
+        raise ValueError("Choose a positive FPS and a finite start frame")
 
     rig_family = getMh2RigFamily(armature_object)
     if rig_family not in ("MANHUNT_2", "MANHUNT_1") and not allow_foreign_rig:
@@ -327,6 +332,8 @@ def applyManhuntIfpAnimation(
         )
 
     lookup, source_by_id, duplicates = buildMh2PoseBoneLookup(armature_object)
+    if not any(track.frames and int(track.bone_id) in lookup for track in animation.tracks):
+        raise ValueError("No animation tracks match the selected armature")
     previous_action_name = None
     armature_object.animation_data_create()
     try:
@@ -378,6 +385,7 @@ def applyManhuntIfpAnimation(
         rest_inverse = rest_local.inverted_safe()
         pose_bone.rotation_mode = "QUATERNION"
 
+        previous_quaternion = None
         for frame in track.frames:
             target_local = composeMh2AbsoluteLocal(
                 rest_local,
@@ -397,6 +405,7 @@ def applyManhuntIfpAnimation(
                 rotation.normalize()
             pose_bone.location = location
             pose_bone.rotation_quaternion = rotation
+            previous_quaternion = makePoseQuaternionContinuous(pose_bone, previous_quaternion)
             pose_bone.scale = scale
             frame_number = float(start_frame) + float(frame.time) * float(fps)
             pose_bone.keyframe_insert(data_path="location", frame=frame_number)
@@ -414,7 +423,7 @@ def applyManhuntIfpAnimation(
             )
         )
 
-    setActionInterpolation(action, "LINEAR")
+    setActionInterpolation(action, "LINEAR", getattr(armature_object.animation_data, 'action_slot', None))
     armature_object.animation_data.action = action
     action["bleeds_ifp_mapped_tracks"] = int(mapped_count)
     action["bleeds_ifp_keyed_frames"] = int(keyed_frame_count)

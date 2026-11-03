@@ -23,6 +23,7 @@ import math
 import csv
 import re
 import zipfile
+from bisect import bisect_right
 import numpy as np
 
 from pathlib import Path
@@ -40,7 +41,7 @@ from mathutils import Matrix
 CONCISE_IMPORT_LOG = True
 
 
-def _concise_import_log_message(message):
+def conciseImportLogMessage(message):
     text = str(message)
     stripped = text.strip()
     if not CONCISE_IMPORT_LOG:
@@ -266,10 +267,12 @@ class DebugOut:
         self._line_count = 0
         self._fh = None
         self._concise_seen = set()
+        self._pending_log_bytes = 0
+        self._last_log_flush = time.monotonic()
         if self.write_file and self.file_path:
-            self._open_live_log()
+            self.openLiveLog()
 
-    def _open_live_log(self):
+    def openLiveLog(self):
         paths = []
         if self.file_path:
             paths.append(Path(self.file_path))
@@ -290,7 +293,7 @@ class DebugOut:
                     continue
                 tried.add(key)
                 path.parent.mkdir(parents=True, exist_ok=True)
-                self._fh = path.open("w", encoding="utf-8", buffering=1)
+                self._fh = path.open("w", encoding="utf-8", buffering=65536)
                 self.file_path = str(path)
                 return
             except Exception as e:
@@ -305,7 +308,7 @@ class DebugOut:
         if self.enable_console:
             print(raw_msg)
 
-        msg = _concise_import_log_message(raw_msg)
+        msg = conciseImportLogMessage(raw_msg)
         if msg is None:
             return
         once_prefixes = (
@@ -328,8 +331,14 @@ class DebugOut:
             self._line_count += 1
             if self._fh is not None:
                 try:
-                    self._fh.write(str(msg) + "\n")
-                    self._fh.flush()
+                    line = str(msg) + "\n"
+                    self._fh.write(line)
+                    self._pending_log_bytes += len(line)
+                    now = time.monotonic()
+                    if self._pending_log_bytes >= 65536 or now - self._last_log_flush >= 0.5:
+                        self._fh.flush()
+                        self._pending_log_bytes = 0
+                        self._last_log_flush = now
                 except Exception as e:
                     print(f"[log] live write failed '{self.file_path}': {e}")
                     try:
@@ -347,6 +356,8 @@ class DebugOut:
         try:
             if self._fh is not None:
                 self._fh.flush()
+                self._pending_log_bytes = 0
+                self._last_log_flush = time.monotonic()
                 return
             Path(self.file_path).write_text("\n".join(self._buf), encoding="utf-8")
         except Exception as e:
@@ -816,16 +827,24 @@ def get_image_pixels_rgba_u8(image: bpy.types.Image) -> Tuple[np.ndarray, int, i
     width, height = int(image.size[0]), int(image.size[1])
     if width <= 0 or height <= 0:
         raise ValueError(f"Image '{image.name}' has invalid size {width}x{height}")
-    try:
-        pixels = np.array(image.pixels[:], dtype=np.float32)
-    except Exception as exc:
-        raise ValueError(f"Could not read pixels for image '{image.name}': {exc}")
     expected = width * height * 4
-    if pixels.size < expected:
-        raise ValueError(f"Image '{image.name}' pixel buffer is truncated ({pixels.size} < {expected})")
-    pixels = pixels[:expected].reshape((height, width, 4))
-    pixels = np.clip(pixels * 255.0 + 0.5, 0.0, 255.0).astype(np.uint8)
-    return pixels, width, height
+    pixel_count = len(image.pixels)
+    if pixel_count < expected:
+        raise ValueError(f"Image '{image.name}' pixel buffer is truncated")
+    pixels = np.empty(expected, dtype=np.float32)
+    try:
+        if pixel_count != expected:
+            raise ValueError("Image pixel buffer has extra elements")
+        image.pixels.foreach_get(pixels)
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        try:
+            pixels[:] = image.pixels[:expected]
+        except Exception as exc:
+            raise ValueError(f"Could not read pixels for image '{image.name}': {exc}") from exc
+    np.multiply(pixels, 255.0, out=pixels)
+    np.add(pixels, 0.5, out=pixels)
+    np.clip(pixels, 0.0, 255.0, out=pixels)
+    return pixels.astype(np.uint8).reshape((height, width, 4)), width, height
 
 def choose_texture_dimensions_for_blob(image_width: int, image_height: int, target_pixels: int) -> Tuple[int, int]:
     if image_width > 0 and image_height > 0 and image_width * image_height == target_pixels:
@@ -856,7 +875,7 @@ def choose_texture_dimensions_for_blob(image_width: int, image_height: int, targ
 def resize_rgba_nearest(src: np.ndarray, dst_width: int, dst_height: int) -> np.ndarray:
     src_height, src_width = src.shape[0], src.shape[1]
     if src_width == dst_width and src_height == dst_height:
-        return src.copy()
+        return src
     x_idx = np.floor(np.arange(dst_width, dtype=np.float32) * (float(src_width) / float(dst_width))).astype(np.int32)
     y_idx = np.floor(np.arange(dst_height, dtype=np.float32) * (float(src_height) / float(dst_height))).astype(np.int32)
     x_idx = np.clip(x_idx, 0, src_width - 1)
@@ -871,29 +890,38 @@ def reduce_color_for_palette_key(color: Iterable[int]) -> Tuple[int, int, int, i
 
 def build_4bpp_palette_and_indices(rgba: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     flat = rgba.reshape((-1, 4))
-    histogram: Dict[Tuple[int, int, int, int], int] = {}
-    for color in flat:
-        key = reduce_color_for_palette_key(color)
-        histogram[key] = histogram.get(key, 0) + 1
-    if not histogram:
+    if flat.size == 0:
         palette = np.zeros((16, 4), dtype=np.uint8)
         indices = np.zeros((flat.shape[0],), dtype=np.uint8)
         return palette, indices
-    ordered = sorted(histogram.items(), key=lambda item: (-item[1], item[0]))
-    colors = [item[0] for item in ordered[:16]]
-    while len(colors) < 16:
-        colors.append((0, 0, 0, 0))
-    palette = np.asarray(colors[:16], dtype=np.uint8)
-    pal_rgb = palette[:, :3].astype(np.int16)
-    pal_a = palette[:, 3].astype(np.int16)
-    src_rgb = flat[:, :3].astype(np.int16)
-    src_a = flat[:, 3].astype(np.int16)
+
+    r = flat[:, 0].astype(np.uint32) & 0xF8
+    g = flat[:, 1].astype(np.uint32) & 0xF8
+    b = flat[:, 2].astype(np.uint32) & 0xF8
+    a = flat[:, 3].astype(np.uint32)
+    keys = r | (g << 8) | (b << 16) | (a << 24)
+    keys[flat[:, 3] < 8] = 0
+    unique_keys, counts = np.unique(keys, return_counts=True)
+    order = np.lexsort((
+        (unique_keys >> 24) & 255,
+        (unique_keys >> 16) & 255,
+        (unique_keys >> 8) & 255,
+        unique_keys & 255,
+        -counts,
+    ))
+    palette = np.zeros((16, 4), dtype=np.uint8)
+    for index, color in enumerate(unique_keys[order[:16]]):
+        palette[index] = (int(color & 255), int((color >> 8) & 255),
+                          int((color >> 16) & 255), int((color >> 24) & 255))
+
+    palette_values = palette.astype(np.int32)
     indices = np.empty((flat.shape[0],), dtype=np.uint8)
-    for i in range(flat.shape[0]):
-        drgb = pal_rgb - src_rgb[i]
-        da = pal_a - src_a[i]
-        dist = (drgb[:, 0] * drgb[:, 0]) + (drgb[:, 1] * drgb[:, 1]) + (drgb[:, 2] * drgb[:, 2]) + ((da * da) // 2)
-        indices[i] = int(np.argmin(dist)) & 0x0F
+    for start in range(0, len(flat), 8192):
+        stop = min(start + 8192, len(flat))
+        difference = flat[start:stop, None, :].astype(np.int32) - palette_values[None, :, :]
+        squared = difference * difference
+        distance = squared[:, :, 0] + squared[:, :, 1] + squared[:, :, 2] + (squared[:, :, 3] // 2)
+        indices[start:stop] = np.argmin(distance, axis=1).astype(np.uint8)
     return palette, indices
 
 def pack_4bpp_indices_lo_first(indices: np.ndarray) -> bytes:
@@ -904,15 +932,23 @@ def pack_4bpp_indices_lo_first(indices: np.ndarray) -> bytes:
     hi = (idx[1::2] & 0x0F) << 4
     return bytes((lo | hi).astype(np.uint8))
 
+def ps2SwizzleAddressGrid(width: int, height: int) -> np.ndarray:
+    logw = read_lvz.log2Pow2(width)
+    x = np.arange(width, dtype=np.int32)[None, :]
+    y = np.arange(height, dtype=np.int32)[:, None]
+    distorted_x = x ^ ((((y >> 1) & 1) ^ ((y >> 2) & 1)) << 2)
+    nx = (distorted_x & 7) | ((distorted_x >> 1) & ~7)
+    ny = (y & 1) | ((y >> 1) & ~1)
+    n = ((y >> 1) & 1) | (((x >> 3) & 1) << 1)
+    return (n | (nx << 2) | (ny << (logw + 1))).reshape(-1)
+
+
 def swizzle_indices_for_ps2_linearized(indices: np.ndarray, width: int, height: int) -> np.ndarray:
     src = np.asarray(indices, dtype=np.uint8).reshape((height, width))
     dst = np.zeros((width * height,), dtype=np.uint8)
-    logw = read_lvz._log2_pow2(width)
-    for y in range(height):
-        for x in range(width):
-            s = read_lvz.swizzle_ps2_addr(x, y, logw)
-            if 0 <= s < dst.size:
-                dst[s] = src[y, x]
+    addresses = ps2SwizzleAddressGrid(width, height)
+    valid = (addresses >= 0) & (addresses < dst.size)
+    dst[addresses[valid]] = src.reshape(-1)[valid]
     return dst
 
 def encode_image_to_lvz_4bpp_blob(image: bpy.types.Image, target_blob_len: int, use_swizzle: bool = True) -> Tuple[bytes, Tuple[int, int], int]:
@@ -1467,7 +1503,7 @@ class read_lvz:
         rtab = read_u32(lvz, 0x20)
         return LVZMaster(magic, _type, g0, g1, g1d, cnt, rtab)
 
-    def _peek_global32(self, addr: int):
+    def peekGlobal32(self, addr: int):
         lvz = self.decomp
         n = len(lvz)
         if addr < 0 or addr + 32 > n:
@@ -1611,7 +1647,7 @@ class read_lvz:
                 tag = lvz[addr:addr + 4]
                 if tag not in (b"DLRW", b"xet\0"):
                     break
-                tag_str, info, note = self._peek_global32(addr)
+                tag_str, info, note = self.peekGlobal32(addr)
                 total = int(info.get("total", 0))
                 gcnt = int(info.get("gcnt", 0))
                 cont = int(info.get("cont", 0))
@@ -1661,7 +1697,7 @@ class read_lvz:
             plaus = plaus and (resv == 0 or (resv & 0xFFFF) == 0)
             if not plaus:
                 break
-            tag, info, note = self._peek_global32(addr)
+            tag, info, note = self.peekGlobal32(addr)
             total = int(info.get("total", 0))
             gcnt  = int(info.get("gcnt", 0))
             cont  = int(info.get("cont", 0))
@@ -1703,7 +1739,7 @@ class read_lvz:
         except Exception:
             return -1
 
-    def _log_mdl_descriptor_alignment(self, requested_off: int, found_off: int):
+    def logMdlDescriptorAlignment(self, requested_off: int, found_off: int):
         if int(requested_off) == int(found_off):
             return
         try:
@@ -2101,10 +2137,9 @@ class read_lvz:
         for row in rows:
             addr = int(row.get("res_addr", 0) or 0)
             end = n
-            for next_addr in valid_resource_addrs:
-                if next_addr > addr:
-                    end = next_addr
-                    break
+            next_index = bisect_right(valid_resource_addrs, addr)
+            if next_index < len(valid_resource_addrs):
+                end = valid_resource_addrs[next_index]
             if base > addr:
                 end = min(end, base)
             row["res_end"] = end
@@ -2122,7 +2157,7 @@ class read_lvz:
         return np.vstack([lo, hi]).T.reshape(-1)
 
     @staticmethod
-    def _log2_pow2(n: int) -> int:
+    def log2Pow2(n: int) -> int:
         l = 0
         v = max(1, n)
         while (1 << l) < v:
@@ -2142,13 +2177,11 @@ class read_lvz:
 
     @classmethod
     def unswizzle8_ps2_linearized(cls, src: np.ndarray, w: int, h: int) -> np.ndarray:
-        dst = np.empty(w * h, dtype=np.uint8)
-        logw = cls._log2_pow2(w)
-        for y in range(h):
-            for x in range(w):
-                s = cls.swizzle_ps2_addr(x, y, logw)
-                dst[y * w + x] = src[s % src.size]
-        return dst
+        source = np.asarray(src, dtype=np.uint8).reshape(-1)
+        if not source.size:
+            raise ValueError('PS2 swizzled texture has no index data')
+        addresses = ps2SwizzleAddressGrid(w, h)
+        return source[addresses % source.size]
 
     @staticmethod
     def apply_ps2_alpha_scale(palette_rgba: np.ndarray, do_scale: bool) -> np.ndarray:
@@ -2365,6 +2398,10 @@ class read_lvz:
             if w <= 0 or h <= 0 or (w * h) > len(index):
                 raise ValueError(f"fixed 8bpp texture size {w}x{h} does not fit index bytes {len(index)}")
         else:
+            # A byte is one pixel in an 8-bit indexed texture. The dimension
+            # inference helper works in units of 4-bit index bytes.
+            if len(index) % 2:
+                raise ValueError("8bpp texture contains an odd number of index bytes; dimensions are ambiguous")
             w, h = self.choose_single_size_for_4bpp(len(index) // 2, None, prefer_square=True)
 
         if w > LVZ_MAX_TEXTURE_DIMENSION or h > LVZ_MAX_TEXTURE_DIMENSION or (w * h) > LVZ_MAX_TEXTURE_PIXELS:
@@ -2388,9 +2425,24 @@ class read_lvz:
         mat = self.create_material_from_image(img, asset_name)
         return {"material": mat, "size": (w, h), "palette_tag": tag}
 
+    def decode_blob_32bpp_single(self, blob: bytes, name: str, width: int, height: int,
+                                  alpha_scale: str = "ps2") -> Dict:
+        if width <= 0 or height <= 0 or width > LVZ_MAX_TEXTURE_DIMENSION or height > LVZ_MAX_TEXTURE_DIMENSION:
+            raise ValueError(f"invalid 32bpp texture dimensions {width}x{height}")
+        pixel_count = width * height
+        if pixel_count > LVZ_MAX_TEXTURE_PIXELS or len(blob) < pixel_count * 4:
+            raise ValueError(f"truncated or oversized 32bpp texture {width}x{height}")
+        rgba = np.frombuffer(blob, dtype=np.uint8, count=pixel_count * 4).copy().reshape(height, width, 4)
+        if alpha_scale == "ps2":
+            rgba[:, :, 3] = np.minimum(rgba[:, :, 3].astype(np.uint16) * 2, 255).astype(np.uint8)
+        rgba = np.flipud(rgba)
+        image = self.image_from_rgba_uint8(rgba, name, width, height)
+        material = self.create_material_from_image(image, name)
+        return {"material": material, "size": (width, height), "palette_tag": "rgba32"}
+
     def direct_texture_raster_info_from_blob(self, blob: bytes) -> Dict[str, int]:
-        if len(blob) < LVZ_DIRECT_TEXTURE_HEADER_BYTES + LVZ_DIRECT_TEXTURE_PALETTE_BYTES:
-            raise ValueError("direct texture blob is shorter than its 16-byte header and 64-byte palette")
+        if len(blob) < LVZ_DIRECT_TEXTURE_HEADER_BYTES:
+            raise ValueError("direct texture blob is shorter than its 16-byte header")
         raster_flags = read_u32(blob, 12)
         logw = raster_flags & 0x3F
         logh = (raster_flags >> 6) & 0x3F
@@ -2421,8 +2473,8 @@ class read_lvz:
         info = self.direct_texture_raster_info_from_blob(blob)
         depth = int(info["depth"])
         mipmaps = max(1, int(info["mipmaps"]))
-        if depth not in (4, 8):
-            raise ValueError(f"only 4bpp/8bpp direct LVZ textures are decoded here right now; got depth={depth}")
+        if depth not in (4, 8, 32):
+            raise ValueError(f"unsupported direct LVZ texture depth={depth}")
 
         palette_bytes = LVZ_DIRECT_TEXTURE_PALETTE_BYTES_8BPP if depth == 8 else LVZ_DIRECT_TEXTURE_PALETTE_BYTES
         level_w = int(width)
@@ -2441,16 +2493,31 @@ class read_lvz:
         if src_index_end > len(blob):
             raise ValueError("direct texture base mip is truncated")
 
+        if depth == 32:
+            return blob[src_index_start:src_index_end]
+
         if palette_start + palette_bytes <= len(blob):
             palette = blob[palette_start:palette_start + palette_bytes]
         elif src_index_end + palette_bytes <= len(blob):
             palette = blob[src_index_end:src_index_end + palette_bytes]
         else:
-            palette = blob[-palette_bytes:]
+            raise ValueError("direct texture palette is truncated")
 
         return blob[src_index_start:src_index_end] + palette
 
-    def decode_textures(self, rows: List[Dict], progress_callback=None) -> int:
+    def decode_textures(self, rows: List[Dict], progress_callback=None, decode_pixels=True) -> int:
+        if not decode_pixels:
+            for row in rows:
+                if row.get("kind") not in {"TEX", "TEX_REF"}:
+                    continue
+                resource_id = int(row.get("res_id", row.get("index", -1)))
+                material = bpy.data.materials.new("texture%d" % resource_id)
+                material.diffuse_color = (0.8, 0.8, 0.8, 1.0)
+                material["blds_kind"] = "TEX_PLACEHOLDER"
+                material["blds_res_index"] = resource_id
+                material["blds_texture_res_index"] = resource_id
+                self.material_by_res_index[resource_id] = material
+            return 0
         direct_rows = [r for r in rows if r.get("kind") == "TEX"]
         tex_ref_rows = [r for r in rows if r.get("kind") == "TEX_REF"]
         if not direct_rows and not tex_ref_rows:
@@ -2468,13 +2535,17 @@ class read_lvz:
                 key=lambda d: d["ref_addr"]
             )
             seen_reference_addresses = set()
+            reference_by_address = {}
             for reference_row in reference_sorted:
                 reference_address = reference_row["ref_addr"]
                 if not isinstance(reference_address, int) or not (0 <= reference_address < len(self.decomp)):
                     continue
                 if reference_address in seen_reference_addresses:
+                    reference_by_address[reference_address]["aliases"].append(reference_row["res_id"])
                     continue
                 seen_reference_addresses.add(reference_address)
+                reference_row["aliases"] = [reference_row["res_id"]]
+                reference_by_address[reference_address] = reference_row
                 unique_reference_rows.append(reference_row)
 
         texture_row_total = len(direct_sorted) + len(unique_reference_rows)
@@ -2490,7 +2561,7 @@ class read_lvz:
             if end <= start:
                 continue
             blob_len = end - start
-            if blob_len < LVZ_DIRECT_TEXTURE_HEADER_BYTES + LVZ_DIRECT_TEXTURE_PALETTE_BYTES:
+            if blob_len < LVZ_DIRECT_TEXTURE_HEADER_BYTES:
                 continue
             if blob_len > LVZ_MAX_TEXTURE_BLOB_BYTES:
                 dbg(
@@ -2507,7 +2578,15 @@ class read_lvz:
                 payload = self.direct_texture_payload_from_blob(full_blob, width, height)
                 depth = int(raster_info.get("depth", 4))
                 texture_uses_swizzle = bool(self.use_swizzle and (int(raster_info.get("swizzle_mask", 0)) & 1))
-                if depth == 8:
+                if depth == 32:
+                    result = self.decode_blob_32bpp_single(
+                        blob=payload,
+                        name=material_name,
+                        width=width,
+                        height=height,
+                        alpha_scale="ps2" if self.use_swizzle else "none",
+                    )
+                elif depth == 8:
                     result = self.decode_blob_8bpp_single(
                         blob=payload,
                         out_stem=material_name,
@@ -2644,6 +2723,8 @@ class read_lvz:
                     except Exception:
                         pass
                     self.material_by_res_index[res_index] = mat
+                    for alias_res_id in r["aliases"]:
+                        self.material_by_res_index[int(alias_res_id)] = mat
                     decoded += 1
                     if self.debug_print:
                         if r["embedded"] is not None:
@@ -2661,6 +2742,8 @@ class read_lvz:
                         mat["blds_lvz_ref_addr"] = int(start)
                         mat["blds_lvz_texture_blob_len"] = int(end - start)
                         self.material_by_res_index[res_index] = mat
+                        for alias_res_id in r["aliases"]:
+                            self.material_by_res_index[int(alias_res_id)] = mat
         if progress_callback is not None:
             try:
                 progress_callback(texture_row_total, texture_row_total)
@@ -2669,7 +2752,7 @@ class read_lvz:
         dbg(f"[tex] total decoded: {decoded}")
         return decoded
 
-    def _read_vec3_i16_norm(self, buf: bytes, off: int) -> Tuple[float,float,float]:
+    def readVec3I16Norm(self, buf: bytes, off: int) -> Tuple[float,float,float]:
         x = read_i16(buf, off + 0); y = read_i16(buf, off + 2); z = read_i16(buf, off + 4)
         return (x / 32767.5, y / 32767.5, z / 32767.5)
 
@@ -2678,17 +2761,17 @@ class read_lvz:
         v = buf[off + 1]
         return (u / 128.0, v / 128.0)
 
-    def _decode_rgba5551(self, v16: int) -> Tuple[int,int,int,int]:
+    def decodeRgba5551(self, v16: int) -> Tuple[int,int,int,int]:
         r = (v16 & 0x1F) * 255 // 0x1F
         g = ((v16 >> 5) & 0x1F) * 255 // 0x1F
         b = ((v16 >> 10) & 0x1F) * 255 // 0x1F
         a = 255 if (v16 & 0x8000) else 0
         return (r, g, b, a)
 
-    def _decode_rgba4444(self, v16: int) -> Tuple[int,int,int,int]:
-        return self._decode_rgba5551(v16)
+    def decodeRgba4444(self, v16: int) -> Tuple[int,int,int,int]:
+        return self.decodeRgba5551(v16)
 
-    def _log_unpack_alignment(self, requested_off: int, found_off: int):
+    def logUnpackAlignment(self, requested_off: int, found_off: int):
         if requested_off == found_off:
             return
         try:
@@ -2714,7 +2797,7 @@ class read_lvz:
         except Exception:
             pass
 
-    def _find_unpack_near(self, buf: bytes, off: int, window: int = LVZ_UNPACK_SEARCH_WINDOW, max_end: Optional[int] = None, allow_backward: bool = True) -> int:
+    def findUnpackNear(self, buf: bytes, off: int, window: int = LVZ_UNPACK_SEARCH_WINDOW, max_end: Optional[int] = None, allow_backward: bool = True) -> int:
         n = len(buf)
         if max_end is not None:
             n = min(n, max(0, int(max_end)))
@@ -2744,7 +2827,7 @@ class read_lvz:
                 continue
             seen.add(p)
             if valid_unpack(p):
-                self._log_unpack_alignment(requested, p)
+                self.logUnpackAlignment(requested, p)
                 return p
 
         win = max(int(window), 0x90)
@@ -2758,14 +2841,14 @@ class read_lvz:
 
 
             p = sorted(aligned, key=lambda q: (abs(q - requested), q))[0]
-            self._log_unpack_alignment(requested, p)
+            self.logUnpackAlignment(requested, p)
             return p
         raise ValueError(f"UNPACK header not found near 0x{requested:08X}")
 
-    def _find_next_unpack_after_mscal(self, buf: bytes, off: int, window: int = LVZ_UNPACK_SEARCH_WINDOW, max_end: Optional[int] = None) -> int:
-        return self._find_unpack_near(buf, off, window=window, max_end=max_end, allow_backward=False)
+    def findNextUnpackAfterMscal(self, buf: bytes, off: int, window: int = LVZ_UNPACK_SEARCH_WINDOW, max_end: Optional[int] = None) -> int:
+        return self.findUnpackNear(buf, off, window=window, max_end=max_end, allow_backward=False)
 
-    def _log_unpack_next_self_loop_guard(self, requested_off: int, found_off: int):
+    def logUnpackNextSelfLoopGuard(self, requested_off: int, found_off: int):
         try:
             count = int(getattr(self, "_unpack_next_self_loop_log_count", 0))
         except Exception:
@@ -2798,7 +2881,7 @@ class read_lvz:
         if detected is None:
             adjusted_base = self.find_mdl_material_list_start_near(base, max_end=n)
             if adjusted_base is not None and adjusted_base != base:
-                self._log_mdl_descriptor_alignment(requested_base, int(adjusted_base))
+                self.logMdlDescriptorAlignment(requested_base, int(adjusted_base))
                 base = int(adjusted_base)
                 detected = self.detect_mdl_material_list_format(base, max_end=n)
         if detected is None:
@@ -2888,7 +2971,7 @@ class read_lvz:
             ))
             off += row_len
 
-        aa_tail, new_off = self._scan_aa_tail(list_end)
+        aa_tail, new_off = self.scanAaTail(list_end)
         next_offset = align_up4(new_off)
         return MDLMaterialList(
             count=count,
@@ -2901,7 +2984,7 @@ class read_lvz:
             row_len=row_len,
         )
 
-    def _scan_aa_tail(self, off: int) -> Tuple[bytes, int]:
+    def scanAaTail(self, off: int) -> Tuple[bytes, int]:
         lvz = self.decomp
         n = len(lvz); i = off
         while i < n and lvz[i] == 0xAA:
@@ -2912,7 +2995,7 @@ class read_lvz:
         n = len(buf)
         if max_end is not None:
             n = min(n, max(0, int(max_end)))
-        pos = self._find_unpack_near(buf, align_down4(pos), max_end=n)
+        pos = self.findUnpackNear(buf, align_down4(pos), max_end=n)
         if pos + 20 > n:
             raise ValueError("Batch header truncated.")
         nvert_all = read_u32(buf, pos + 16) & 0x7FFF
@@ -2933,7 +3016,7 @@ class read_lvz:
         verts: List[Tuple[float,float,float]] = []
         for i in range(nvert_eff):
             off = w + i * 6
-            verts.append(self._read_vec3_i16_norm(buf, off))
+            verts.append(self.readVec3I16Norm(buf, off))
         w += need_bytes_pos
         w = align_up4(w)
 
@@ -2963,7 +3046,7 @@ class read_lvz:
         for i in range(nvert_eff):
             c16 = read_u16(buf, w + i * 2)
             cols_raw_u16.append(c16)
-            cols_rgba4444.append(self._decode_rgba5551(c16))
+            cols_rgba4444.append(self.decodeRgba5551(c16))
         w += need_bytes_col
         w = align_up4(w)
 
@@ -3010,7 +3093,7 @@ class read_lvz:
         if start_off >= hard_end:
             return groups, start_off
         try:
-            off = self._find_unpack_near(buf, start_off, max_end=hard_end)
+            off = self.findUnpackNear(buf, start_off, max_end=hard_end)
         except Exception:
             return groups, start_off
 
@@ -3043,19 +3126,19 @@ class read_lvz:
                 break
             groups.append(MDLStripGroup(strips=[strip], bytes_read=(next_off - off), start_off=off, end_off=next_off))
             if next_off <= off:
-                self._log_unpack_next_self_loop_guard(next_off, off)
+                self.logUnpackNextSelfLoopGuard(next_off, off)
                 off = next_off
                 break
             if budget_end is not None and next_off >= budget_end:
                 off = next_off
                 break
             try:
-                next_unpack = self._find_next_unpack_after_mscal(buf, next_off, max_end=parse_end)
+                next_unpack = self.findNextUnpackAfterMscal(buf, next_off, max_end=parse_end)
             except Exception:
                 off = next_off
                 break
             if next_unpack <= off:
-                self._log_unpack_next_self_loop_guard(next_off, next_unpack)
+                self.logUnpackNextSelfLoopGuard(next_off, next_unpack)
                 off = next_off
                 break
             off = next_unpack
@@ -3096,7 +3179,7 @@ class read_lvz:
                 verts.append((x, y, z))
                 uvs.append((u * material.u_scale, v * material.v_scale))
                 cols_raw_u16.append(color)
-                cols_rgba.append(self._decode_rgba5551(color))
+                cols_rgba.append(self.decodeRgba5551(color))
 
             strip = TriStrip(
                 count=vertex_count,
@@ -3168,7 +3251,7 @@ class read_lvz:
                 s.uvs = [(u * s.u_scale, v * s.v_scale) for (u, v) in s.uvs]
             acc_len += batch_len
 
-    def _triangulate_strip_indices(self, local_count: int) -> List[Tuple[int,int,int]]:
+    def triangulateStripIndices(self, local_count: int) -> List[Tuple[int,int,int]]:
         tris: List[Tuple[int,int,int]] = []
         for i in range(local_count - 2):
             if i & 1:
@@ -3177,7 +3260,7 @@ class read_lvz:
                 tris.append((i, i + 1, i + 2))
         return tris
 
-    def _build_mesh_from_mdl_groups(self, res_index: int, groups: List[MDLStripGroup]):
+    def buildMeshFromMdlGroups(self, res_index: int, groups: List[MDLStripGroup]):
         if not groups:
             return None, []
         vertices: List[Tuple[float,float,float]] = []
@@ -3193,7 +3276,7 @@ class read_lvz:
                 base = len(vertices)
                 vertices.extend(s.verts[:k])
                 uvs.extend(s.uvs[:k])
-                tri_list = self._triangulate_strip_indices(k)
+                tri_list = self.triangulateStripIndices(k)
                 poly_start = len(faces)
                 for a,b,c in tri_list:
                     faces.append((base + a, base + b, base + c))
@@ -3275,7 +3358,7 @@ class read_lvz:
                         dbg(f"    v[{vi:04d}] pos=({px:.6f},{py:.6f},{pz:.6f}) uv=({tu:.6f},{tv:.6f}) col16=0x{c16:04X} rgba4444=({r},{gc},{b},{a})")
                         verbose_vertices_left -= 1
 
-            obj, face_ranges = self._build_mesh_from_mdl_groups(res_index, groups)
+            obj, face_ranges = self.buildMeshFromMdlGroups(res_index, groups)
             if obj is not None:
                 mat_slots_added = 0
                 resid_to_slot: Dict[int, int] = {}
@@ -3353,7 +3436,7 @@ class read_img:
             return self._wrldtool_img_offset_by_lvz_addr
 
         mapping: Dict[int, int] = {}
-        for addr in self._iter_lvz_dlrw_headers_for_direct_contimg():
+        for addr in self.iterLvzDlrwHeadersForDirectContimg():
             try:
                 total = read_u32(self.lvz_bytes, addr + 0x08)
                 cont_img = read_u32(self.lvz_bytes, addr + 0x18)
@@ -3379,7 +3462,7 @@ class read_img:
             pass
         return mapping
 
-    def _iter_lvz_dlrw_headers_for_direct_contimg(self) -> List[int]:
+    def iterLvzDlrwHeadersForDirectContimg(self) -> List[int]:
         lvz = self.lvz_bytes
         n = len(lvz)
         out = []
@@ -3656,7 +3739,7 @@ class read_img:
             push("", int(raw_off))
 
 
-            if wanted is not None and int(res_id) in wanted:
+            if not sector.get("strict_overlay") and wanted is not None and int(res_id) in wanted:
                 push(":ptr_cont_minus20", int(cont) + int(raw_ptr) - 0x20)
                 push(":ptr_cont", int(cont) + int(raw_ptr))
                 push(":ptr_abs", int(raw_ptr))
@@ -3668,7 +3751,7 @@ class read_img:
                 if cand_off < cont or cand_off + 4 > end:
 
 
-                    if not (wanted is not None and int(res_id) in wanted and 0 <= cand_off + 4 <= len(img)):
+                    if sector.get("strict_overlay") or not (wanted is not None and int(res_id) in wanted and 0 <= cand_off + 4 <= len(img)):
                         continue
                 if cand_off < 0 or cand_off + 4 > len(img):
                     continue
@@ -3722,7 +3805,7 @@ class read_img:
                     pass
             cont = int(sector.get("cont", -1))
             declared_end = min(len(img), int(sector.get("end", len(img))))
-            end = expanded_container_end(cont, declared_end)
+            end = declared_end if sector.get("strict_overlay") else expanded_container_end(cont, declared_end)
             if end > declared_end:
                 self.last_overlay_resource_stats["expanded_bounds"] += 1
             if cont < 0 or cont + 8 > len(img) or end <= cont:
@@ -3738,6 +3821,24 @@ class read_img:
                 continue
 
             self.last_overlay_resource_stats["containers"] += 1
+
+            if sector.get('strict_overlay'):
+                if resources_ptr < 0x20 or list_start + num_resources * 8 > end:
+                    continue
+                rows = []
+                for resource_index in range(num_resources):
+                    row_off = list_start + resource_index * 8
+                    res_id, raw_ptr = struct.unpack_from('<II', img, row_off)
+                    raw_off = cont + raw_ptr - 0x20
+                    if raw_ptr >= 0x20 and cont <= raw_off and raw_off + 4 <= end and raw_off % 4 == 0:
+                        rows.append((resource_index, row_off, res_id, raw_ptr, raw_off))
+                starts = sorted({row[4] for row in rows})
+                for resource_index, row_off, res_id, raw_ptr, raw_off in rows:
+                    next_index = bisect_right(starts, raw_off)
+                    allocation_end = starts[next_index] if next_index < len(starts) else end
+                    add_overlay(sector, resource_index, res_id, raw_ptr, raw_off, row_off,
+                                8, 'linked_id_ptr', cont, allocation_end)
+                continue
 
 
             if list_start + num_resources * 8 <= end:
@@ -4274,6 +4375,39 @@ class read_img:
         return details
 
 
+    def findLinkedWorldContainers(self):
+        lvz = self.lvz_bytes
+        img = self.img_bytes
+        records = []
+        seen = set()
+        for header in range(0x20, len(lvz) - 0x20 + 1, 4):
+            if lvz[header:header + 4] != b'DLRW':
+                continue
+            size, data_end, reloc, reloc_count, base = struct.unpack_from('<5I', lvz, header + 8)
+            if (size < 0x28 or size > 0x04000000 or data_end < 0x20
+                    or data_end > size or reloc < data_end
+                    or reloc + reloc_count * 4 > size
+                    or base + size - 0x20 > len(img)):
+                continue
+            end = base + data_end - 0x20
+            if base in seen or base + 8 > end:
+                continue
+            pointer = read_u32(img, base)
+            count = read_u16(img, base + 4)
+            table = base + pointer - 0x20
+            if pointer < 0x20 or not 0 < count <= 4096:
+                continue
+            if table < base or table + count * 8 > end:
+                continue
+            seen.add(base)
+            records.append({
+                'lvz_addr': header, 'cont': base, 'total': size,
+                'g0': data_end, 'g1': reloc, 'gcnt': reloc_count,
+                'end': end, 'tag_u32': read_u32(lvz, header),
+                'strict_overlay': True,
+            })
+        return records
+
     def find_extra_container_records_from_lvz(self, sector_records: Optional[List[Dict[str, int]]] = None) -> List[Dict[str, int]]:
         img = self.img_bytes
         if sector_records is None:
@@ -4282,7 +4416,7 @@ class read_img:
         sector_header_addrs = set(int(record.get("header_addr", -1)) for record in sector_records)
         sector_conts = set(int(record.get("cont", -1)) for record in sector_records)
         records_by_key: Dict[Tuple[int, int], Dict[str, int]] = {}
-        candidates = []
+        candidates = list(self.findLinkedWorldContainers())
         candidates.extend(self.find_parent_container_records_from_lvz())
         candidates.extend(self.find_nested_container_records_from_lvz())
         game_hint = self.detect_sector_game_hint()
@@ -4297,7 +4431,7 @@ class read_img:
                 continue
             if cont in sector_conts:
                 continue
-            if cont <= 0 or cont >= len(img):
+            if cont < 0 or cont >= len(img):
                 continue
             if total < 0x20:
                 continue
@@ -4305,7 +4439,7 @@ class read_img:
             if end <= cont + 0x30:
                 continue
             key = (header_addr, cont)
-            if key in records_by_key:
+            if key in records_by_key or any(record["cont"] == cont for record in records_by_key.values()):
                 continue
 
             group_index = int(candidate.get("group_index", -1))
@@ -4336,6 +4470,7 @@ class read_img:
                 "origin": origin,
                 "game_hint": game_hint,
                 "extra_container": True,
+                "strict_overlay": bool(candidate.get("strict_overlay", False)),
                 "extra_tag_u32": tag_u32,
                 "extra_group_index": int(group_index),
                 "extra_child_index": int(child_index),
@@ -4707,7 +4842,7 @@ class read_img:
             return 0
         return candidates[0][0]
 
-    def _img_instance_spans(self, cont: int, next_cont: Optional[int] = None):
+    def imgInstanceSpans(self, cont: int, next_cont: Optional[int] = None):
         img = self.img_bytes
         if cont < 0 or cont + 0x30 > len(img):
             return []
@@ -4753,8 +4888,8 @@ class read_img:
                 break
         return spans
 
-    def _img_sky_span(self, cont: int, next_cont: Optional[int] = None):
-        spans = self._img_instance_spans(cont, next_cont)
+    def imgSkySpan(self, cont: int, next_cont: Optional[int] = None):
+        spans = self.imgInstanceSpans(cont, next_cont)
         if not spans:
             return None
         start = min(span[1] for span in spans)
@@ -4767,7 +4902,7 @@ class read_img:
         img = self.img_bytes
         next_by_cont = self.build_cont_next_map(conts)
         for cont in conts:
-            spans = self._img_instance_spans(cont, next_by_cont.get(cont))
+            spans = self.imgInstanceSpans(cont, next_by_cont.get(cont))
             for pass_index, start, stop, pass_ptrs in spans:
                 off = start
                 while off + ENTRY <= stop:
@@ -4785,7 +4920,7 @@ class read_img:
         img = self.img_bytes
         next_by_cont = self.build_cont_next_map(conts)
         for cont in conts:
-            spans = self._img_instance_spans(cont, next_by_cont.get(cont))
+            spans = self.imgInstanceSpans(cont, next_by_cont.get(cont))
             for pass_index, start, stop, pass_ptrs in spans:
                 off = start
                 while off + ENTRY <= stop:

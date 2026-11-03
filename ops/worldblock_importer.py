@@ -16,15 +16,17 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import math
 import struct
 import traceback
 
 import bpy
 from bpy.types import Operator
-from bpy.props import StringProperty, CollectionProperty
+from bpy.props import BoolProperty, StringProperty, CollectionProperty
 from bpy_extras.io_utils import ImportHelper
 
 from ..leedsLib.worldblock import read_chinatown as RC
+from ..gui import drawImportLogOptions, runImport
 
 def ensure_bytes(file_bytes):
     if isinstance(file_bytes, (bytes, bytearray, memoryview)):
@@ -59,12 +61,19 @@ class worldblock_importer:
         numVertices = struct.unpack_from("<h", file_bytes, mesh_offset + 6)[0]
         translationFactor = struct.unpack_from("<f", file_bytes, mesh_offset + 40)[0]
         scaleFactor = struct.unpack_from("<f", file_bytes, mesh_offset + 44)[0]
+        if (numMaterials <= 0 or numVertices <= 0 or
+                not math.isfinite(scaleFactor) or scaleFactor == 0.0 or
+                not math.isfinite(translationFactor)):
+            raise ValueError(f"Invalid Chinatown mesh header at 0x{mesh_offset:X}")
 
         stride = 16
         vbase = mesh_offset + 48
+        if vbase + numVertices * stride + numMaterials * 12 > len(file_bytes):
+            raise ValueError(f"Truncated Chinatown mesh at 0x{mesh_offset:X}")
 
         all_verts = []
         all_uvs = []
+        all_normals = []
 
         for vi in range(numVertices):
             off = vbase + vi * stride
@@ -73,17 +82,17 @@ class worldblock_importer:
             z_raw = struct.unpack_from("<h", file_bytes, off + 4)[0]
             u_raw = struct.unpack_from("<h", file_bytes, off + 12)[0]
             v_raw = struct.unpack_from("<h", file_bytes, off + 14)[0]
+            normal_raw = struct.unpack_from('<3h', file_bytes, off + 6)
 
             x = x_raw / scaleFactor + PX
             y = y_raw / scaleFactor + PY
             z = z_raw / scaleFactor + PZ
-            u = (u_raw / 2048.0) + translationFactor * 2
-            v = 1.0 - (v_raw / 2048.0)
-
             all_verts.append((x, y, z))
-            all_uvs.append((u, v))
+            all_uvs.append((u_raw, v_raw))
+            all_normals.append(tuple(component / 32768.0 for component in normal_raw))
 
         verts = []
+        normals = []
         uvs = []
         faces = []
         face_mats = []
@@ -95,14 +104,18 @@ class worldblock_importer:
             m_off = mtab + mi * 12
             tex_id = struct.unpack_from("<H", file_bytes, m_off + 0)[0]
             vertex_count = struct.unpack_from("<H", file_bytes, m_off + 2)[0]
+            render_flags = struct.unpack_from("<B", file_bytes, m_off + 4)[0]
 
             base = len(verts)
             for i in range(vertex_count):
                 idx = vert_offset + i
+                if idx >= numVertices:
+                    raise ValueError(f"Chinatown mesh part exceeds its vertex count at 0x{mesh_offset:X}")
                 verts.append(all_verts[idx])
-                uvs.append(all_uvs[idx])
+                normals.append(all_normals[idx])
+                uvs.append(RC.decode_world_uv(*all_uvs[idx], translationFactor, render_flags))
 
-            local_faces = RC.tri_strip_to_tris(vertex_count)
+            local_faces = RC.tri_strip_to_tris(vertex_count, all_verts[vert_offset:vert_offset + vertex_count])
             mat_slot = material_bank.get_slot(tex_id)
 
             for (a, b, c) in local_faces:
@@ -115,6 +128,10 @@ class worldblock_importer:
         mesh = bpy.data.meshes.new(name)
         mesh.from_pydata(verts, [], faces)
         mesh.update()
+        if hasattr(mesh, 'normals_split_custom_set_from_vertices'):
+            mesh.normals_split_custom_set_from_vertices(normals)
+            if hasattr(mesh, 'use_auto_smooth'):
+                mesh.use_auto_smooth = True
 
         uv_layer = mesh.uv_layers.new(name="UVMap")
         for poly_index, poly in enumerate(mesh.polygons):
@@ -142,8 +159,16 @@ class IMPORT_OT_wbl(Operator, ImportHelper):
         options={"HIDDEN"},
     )
     files: CollectionProperty(type=bpy.types.PropertyGroup)
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
+
+    def draw(self, context):
+        drawImportLogOptions(self.layout, self)
 
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         filepaths = []
         if self.files:
             directory = os.path.dirname(self.filepath)
@@ -154,8 +179,10 @@ class IMPORT_OT_wbl(Operator, ImportHelper):
 
         for fp in filepaths:
             try:
+                from ..ops.mdl_importer import mh2ImportCleanup
 
-                RC.import_wbl(fp, context)
+                with mh2ImportCleanup():
+                    RC.import_wbl(fp, context)
             except Exception as exc:
                 tb = traceback.format_exc()
                 self.report({"ERROR"}, f"Failed to import '{fp}': {exc}")

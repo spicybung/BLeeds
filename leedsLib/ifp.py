@@ -258,6 +258,8 @@ def readManhuntTrack(stream, expected_sequence: Optional[str] = None) -> Manhunt
         )
 
     last_frame_time = readF32(stream) if sequence_flag == "SEQT" else None
+    if last_frame_time is not None and not math.isfinite(last_frame_time):
+        raise ManhuntIfpReadError("Non-finite end time for BoneID {}".format(bone_id))
     return ManhuntIfpTrack(
         bone_id=int(bone_id),
         frame_type=int(frame_type),
@@ -333,12 +335,20 @@ def decodeManhuntIfpBlob(raw: bytes):
     if raw.startswith(b"ANCT"):
         return raw, False, 0
 
+    def decompressIfp(candidate):
+        max_size = 256 * 1024 * 1024
+        decoder = zlib.decompressobj()
+        decoded = decoder.decompress(candidate, max_size + 1)
+        if len(decoded) > max_size or not decoder.eof or decoder.unconsumed_tail:
+            raise ManhuntIfpReadError('Truncated or oversized Manhunt IFP stream')
+        return decoded
+
     probe_offsets = (0, 4, 8, 12, 16, 20, 24, 32)
     for offset in probe_offsets:
         if offset >= len(raw):
             continue
         try:
-            decoded = zlib.decompress(raw[offset:])
+            decoded = decompressIfp(raw[offset:])
         except Exception:
             decoded = None
         if decoded and decoded.startswith(b"ANCT"):
@@ -352,7 +362,7 @@ def decodeManhuntIfpBlob(raw: bytes):
         if (cmf & 0x0F) != 8 or ((cmf << 8) + flg) % 31 != 0:
             continue
         try:
-            decoded = zlib.decompress(raw[offset:])
+            decoded = decompressIfp(raw[offset:])
         except Exception:
             continue
         if decoded.startswith(b"ANCT"):

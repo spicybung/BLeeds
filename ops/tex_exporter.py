@@ -21,6 +21,7 @@ import struct
 from typing import Iterable, List, Tuple
 
 import bpy
+import numpy as np
 
 
 def align(value: int, alignment: int) -> int:
@@ -51,27 +52,25 @@ def image_to_rgba8(image: bpy.types.Image, platform: str) -> Tuple[int, int, byt
         raise ValueError(f"Texture '{image.name}' exceeds 4096x4096")
 
     pixel_count = width * height
-    pixels = [0.0] * (pixel_count * 4)
+    pixels = np.empty(pixel_count * 4, dtype=np.float32)
     image.pixels.foreach_get(pixels)
+    pixels = pixels.reshape((height, width, 4))
 
-    output = bytearray(pixel_count * 4)
-    target = 0
+    output = np.empty((height, width, 4), dtype=np.uint8)
     ps2 = str(platform).upper() == "PS2"
+    rows_per_batch = max(1, min(height, 1048576 // width))
+    for first_row in range(0, height, rows_per_batch):
+        last_row = min(height, first_row + rows_per_batch)
+        converted = np.rint(pixels[first_row:last_row].astype(np.float64) * 255.0)
+        np.clip(converted, 0.0, 255.0, out=converted)
+        byte_pixels = converted.astype(np.uint8)
+        if ps2:
+            byte_pixels[:, :, 3] = np.rint(
+                byte_pixels[:, :, 3].astype(np.float64) * 128.0 / 255.0
+            ).astype(np.uint8)
+        output[height - last_row:height - first_row] = byte_pixels[::-1]
 
-
-    for y in range(height - 1, -1, -1):
-        row_start = y * width * 4
-        for x in range(width):
-            source = row_start + x * 4
-            red = max(0, min(255, int(round(float(pixels[source + 0]) * 255.0))))
-            green = max(0, min(255, int(round(float(pixels[source + 1]) * 255.0))))
-            blue = max(0, min(255, int(round(float(pixels[source + 2]) * 255.0))))
-            alpha_255 = max(0, min(255, int(round(float(pixels[source + 3]) * 255.0))))
-            alpha = max(0, min(128, int(round(alpha_255 * 128.0 / 255.0)))) if ps2 else alpha_255
-            output[target:target + 4] = bytes((red, green, blue, alpha))
-            target += 4
-
-    return width, height, bytes(output)
+    return width, height, output.tobytes()
 
 
 def collect_images_from_context(context: bpy.types.Context) -> List[bpy.types.Image]:
@@ -79,12 +78,17 @@ def collect_images_from_context(context: bpy.types.Context) -> List[bpy.types.Im
     seen = set()
 
     objects = list(getattr(context, "selected_objects", []) or [])
+    seen_objects = set(objects)
     active = getattr(context, "active_object", None)
-    if active is not None and active not in objects:
+    if active is not None and active not in seen_objects:
         objects.insert(0, active)
+        seen_objects.add(active)
     for obj in list(objects):
         if obj.get('bleeds_is_mdl_root', False):
-            objects.extend(child for child in obj.children_recursive if child.type == 'MESH' and child not in objects)
+            for child in obj.children_recursive:
+                if child.type == 'MESH' and child not in seen_objects:
+                    objects.append(child)
+                    seen_objects.add(child)
 
     for obj in objects:
         for slot in list(getattr(obj, "material_slots", []) or []):
@@ -136,10 +140,16 @@ def resolve_texture_depth(image, bit_depth):
 
 
 def quantize_texture_rgba(rgba: bytes, bit_depth: int, platform: str) -> bytes:
-    from collections import Counter
-
     color_limit = 1 << bit_depth
-    colors = Counter(tuple(rgba[offset:offset + 4]) for offset in range(0, len(rgba), 4))
+    packed = np.frombuffer(rgba, dtype='V4')
+    unique_colors, first_indices, inverse_indices, counts = np.unique(
+        packed, return_index=True, return_inverse=True, return_counts=True
+    )
+    ordered_indices = np.argsort(first_indices)
+    colors = {
+        tuple(bytes(unique_colors[index])): int(counts[index])
+        for index in ordered_indices
+    }
     if len(colors) <= color_limit:
         palette = list(colors)
         indices_by_color = {color: index for index, color in enumerate(palette)}
@@ -176,21 +186,25 @@ def quantize_texture_rgba(rgba: bytes, bit_depth: int, platform: str) -> bytes:
             for color in box:
                 indices_by_color[color] = index
 
-    indices = bytearray(indices_by_color[tuple(rgba[offset:offset + 4])] for offset in range(0, len(rgba), 4))
+    color_indices = np.fromiter(
+        (indices_by_color[tuple(bytes(color))] for color in unique_colors),
+        dtype=np.uint8, count=len(unique_colors)
+    )
+    indices = color_indices[inverse_indices]
     if bit_depth == 4:
-        raster = bytearray((len(indices) + 1) // 2)
-        for index, value in enumerate(indices):
-            raster[index // 2] |= value << ((index % 2) * 4)
+        raster = np.zeros((len(indices) + 1) // 2, dtype=np.uint8)
+        raster[:] = indices[::2]
+        raster[:len(indices) // 2] |= indices[1::2] << 4
     else:
         raster = indices
         if platform == "PS2":
-            for index, value in enumerate(raster):
-                raster[index] = (value & ~0x18) | ((value & 0x08) << 1) | ((value & 0x10) >> 1)
+            raster = ((raster & 0xE7) | ((raster & 0x08) << 1) |
+                      ((raster & 0x10) >> 1)).astype(np.uint8)
 
     palette_bytes = b"".join(bytes(color) for color in palette)
     palette_bytes += bytes((color_limit - len(palette)) * 4)
     padding = bytes(align(len(raster), 16) - len(raster))
-    return bytes(raster) + padding + palette_bytes
+    return raster.tobytes() + padding + palette_bytes
 
 
 def build_ps2_texture_container(texture_records, texture_format="XTX") -> bytes:
@@ -250,8 +264,6 @@ def build_ps2_texture_container(texture_records, texture_format="XTX") -> bytes:
 
 
 def buildPspTextureRaster(rgba, width, height, depth, mip_count=1):
-    import numpy as np
-
     levels = [np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4).copy()]
     mip_count = max(1, min(8, int(mip_count)))
     for level in range(1, mip_count):
@@ -377,7 +389,6 @@ def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: s
     for image in images:
         width, height, rgba = image_to_rgba8(image, platform)
         depth = resolve_texture_depth(image, bit_depth)
-        raster = quantize_texture_rgba(rgba, depth, platform)
         name = clean_texture_name(image.get("bleeds_texture_name", image.name))
         if platform == "PSP":
             if len(name.encode("ascii", "replace")) > 31:
@@ -389,6 +400,7 @@ def build_leeds_texture_container(images: Iterable[bpy.types.Image], platform: s
                 raise ValueError("PSP mask names must be at most 31 characters: %s" % mask)
             texture_records.append((name, width, height, raster, depth, pitch, mip_count, mask))
         else:
+            raster = quantize_texture_rgba(rgba, depth, platform)
             texture_records.append((name, width, height, raster, depth))
 
     if platform == "PS2":

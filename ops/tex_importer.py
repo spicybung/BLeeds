@@ -17,10 +17,13 @@
 
 import os
 import tempfile
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any, Iterable
 
 import numpy as np
 import bpy
+
+from ..rwLib.txd import TextureDictionary
 from ..leedsLib.lvz_img import configureNativeWorldUvAnimation
 
 from ..leedsLib.tex import (
@@ -774,8 +777,9 @@ def load_mh2_dds_image(entry, input_path: str, prefix: str = "") -> Optional[bpy
         image.name = image_name
         try:
             image.pack()
-        except Exception:
-            pass
+        except Exception as exc:
+            bpy.data.images.remove(image, do_unlink=True)
+            raise ValueError(f'Could not pack MH2 texture {entry.name!r}: {exc}') from exc
         try:
             image.filepath_raw = ""
         except Exception:
@@ -1092,3 +1096,40 @@ def import_mh2_sidecar_texture_for_mdl(
 
 def import_sidecar_txd_for_mdl(mdl_path: str, imported_objects: Iterable[bpy.types.Object], platform: str = "auto") -> Tuple[Optional[str], List[bpy.types.Image], int, List[str]]:
     return import_sidecar_texture_for_mdl(mdl_path, imported_objects, platform=platform)
+
+
+def companionTexture(path, platform):
+    path = Path(path)
+    wanted = [path.stem.casefold(), 'texps2' if platform == 'PS2' else 'texpsp', 'textures']
+    candidates = [
+        file for file in path.parent.iterdir()
+        if file.is_file() and file.suffix.casefold() in ('.txd', '.tex')
+    ]
+    for stem in wanted:
+        for file in candidates:
+            if file.stem.casefold() == stem:
+                return file
+    return None
+
+
+
+def importTextures(path, platform='AUTO'):
+    dictionary = TextureDictionary(Path(path).read_bytes(), platform)
+    images = {}
+    for texture in dictionary.textures:
+        pixels = dictionary.pixels(texture)
+        image = bpy.data.images.new(texture['name'], texture['width'], texture['height'], alpha=True)
+        image.pixels.foreach_set((pixels[::-1].astype('float32') / 255.0).ravel())
+        del pixels
+        image.pack()
+        image['bleeds_mobile_txd'] = str(Path(path).resolve())
+        image['bleeds_mobile_texture'] = texture['name']
+        image['bleeds_model_game'] = 'MH2'
+        image['bleeds_texture_platform'] = texture['platform']
+        key = texture['name'].casefold()
+        old_image = images.get(key)
+        images[key] = image
+        if old_image is not None and old_image.users == 0:
+            bpy.data.images.remove(old_image)
+    return images
+

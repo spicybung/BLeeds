@@ -19,11 +19,15 @@ import bpy
 import math
 import numpy as np
 import re
+from mathutils import Matrix
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .. import get_or_create_corner_color_layer, set_mesh_auto_smooth, stamp_bleeds_entity_type
 from ..leedsLib import bsp, world
+from ..rwLib.dff import readWorld
+from .mdl_importer import mh2ImportTransaction, makeMaterial, makeMesh
+from .tex_importer import companionTexture, importTextures
 
 def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
 
@@ -180,17 +184,17 @@ def build_mdl_objects(entries: list, resources: list, stem: str, collection: bpy
             total += 1
     world.dbg(f"[mdl] created {total} objects in collection '{collection.name}'")
 
-def _sanitize_blender_name(value: str) -> str:
+def sanitizeBlenderName(value: str) -> str:
     value = str(value).replace("\\", "_").replace("/", "_").strip()
     return value or "WorldSector"
 
 
-def _create_wrld_resource_collection(
+def createWrldResourceCollection(
     stem: str,
     entry,
     parent_collection: bpy.types.Collection,
 ) -> bpy.types.Collection:
-    name = f"{_sanitize_blender_name(stem)} Resource {int(entry.table_index):03d} [ID {int(entry.res_id)}]"
+    name = f"{sanitizeBlenderName(stem)} Resource {int(entry.table_index):03d} [ID {int(entry.res_id)}]"
     collection = bpy.data.collections.new(name)
     parent_collection.children.link(collection)
     collection["blds_kind"] = "PS2_WRLD_RESOURCE"
@@ -203,7 +207,7 @@ def _create_wrld_resource_collection(
     return collection
 
 
-def _stamp_wrld_resource_object(obj, entry, source_path: str, header, ext) -> None:
+def stampWrldResourceObject(obj, entry, source_path: str, header, ext) -> None:
     obj["blds_kind"] = "PS2_WRLD_RENDER_RESOURCE"
     obj["blds_source"] = str(source_path)
     obj["blds_platform"] = "PS2"
@@ -224,7 +228,7 @@ def _stamp_wrld_resource_object(obj, entry, source_path: str, header, ext) -> No
     )
 
 
-def _validate_wrld_layout(data: bytes, header, ext, entries: list) -> List[str]:
+def validateWrldLayout(data: bytes, header, ext, entries: list) -> List[str]:
     issues: List[str] = []
     size = len(data)
     if size < 0x28:
@@ -271,7 +275,7 @@ def build_mdl_geometry(
     ext=None,
 ) -> None:
     if collection is None:
-        collection = get_or_create_collection(f"{_sanitize_blender_name(stem)} [WRLD Render Resources]")
+        collection = get_or_create_collection(f"{sanitizeBlenderName(stem)} [WRLD Render Resources]")
 
     mat_map: Dict[int, bpy.types.Material] = {e.res_id: e.material for e in entries if getattr(e, 'material', None) is not None}
     total = 0
@@ -304,7 +308,7 @@ def build_mdl_geometry(
             "faces": 0,
         }
         if obj is not None:
-            resource_collection = _create_wrld_resource_collection(stem, e, collection)
+            resource_collection = createWrldResourceCollection(stem, e, collection)
             resource_collection.objects.link(obj)
             total += 1
             mdl_stat["verts"] = len(obj.data.vertices)
@@ -318,8 +322,8 @@ def build_mdl_geometry(
             obj["wrld_resource_offset"] = int(e.offset)
             obj["wrld_resource_length"] = int(e.length)
             if header is not None and ext is not None:
-                _stamp_wrld_resource_object(obj, e, source_path, header, ext)
-            obj.name = f"{_sanitize_blender_name(stem)} Resource {int(e.table_index):03d} Geometry"
+                stampWrldResourceObject(obj, e, source_path, header, ext)
+            obj.name = f"{sanitizeBlenderName(stem)} Resource {int(e.table_index):03d} Geometry"
             obj.data.name = obj.name
         if e.mdl_info is None:
             e.mdl_info = {}
@@ -364,18 +368,18 @@ def analyze_mdl_entries(data: bytes, entries: list, max_pairs: int = 8) -> None:
         }
 
 
-def _source_stem(path: str) -> str:
+def sourceStem(path: str) -> str:
 
     stem = Path(path).stem.strip()
     cleaned = re.sub(r"\s*\(\d+\)$", "", stem).strip()
     return cleaned or stem or "WorldLevel"
 
 
-def _remove_collection_recursive(collection: bpy.types.Collection) -> None:
+def removeCollectionRecursive(collection: bpy.types.Collection) -> None:
     if collection is None:
         return
     for child in list(collection.children):
-        _remove_collection_recursive(child)
+        removeCollectionRecursive(child)
     for obj in list(collection.objects):
         try:
             bpy.data.objects.remove(obj, do_unlink=True)
@@ -390,11 +394,11 @@ def _remove_collection_recursive(collection: bpy.types.Collection) -> None:
         pass
 
 
-def _new_world_level_collections(stem: str, collision_only: bool = False):
+def newWorldLevelCollections(stem: str, collision_only: bool = False):
     root_name = f"{stem} [World Level]"
     existing = bpy.data.collections.get(root_name)
     if existing is not None:
-        _remove_collection_recursive(existing)
+        removeCollectionRecursive(existing)
 
     root = bpy.data.collections.new(root_name)
     bpy.context.scene.collection.children.link(root)
@@ -407,7 +411,7 @@ def _new_world_level_collections(stem: str, collision_only: bool = False):
     return root, objects, collision
 
 
-def _set_material_base_color(material, rgba) -> None:
+def setMaterialBaseColor(material, rgba) -> None:
     color = tuple(float(v) / 255.0 for v in rgba)
     try:
         material.diffuse_color = color
@@ -423,7 +427,7 @@ def _set_material_base_color(material, rgba) -> None:
         pass
 
 
-def _create_bsp_material(
+def createBspMaterial(
     stem: str,
     record: bsp.BSPMaterialRecord,
     image: Optional[bpy.types.Image],
@@ -431,7 +435,7 @@ def _create_bsp_material(
     source_name = record.name.strip() or f"Untextured Material {record.index + 1:02d}"
     material = bpy.data.materials.new(f"{source_name} [{stem}]")
     material.use_nodes = True
-    _set_material_base_color(material, record.color_rgba)
+    setMaterialBaseColor(material, record.color_rgba)
     material["blds_kind"] = "PSP_BSP_MATERIAL"
     material["blds_bsp_material_index"] = int(record.index)
     material["blds_bsp_material_name"] = str(record.name)
@@ -453,7 +457,7 @@ def _create_bsp_material(
         texture.image = image
         texture.label = record.name or image.name
         links.new(texture.outputs["Color"], principled.inputs["Base Color"])
-        uses_alpha = _image_uses_cutout_alpha(image)
+        uses_alpha = imageUsesCutoutAlpha(image)
         if uses_alpha and "Alpha" in texture.outputs and "Alpha" in principled.inputs:
             links.new(texture.outputs["Alpha"], principled.inputs["Alpha"])
             try:
@@ -474,7 +478,7 @@ def _create_bsp_material(
     return material
 
 
-def _image_uses_cutout_alpha(image: bpy.types.Image) -> bool:
+def imageUsesCutoutAlpha(image: bpy.types.Image) -> bool:
     if image is None:
         return False
     try:
@@ -503,7 +507,7 @@ def _image_uses_cutout_alpha(image: bpy.types.Image) -> bool:
     return result
 
 
-def _decode_bsp_txd(txd_path: Optional[Path], stem: str, lines: List[str]):
+def decodeBspTxd(txd_path: Optional[Path], stem: str, lines: List[str]):
     images_by_name: Dict[str, bpy.types.Image] = {}
     images_by_index: Dict[int, bpy.types.Image] = {}
     if txd_path is None:
@@ -549,7 +553,7 @@ def _decode_bsp_txd(txd_path: Optional[Path], stem: str, lines: List[str]):
     return images_by_name, images_by_index
 
 
-def _assign_corner_colors(mesh, block: bsp.BSPGeometryBlock) -> None:
+def assignCornerColors(mesh, block: bsp.BSPGeometryBlock) -> None:
     layer = get_or_create_corner_color_layer(mesh, "Color")
     if layer is None:
         return
@@ -563,7 +567,7 @@ def _assign_corner_colors(mesh, block: bsp.BSPGeometryBlock) -> None:
         pass
 
 
-def _build_bsp_mesh_object(
+def buildBspMeshObject(
     stem: str,
     source_path: str,
     block_index: int,
@@ -621,7 +625,7 @@ def _build_bsp_mesh_object(
             uv_layer.data[loop_index].uv = block.vertices[int(loop.vertex_index)].uv
     except Exception:
         pass
-    _assign_corner_colors(mesh, block)
+    assignCornerColors(mesh, block)
     set_mesh_auto_smooth(mesh, True)
     try:
         mesh.auto_smooth_angle = math.radians(60.0)
@@ -665,9 +669,9 @@ def _build_bsp_mesh_object(
     return obj, len(faces)
 
 
-def _discover_psp_bsp_scene_set(path: str):
+def discoverPspBspSceneSet(path: str):
     selected = Path(path)
-    clean_stem = _source_stem(path)
+    clean_stem = sourceStem(path)
     match = re.match(r"^(.*?)(\d+)$", clean_stem, re.IGNORECASE)
     scene_stem = match.group(1).rstrip(" _-.") if match else clean_stem
     if not scene_stem:
@@ -688,7 +692,7 @@ def _discover_psp_bsp_scene_set(path: str):
 
     ordered = []
     seen = set()
-    for _number, _name, candidate in sorted(candidates):
+    for drawEffectNumber, _name, candidate in sorted(candidates):
         resolved = str(candidate.resolve()).lower()
         if resolved in seen:
             continue
@@ -704,7 +708,7 @@ def import_psp_bsp(
     build_models: bool = True,
 ) -> None:
     selected_path = Path(path)
-    scene_stem, bsp_paths = _discover_psp_bsp_scene_set(path)
+    scene_stem, bsp_paths = discoverPspBspSceneSet(path)
 
     parsed_files = []
     material_names = []
@@ -714,7 +718,7 @@ def import_psp_bsp(
         material_names.extend(item.name for item in parsed.materials)
 
     txd_path = bsp.find_best_companion_txd(str(selected_path), material_names) if decode_textures else None
-    root, objects_collection, collision_collection = _new_world_level_collections(scene_stem, collision_only=True)
+    root, objects_collection, collision_collection = newWorldLevelCollections(scene_stem, collision_only=True)
     root["blds_kind"] = "PSP_BSP_WORLD_LEVEL"
     root["blds_source"] = str(selected_path)
     root["blds_platform"] = "PSP"
@@ -736,7 +740,7 @@ def import_psp_bsp(
     images_by_name: Dict[str, bpy.types.Image] = {}
     images_by_index: Dict[int, bpy.types.Image] = {}
     if decode_textures:
-        images_by_name, images_by_index = _decode_bsp_txd(txd_path, scene_stem, lines)
+        images_by_name, images_by_index = decodeBspTxd(txd_path, scene_stem, lines)
 
     material_cache = {}
     object_count = 0
@@ -745,7 +749,7 @@ def import_psp_bsp(
     collision_sources = 0
 
     for bsp_path, parsed in parsed_files:
-        file_stem = _source_stem(str(bsp_path))
+        file_stem = sourceStem(str(bsp_path))
         if parsed.geometry:
             source_collection = bpy.data.collections.new(f"{file_stem} - Render Geometry")
             objects_collection.children.link(source_collection)
@@ -769,7 +773,7 @@ def import_psp_bsp(
             material = material_cache.get(cache_key)
             if material is None:
                 image = images_by_name.get(normalized) if normalized else images_by_index.get(int(record.index))
-                material = _create_bsp_material(scene_stem, record, image)
+                material = createBspMaterial(scene_stem, record, image)
                 material_cache[cache_key] = material
                 lines.append(
                     f"[bsp-material] source='{bsp_path.name}' index={record.index} "
@@ -780,7 +784,7 @@ def import_psp_bsp(
 
         if build_models and parsed.geometry:
             for block_index, block in enumerate(parsed.geometry):
-                obj, block_faces = _build_bsp_mesh_object(
+                obj, block_faces = buildBspMeshObject(
                     file_stem,
                     str(bsp_path),
                     block_index,
@@ -831,16 +835,16 @@ def import_psp_bsp(
         except Exception as exc:
             print(f"[log] failed to write '{output}': {exc}")
 
-def _import_wrld(path: str, decode_textures: bool = True, write_log: bool = True, build_models: bool = True) -> None:
+def importWrld(path: str, decode_textures: bool = True, write_log: bool = True, build_models: bool = True) -> None:
     data = Path(path).read_bytes()
     header = world.parse_world_header(data)
     ext = world.parse_extended_header(data)
     entries = world.parse_resource_table(data, header, ext)
     classify_entries(entries)
-    stem = _source_stem(path)
-    validation_issues = _validate_wrld_layout(data, header, ext, entries)
+    stem = sourceStem(path)
+    validation_issues = validateWrldLayout(data, header, ext, entries)
 
-    root, objects_collection, collision_collection = _new_world_level_collections(stem)
+    root, objects_collection, collision_collection = newWorldLevelCollections(stem)
     root["blds_kind"] = "PS2_WRLD_WORLD_LEVEL"
     root["blds_source"] = str(path)
     root["blds_platform"] = "PS2"
@@ -966,4 +970,27 @@ def log_and_import(
             payload = b""
         if payload[:4] == bsp.DLRW_MAGIC:
             return import_psp_bsp(path, decode_textures, write_log, build_models)
-    return _import_wrld(path, decode_textures, write_log, build_models)
+    return importWrld(path, decode_textures, write_log, build_models)
+
+
+@mh2ImportTransaction
+def importWorld(context, path, platform='AUTO', import_textures=True):
+    resource, records, geometry = readWorld(Path(path).read_bytes(), platform)
+    rotation = Matrix.Rotation(math.pi / 2.0, 4, 'X')
+    actual = geometry[0]['platform'] if geometry else ('PS2' if platform == 'PS2' else 'PSP')
+    sidecar = companionTexture(path, actual) if import_textures else None
+    images = importTextures(sidecar, actual) if sidecar else {}
+    materials = [makeMaterial(record, images) for record in records]
+    collection = bpy.data.collections.new(Path(path).stem)
+    context.scene.collection.children.link(collection)
+    root = bpy.data.objects.new(Path(path).stem, None)
+    collection.objects.link(root)
+    root['bleeds_model_game'] = 'MH2'
+    root['bleeds_mh2_platform'] = actual
+    root['bleeds_mh2_path'] = str(Path(path).resolve())
+    objects = [root]
+    for block_index, block in enumerate(geometry):
+        for part_index, part in enumerate(block['parts']):
+            objects.append(makeMesh(collection, root, '%s_%d_%d' % (root.name, block_index, part_index), part, materials, rotation))
+    return objects
+

@@ -19,13 +19,48 @@ import math
 
 from . import anim_importer
 from ..leedsLib.anim import AnimFile, AnimEntry, BoneAnim, AnimFrame, writeAnimFile
-from ..data.bone_data import DIRECT_ID_PROPERTY_NAMES, directIdFromBoneName
+from ..data.bone_data import (
+    DIRECT_ID_PROPERTY_NAMES, directIdFromBoneName, normalizePedSkinBoneName,
+    commonBoneNamesLCS, commonBoneNamesVCS, kamBoneID, kamBoneIDVCS,
+)
 
 
-def exportArmatureAnimation(context, path, *, start_frame, end_frame, fps, animation_name):
+def animationTargetFromArmature(armature):
+    game = ''
+    platform = ''
+    owner = armature
+    while owner is not None:
+        if not game:
+            game = str(owner.get('bleeds_model_game', owner.get('bleeds_mdl_detected_game', ''))).upper()
+        if not platform:
+            platform = str(owner.get('bleeds_mdl_platform', owner.get('bleeds_mdl_detected_platform', ''))).upper()
+        owner = getattr(owner, 'parent', None)
+    return game, platform
+
+
+def animationBoneIdForGame(name, game):
+    names, identifiers = ((commonBoneNamesLCS, kamBoneID) if game == 'LCS'
+                          else (commonBoneNamesVCS, kamBoneIDVCS))
+    normalized = normalizePedSkinBoneName(name)
+    for bone_name, identifier in zip(names, identifiers):
+        if normalizePedSkinBoneName(bone_name) == normalized:
+            return identifier
+    identifier = directIdFromBoneName(name)
+    return identifier if identifier in identifiers else None
+
+
+def exportArmatureAnimation(context, path, *, start_frame, end_frame, fps, animation_name,
+                            game='VCS', platform='PS2'):
     armature = anim_importer.findSelectedArmature(context)
     if armature is None or armature.animation_data is None or armature.animation_data.action is None:
         raise ValueError("Select an armature with an active animation")
+    game = str(game).upper()
+    platform = str(platform).upper()
+    if game not in {'LCS', 'VCS'} or platform not in {'PS2', 'PSP'}:
+        raise ValueError("Choose LCS or VCS and PS2 or PSP for ANIM export")
+    source_game, source_platform = animationTargetFromArmature(armature)
+    if source_game and source_game != game:
+        raise ValueError(f"The selected armature belongs to {source_game}; select a {game} armature")
     if not all(math.isfinite(value) for value in (start_frame, end_frame, fps)) or fps <= 0 or end_frame < start_frame:
         raise ValueError("Choose a valid frame range and a positive FPS")
     action = armature.animation_data.action
@@ -43,7 +78,7 @@ def exportArmatureAnimation(context, path, *, start_frame, end_frame, fps, anima
         if bone_id is None:
             bone_id = anim_importer.getIntCustomProperty(pose_bone, DIRECT_ID_PROPERTY_NAMES)
         if bone_id is None and not native_rig:
-            bone_id = directIdFromBoneName(pose_bone.name)
+            bone_id = animationBoneIdForGame(pose_bone.name, game)
         if bone_id is None or bone_id < 0 or bone_id == 255:
             continue
         if bone_id > 65535 or bone_id in identities:
@@ -104,5 +139,5 @@ def exportArmatureAnimation(context, path, *, start_frame, end_frame, fps, anima
         bone.frame_count = len(bone.frames)
     entry = AnimEntry(0, 0, 0, animation_name, len(bones), 0, (end_frame - start_frame) / fps, bones)
     result = AnimFile(b"mina" + bytes(28), 0, 0, 0, [], [entry])
-    writeAnimFile(path, result)
+    writeAnimFile(path, result, game=game, platform=platform)
     return len(bones), len(frame_numbers)

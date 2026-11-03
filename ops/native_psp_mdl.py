@@ -287,7 +287,8 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
         raise ValueError("%s has no mesh data" % obj.name)
     try:
         mesh.calc_loop_triangles()
-        mesh.calc_normals_split()
+        if hasattr(mesh, 'calc_normals_split'):
+            mesh.calc_normals_split()
         uv_layer = mesh.uv_layers.active
         has_colors = bool(getattr(mesh, 'color_attributes', None) and mesh.color_attributes.active_color)
         normal_matrix = export_matrix.to_3x3().inverted_safe().transposed()
@@ -360,14 +361,15 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
                           'color': pspCornerColor(mesh, loop_index), 'weights': weights}
                 if not all(math.isfinite(value) for value in record['position'] + record['normal'] + uv):
                     raise ValueError("%s contains non-finite vertex data" % obj.name)
-                key = (vertex_index, record['position'], record['normal'], uv,
+                key = (record['position'], record['normal'] if use_normals else (), uv,
                        record['color'], tuple(record['weights']))
                 corner_records[key] = record
                 vertex_keys.append(key)
             if len(triangle_bones) > 8:
                 raise ValueError("%s: triangle %d uses more than eight skin bones" % (obj.name, triangle.index))
             output_material = material_slots[material_index]
-            triangle_records.append((tuple(vertex_keys), output_material, triangle_bones))
+            if len(set(vertex_keys)) == 3:
+                triangle_records.append((tuple(vertex_keys), output_material, triangle_bones))
 
         directed_edges = {}
         for index, (keys, material_index, bones) in enumerate(triangle_records):
@@ -375,12 +377,17 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
             for edge, opposite in (((a, b), c), ((b, c), a), ((c, a), b)):
                 directed_edges.setdefault((material_index, edge), []).append((index, opposite))
 
-        unused = set(range(len(triangle_records)))
+        unused = dict.fromkeys(range(len(triangle_records)))
         while unused:
             best_keys = None
             best_used = None
             best_material = 0
-            for seed in sorted(unused)[:16]:
+            seeds = []
+            for seed in unused:
+                seeds.append(seed)
+                if len(seeds) == 16:
+                    break
+            for seed in seeds:
                 triangle_keys, material_index, triangle_bones = triangle_records[seed]
                 for rotation in range(3):
                     keys = list(triangle_keys[rotation:] + triangle_keys[:rotation])
@@ -414,9 +421,10 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
                            'has_uv': uv_layer is not None,
                            'has_colors': has_colors,
                            'has_normals': bool(use_normals)})
-            unused.difference_update(best_used)
+            for index in best_used:
+                del unused[index]
 
-        original_faces = Counter(tuple(sorted(keys)) for keys, _, _ in triangle_records)
+        original_faces = Counter(mdl_exporter.orientedTriangleKey(*keys) for keys, _, _ in triangle_records)
         emitted_faces = Counter()
         records_by_identity = {id(record): key for key, record in corner_records.items()}
         for strip in strips:
@@ -425,7 +433,7 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
                 triangle = ((keys[index - 1], keys[index - 2], keys[index]) if index & 1
                             else (keys[index - 2], keys[index - 1], keys[index]))
                 if len(set(triangle)) == 3:
-                    emitted_faces[tuple(sorted(triangle))] += 1
+                    emitted_faces[mdl_exporter.orientedTriangleKey(*triangle)] += 1
         if emitted_faces != original_faces:
             raise ValueError("%s: PSP strips do not match the mesh triangles" % obj.name)
         obj['bleeds_psp_export_strip_counts'] = [len(strip['vertices']) for strip in strips]
@@ -525,7 +533,11 @@ def exportPspMdl(context, filepath, mdl_type='SIM', use_normals=True, export_gam
         with open(source_path, 'rb') as source_file:
             candidate = source_file.read()
     elif root.get('bleeds_psp_source_metadata'):
-        candidate = zlib.decompress(base64.b64decode(root['bleeds_psp_source_metadata']))
+        compressed_metadata = base64.b64decode(root['bleeds_psp_source_metadata'])
+        decoder = zlib.decompressobj()
+        candidate = decoder.decompress(compressed_metadata, 256 * 1024 * 1024 + 1)
+        if len(candidate) > 256 * 1024 * 1024 or not decoder.eof or decoder.unconsumed_tail:
+            raise ValueError('Embedded PSP MDL source metadata is truncated or oversized')
     if candidate is not None:
         probe = mdl.probeStoriesResourceHeader(candidate)
         if probe and probe['platform'] == 'PSP' and probe['mdl_type_hint'] == kind:
@@ -589,10 +601,14 @@ def exportPspMdl(context, filepath, mdl_type='SIM', use_normals=True, export_gam
         for obj in objects:
             export_matrix = world_by_frame[frame].inverted_safe() @ root.matrix_world.inverted_safe() @ obj.matrix_world
             part_strips, part_materials = collectPspStrips(context, obj, root, export_matrix, bone_nodes, atomic_skinned, use_normals)
+            material_slots = []
+            for material in part_materials:
+                if material not in materials:
+                    materials.append(material)
+                material_slots.append(materials.index(material))
             for strip in part_strips:
-                strip['material'] += len(materials)
+                strip['material'] = material_slots[strip['material']]
             strips.extend(part_strips)
-            materials.extend(part_materials)
         material_offsets = []
         for material in materials:
             material_key = material.as_pointer() if material is not None else 0

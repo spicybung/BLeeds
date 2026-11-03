@@ -77,7 +77,7 @@ class CW_MT_ExportChoice(Menu):
 
     def draw(self, context):
         layout = self.layout
-        layout.operator("export_scene.leeds_anim", text="Stories: Animation (.anim)")
+        layout.operator("export_scene.leeds_anim", text="R* Leeds: Animation (.anim)")
         layout.operator(
             "export_scene.bleeds_stories_mdl",
             text="R* Leeds: Model (.mdl)",
@@ -113,6 +113,7 @@ class TOPBAR_MT_file_import_bleeds(Menu):
             "import_scene.bleeds_dff",
             text="R* Studios: DFF (.dff)",
         )
+        layout.operator("import_scene.bleeds_mobile_txd", text="R* Studios: Texture Dictionary (.txd)")
         layout.operator(
             "import_scene.bleeds_manhunt_ifp",
             text="R* Studios: IFP (.ifp)",

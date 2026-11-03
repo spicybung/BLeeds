@@ -23,6 +23,7 @@ from bpy_extras.io_utils import ImportHelper
 from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from ..ops import ifp_importer
+from . import drawImportLogOptions, runImport
 
 
 class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
@@ -90,6 +91,9 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
         default=True,
     )
 
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
+
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -111,11 +115,16 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
         box.label(text="Rig Safety")
         box.prop(self, "allow_foreign_rig")
         box.prop(self, "create_text_summary")
+        drawImportLogOptions(layout, self)
 
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         try:
             ifp_file = ifp_importer.readManhuntIfpFile(self.filepath, expected_game=self.game)
         except Exception as exc:
+            print("IFP import failed: {}".format(exc))
             self.report({"ERROR"}, "Failed to read Manhunt IFP: {}".format(exc))
             return {"CANCELLED"}
 
@@ -160,7 +169,7 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
             self.report({"ERROR"}, "Could not apply IFP: {}".format(exc))
             return {"CANCELLED"}
 
-        if self.create_text_summary:
+        if self.create_text_summary or self.print_debug_log or self.print_text_log:
             summary = ifp_importer.buildIfpImportSummary(
                 ifp_file,
                 animation,
@@ -172,7 +181,10 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
                 mapping_lines=mapping_lines,
             )
             text_name = "BLeeds_IFP_" + Path(self.filepath).stem[:40]
-            ifp_importer.ensureTextBlock(text_name, summary)
+            if self.create_text_summary:
+                ifp_importer.ensureTextBlock(text_name, summary)
+            if self.print_debug_log or self.print_text_log:
+                print(summary)
 
         unmapped = max(0, len(animation.tracks) - mapped_count - ignored_auxiliary_count)
         self.report(

@@ -17,10 +17,11 @@
 
 import bpy
 from bpy_extras.io_utils import ImportHelper
-from bpy.props import StringProperty
+from bpy.props import BoolProperty, StringProperty
 from bpy.types import Operator
 
 from ..ops import world_importer
+from . import drawImportLogOptions, runImport
 
 class IMPORT_OT_leeds_world(Operator, ImportHelper):
 
@@ -35,18 +36,37 @@ class IMPORT_OT_leeds_world(Operator, ImportHelper):
         maxlen=255,
     )
 
+    import_textures: BoolProperty(name="Import Textures", default=True)
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
+
+    def draw(self, context):
+        self.layout.prop(self, "import_textures")
+        drawImportLogOptions(self.layout, self)
+
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         try:
 
+            from pathlib import Path
+            from ..rwLib.dff import unwrapResource
+            raw = unwrapResource(Path(self.filepath).read_bytes())
+            if raw[:4] == b"DLRW":
+                from ..ops.world_importer import importWorld
+                importWorld(context,self.filepath,import_textures=self.import_textures)
+                return {"FINISHED"}
             world_importer.log_and_import(
                 self.filepath,
-                decode_textures=True,
-                write_log=True,
+                decode_textures=self.import_textures,
+                write_log=False,
                 build_models=True,
             )
         except Exception as exc:
+            print("World Level import failed: {}".format(exc))
             self.report({'ERROR'}, f"Failed to import World Level: {exc}")
-            raise
+            return {"CANCELLED"}
         from ..ops.uv_playback import requestNativeUvPlayback
         requestNativeUvPlayback(context)
         return {'FINISHED'}

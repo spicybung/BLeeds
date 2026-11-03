@@ -21,6 +21,7 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import BoolProperty, StringProperty
 
 from ..ops import col2_importer, col2_exporter
+from . import drawImportLogOptions, runImport
 
 class IMPORT_OT_COL2(Operator, ImportHelper):
     bl_idname = "import_scene.col2_leeds"
@@ -43,18 +44,28 @@ class IMPORT_OT_COL2(Operator, ImportHelper):
         default=True,
     )
 
+    print_debug_log: BoolProperty(name="Print Debug Log", default=False)
+    print_text_log: BoolProperty(name="Print Text Log", default=False)
+
     def draw(self, context):
         layout = self.layout
         layout.prop(self, "import_aabb_boxes")
         layout.prop(self, "import_empty_model_bounds")
+        drawImportLogOptions(layout, self)
 
     def execute(self, context):
+        return runImport(self, context, self.executeImport)
+
+    def executeImport(self, context):
         created, _report = col2_importer.import_col2_file(
             self.filepath,
             context,
             import_box_primitives=self.import_aabb_boxes,
             import_empty_model_aabb=self.import_empty_model_bounds,
         )
+        print("COL2 import: {} objects created".format(len(created)))
+        if _report:
+            print(_report)
         self.report(
             {"INFO"},
             f"COL2 parsed. Objects created: {len(created)}",

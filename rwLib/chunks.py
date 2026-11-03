@@ -63,7 +63,6 @@ def writeMobileAsset(path, chunks):
     writeAtomic(path, data)
 
 
-
 def readMobileDffChunks(data):
     def parse(offset, expected=None):
         if offset + 12 > len(data):

@@ -18,13 +18,19 @@
 import os
 import struct
 import math
+from contextlib import contextmanager
+from functools import wraps
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Any
 
 import bpy
+import numpy as np
 from mathutils import Matrix, Vector
 
 from ..leedsLib import native_mdl as stories_mdl
+from ..rwLib.dff import readModel
+from .tex_importer import companionTexture, importTextures
 from ..leedsLib import lvz_img as embedded_mdl
 from ..data.bone_data import normalizePedSkinBoneName
 from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth, set_mesh_gouraud_shading, stamp_bleeds_entity_type
@@ -66,6 +72,75 @@ class StoriesGouraudPartData:
 
 def convertStoriesPs2UvToBlender(u: float, v: float) -> Tuple[float, float]:
     return (float(u), 1.0 - float(v))
+
+def writeStoriesVertexMappedCorners(mesh, vertex_uvs=None, vertex_colors=None, flip_v=False):
+    if not vertex_uvs and not vertex_colors:
+        return
+
+    uv_layer = mesh.uv_layers.new(name="UVMap") if vertex_uvs else None
+    color_attr = get_or_create_corner_color_layer(mesh, "Col") if vertex_colors else None
+    total_loops = len(mesh.loops)
+    if not total_loops:
+        return
+
+    loop_vertex_indices = np.empty(total_loops, dtype=np.int32)
+    try:
+        mesh.loops.foreach_get("vertex_index", loop_vertex_indices)
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        loop_vertex_indices = np.fromiter(
+            (int(loop.vertex_index) for loop in mesh.loops), dtype=np.int32,
+            count=total_loops
+        )
+
+    if uv_layer is not None:
+        if (len(vertex_uvs) > 0 and loop_vertex_indices.min() >= 0 and
+                loop_vertex_indices.max() < len(vertex_uvs)):
+            coordinates = np.asarray(vertex_uvs, dtype=np.float64)
+            mapped = coordinates[loop_vertex_indices].copy()
+            if flip_v:
+                mapped[:, 1] = 1.0 - mapped[:, 1]
+            try:
+                uv_layer.data.foreach_set("uv", mapped.reshape(-1))
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                for loop_index, vertex_index in enumerate(loop_vertex_indices):
+                    u, v = vertex_uvs[int(vertex_index)]
+                    uv_layer.data[loop_index].uv = convertStoriesPs2UvToBlender(u, v) if flip_v else (float(u), float(v))
+        else:
+            for loop_index, vertex_index in enumerate(loop_vertex_indices):
+                if 0 <= vertex_index < len(vertex_uvs):
+                    u, v = vertex_uvs[int(vertex_index)]
+                    uv_layer.data[loop_index].uv = convertStoriesPs2UvToBlender(u, v) if flip_v else (float(u), float(v))
+
+    if color_attr is not None:
+        color_data = color_attr.data
+        if (len(vertex_colors) > 0 and loop_vertex_indices.min() >= 0 and
+                loop_vertex_indices.max() < len(vertex_colors) and len(color_data) == total_loops):
+            mapped_colors = np.asarray(vertex_colors, dtype=np.float64)[loop_vertex_indices] / 255.0
+            try:
+                color_data.foreach_set("color", mapped_colors.reshape(-1))
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                for loop_index, vertex_index in enumerate(loop_vertex_indices):
+                    r, g, b, a = vertex_colors[int(vertex_index)]
+                    color_data[loop_index].color = (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+        else:
+            for loop_index, vertex_index in enumerate(loop_vertex_indices):
+                if 0 <= vertex_index < len(vertex_colors) and loop_index < len(color_data):
+                    r, g, b, a = vertex_colors[int(vertex_index)]
+                    color_data[loop_index].color = (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+
+def writeStoriesPolygonMaterialIndices(mesh, indices, material_count):
+    if not indices or material_count <= 0:
+        return
+    count = min(len(indices), len(mesh.polygons))
+    if count == len(mesh.polygons):
+        values = np.clip(np.asarray(indices, dtype=np.int32), 0, material_count - 1)
+        try:
+            mesh.polygons.foreach_set("material_index", values)
+            return
+        except (AttributeError, TypeError, ValueError, RuntimeError):
+            pass
+    for polygon_index in range(count):
+        mesh.polygons[polygon_index].material_index = max(0, min(int(indices[polygon_index]), material_count - 1))
 
 def getArmatureFrameMatrix(arm_info: Any, dict_name: str, ptr: int, fallback: Matrix = None) -> Matrix:
     if fallback is None:
@@ -425,7 +500,7 @@ def create_armature_from_context(
                 pass
             try:
                 canon_name = stories_mdl.canon_frame_name(str(name))
-                id_map, type_map = stories_mdl._ped_known_hanim_maps(stories_ctx.import_type)
+                id_map, type_map = stories_mdl.pedKnownHanimMaps(stories_ctx.import_type)
                 if canon_name in id_map:
                     anim_bone_id = int(id_map[canon_name])
                     bone["BoneID"] = anim_bone_id
@@ -960,9 +1035,12 @@ def writeMdlVertexSkinAssignments(obj: bpy.types.Object, assignments: Dict[int, 
         if not clean_pairs:
             continue
 
+        total_weight = sum(weight for _, weight in clean_pairs)
+        if not math.isfinite(total_weight) or total_weight <= 0.0:
+            continue
         for name, weight in clean_pairs:
             vg = getVertexGroup(name)
-            vg.add([vi], float(weight), "REPLACE")
+            vg.add([vi], float(weight) / total_weight, "REPLACE")
 
 def assign_ps2_skin_merged(
     obj: bpy.types.Object,
@@ -1426,43 +1504,8 @@ def createVehicleAtomicMeshObject(
             if mat is not None:
                 me.materials.append(mat)
 
-    if polygon_material_indices and len(me.materials) > 0:
-        for poly_index, material_index in enumerate(polygon_material_indices):
-            if poly_index >= len(me.polygons):
-                break
-            me.polygons[poly_index].material_index = max(0, min(int(material_index), len(me.materials) - 1))
-
-    if merged_uvs:
-        uv_layer = me.uv_layers.new(name="UVMap")
-        uv_data = uv_layer.data
-        for poly in me.polygons:
-            for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                if loop_index >= len(me.loops):
-                    continue
-                vert_index = me.loops[loop_index].vertex_index
-                if vert_index < len(merged_uvs):
-                    u, v = merged_uvs[vert_index]
-                    uv_data[loop_index].uv = convertStoriesPs2UvToBlender(u, v)
-
-    if merged_colors:
-        color_attr = get_or_create_corner_color_layer(me, "Col")
-        if color_attr is None:
-            col_data = []
-        else:
-            col_data = color_attr.data
-        for poly in me.polygons:
-            for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                if loop_index >= len(me.loops):
-                    continue
-                vert_index = me.loops[loop_index].vertex_index
-                if vert_index < len(merged_colors) and loop_index < len(col_data):
-                    r, g, b, a = merged_colors[vert_index]
-                    col_data[loop_index].color = (
-                        float(r) / 255.0,
-                        float(g) / 255.0,
-                        float(b) / 255.0,
-                        float(a) / 255.0,
-                    )
+    writeStoriesPolygonMaterialIndices(me, polygon_material_indices, len(me.materials))
+    writeStoriesVertexMappedCorners(me, merged_uvs, merged_colors, flip_v=True)
 
     obj = bpy.data.objects.new(name, me)
     collection.objects.link(obj)
@@ -1645,37 +1688,7 @@ def build_ps2_cutscene_actor_mesh(
     set_mesh_gouraud_shading(me, True)
     me.update(calc_edges=True)
 
-    if merged_uvs and len(me.loops) > 0:
-        uv_layer = me.uv_layers.new(name="UVMap")
-        uv_data = uv_layer.data
-        for poly in me.polygons:
-            for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                if loop_index >= len(me.loops):
-                    continue
-                vert_index = me.loops[loop_index].vertex_index
-                if vert_index < len(merged_uvs):
-                    u, v = merged_uvs[vert_index]
-                    uv_data[loop_index].uv = convertStoriesPs2UvToBlender(u, v)
-
-    if merged_colors and len(me.loops) > 0:
-        color_attr = get_or_create_corner_color_layer(me, "Col")
-        if color_attr is None:
-            col_data = []
-        else:
-            col_data = color_attr.data
-        for poly in me.polygons:
-            for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                if loop_index >= len(me.loops):
-                    continue
-                vert_index = me.loops[loop_index].vertex_index
-                if vert_index < len(merged_colors) and loop_index < len(col_data):
-                    r, g, b, a = merged_colors[vert_index]
-                    col_data[loop_index].color = (
-                        r / 255.0,
-                        g / 255.0,
-                        b / 255.0,
-                        a / 255.0,
-                    )
+    writeStoriesVertexMappedCorners(me, merged_uvs, merged_colors, flip_v=True)
 
     obj = bpy.data.objects.new(name, me)
     collection.objects.link(obj)
@@ -1686,11 +1699,7 @@ def build_ps2_cutscene_actor_mesh(
             if mat is not None:
                 obj.data.materials.append(mat)
 
-    for poly_index, material_index in enumerate(polygon_material_indices):
-        if poly_index >= len(me.polygons):
-            break
-        if len(obj.data.materials) > 0:
-            me.polygons[poly_index].material_index = max(0, min(int(material_index), len(obj.data.materials) - 1))
+    writeStoriesPolygonMaterialIndices(me, polygon_material_indices, len(obj.data.materials))
 
     if arm_obj is not None:
         match_mesh_to_armature_space(obj, stories_ctx, arm_obj)
@@ -3257,34 +3266,20 @@ def build_ps2_meshes(
 
         if gouraud_part.face_uvs:
             uv_layer = me.uv_layers.new(name="UVMap")
-            uv_data = uv_layer.data
-            for poly in me.polygons:
-                if poly.index >= len(gouraud_part.face_uvs):
-                    continue
-                face_uvs = gouraud_part.face_uvs[poly.index]
-                for corner_index, loop_index in enumerate(poly.loop_indices):
-                    if loop_index >= len(uv_data) or corner_index >= len(face_uvs):
-                        continue
-                    u, v = face_uvs[corner_index]
-                    uv_data[loop_index].uv = convertStoriesPs2UvToBlender(u, v)
+            uv_values = np.asarray(gouraud_part.face_uvs, dtype=np.float32).reshape(-1, 2)
+            if len(uv_values) != len(me.loops):
+                raise ValueError('Stories face UV count does not match mesh corners')
+            uv_values[:, 1] = 1.0 - uv_values[:, 1]
+            uv_layer.data.foreach_set('uv', uv_values.ravel())
 
         if gouraud_part.face_colors:
             color_attr = get_or_create_corner_color_layer(me, "Col")
-            col_data = color_attr.data if color_attr is not None else []
-            for poly in me.polygons:
-                if poly.index >= len(gouraud_part.face_colors):
-                    continue
-                face_colors = gouraud_part.face_colors[poly.index]
-                for corner_index, loop_index in enumerate(poly.loop_indices):
-                    if loop_index >= len(col_data) or corner_index >= len(face_colors):
-                        continue
-                    r, g, b, a = face_colors[corner_index]
-                    col_data[loop_index].color = (
-                        int(r) / 255.0,
-                        int(g) / 255.0,
-                        int(b) / 255.0,
-                        int(a) / 255.0,
-                    )
+            if color_attr is not None:
+                color_values = np.asarray(gouraud_part.face_colors, dtype=np.float32).reshape(-1, 4)
+                if len(color_values) != len(me.loops):
+                    raise ValueError('Stories face color count does not match mesh corners')
+                color_values /= 255.0
+                color_attr.data.foreach_set('color', color_values.ravel())
 
         custom_loop_normals_applied = applyStoriesCustomLoopNormals(
             me,
@@ -3511,9 +3506,9 @@ def buildPspAtomicMeshes(
                     )
                     valid_normal_count += 1
                 else:
-                    normalized_vertex_normals.append((0.0, 0.0, 1.0))
+                    normalized_vertex_normals.append((0.0, 0.0, 0.0))
 
-            if valid_normal_count == len(normalized_vertex_normals):
+            if valid_normal_count:
                 try:
                     me.normals_split_custom_set_from_vertices(normalized_vertex_normals)
                     if hasattr(me, "use_auto_smooth"):
@@ -3525,38 +3520,9 @@ def buildPspAtomicMeshes(
                 except Exception:
                     psp_custom_normals_applied = False
 
-        if getattr(mesh_data, "uvs", None):
-            uv_layer = me.uv_layers.new(name="UVMap")
-            uv_data = uv_layer.data
-            for poly in me.polygons:
-                for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                    if loop_index >= len(me.loops):
-                        continue
-                    vert_index = me.loops[loop_index].vertex_index
-                    if vert_index < len(mesh_data.uvs):
-                        u, v = mesh_data.uvs[vert_index]
-                        uv_data[loop_index].uv = (float(u), float(v))
-
-        colors = getattr(mesh_data, "colors", None)
-        if colors:
-            color_attr = get_or_create_corner_color_layer(me, "Col")
-            if color_attr is None:
-                col_data = []
-            else:
-                col_data = color_attr.data
-            for poly in me.polygons:
-                for loop_index in range(poly.loop_start, poly.loop_start + poly.loop_total):
-                    if loop_index >= len(me.loops):
-                        continue
-                    vert_index = me.loops[loop_index].vertex_index
-                    if vert_index < len(colors) and loop_index < len(col_data):
-                        r, g, b, a = colors[vert_index]
-                        col_data[loop_index].color = (
-                            r / 255.0,
-                            g / 255.0,
-                            b / 255.0,
-                            a / 255.0,
-                        )
+        writeStoriesVertexMappedCorners(
+            me, getattr(mesh_data, "uvs", None), getattr(mesh_data, "colors", None)
+        )
 
         obj = bpy.data.objects.new(name, me)
         collection.objects.link(obj)
@@ -3704,6 +3670,12 @@ def build_stories_armature_from_frame_mats(
         eb = arm_data.edit_bones.new(name)
         alignEditBoneToFrameMatrix(eb, world_mat, default_length=0.1)
         bones_by_ptr[frame_ptr] = eb
+
+    parent_ptrs = getattr(arm_info, 'frame_parent_ptrs', {}) or {}
+    for frame_ptr, edit_bone in bones_by_ptr.items():
+        parent_ptr = int(parent_ptrs.get(frame_ptr, 0) or 0)
+        if parent_ptr and parent_ptr != frame_ptr and parent_ptr in bones_by_ptr:
+            edit_bone.parent = bones_by_ptr[parent_ptr]
 
     bpy.ops.object.mode_set(mode='OBJECT')
 
@@ -3896,6 +3868,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
     faces: List[Tuple[int, int, int]] = []
     face_material_ids: List[int] = []
     material_ids: List[int] = []
+    material_slot_by_id: Dict[int, int] = {}
 
     for group in groups:
         for strip in getattr(group, "strips", []) or []:
@@ -3903,9 +3876,10 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
             if count < 3:
                 continue
             material_id = int(getattr(strip, "material_res_index", -1) or -1)
-            if material_id not in material_ids:
+            if material_id not in material_slot_by_id:
+                material_slot_by_id[material_id] = len(material_ids)
                 material_ids.append(material_id)
-            material_slot = material_ids.index(material_id)
+            material_slot = material_slot_by_id[material_id]
             base = len(vertices)
             vertices.extend(list(strip.verts[:count]))
             uvs.extend(list(strip.uvs[:count]))
@@ -4520,7 +4494,7 @@ def import_stories_mdl(
         root_obj["bleeds_mdl_source_filepath"] = str(filepath)
 
         try:
-            source_template = mdl_lib._load_ped_source_template_blocks({
+            source_template = mdl_lib.loadPedSourceTemplateBlocks({
                 "source_filepath": str(filepath),
                 "frame_ptr": int(getattr(atomic, "frame_ptr", 0) or 0),
                 "geom_ptr": int(getattr(atomic, "geom_ptr", 0) or 0),
@@ -4704,3 +4678,300 @@ def import_stories_mdl(
             print(failure_line)
 
     return created_objects
+
+
+def cleanupMh2Datablocks(before, failed=False):
+    collections, objects, meshes, armatures, materials, images, lights = before
+    if failed:
+        for obj in list(bpy.data.objects):
+            if obj not in objects:
+                bpy.data.objects.remove(obj, do_unlink=True)
+        for collection in list(bpy.data.collections):
+            if collection not in collections:
+                bpy.data.collections.remove(collection, do_unlink=True)
+    for datablocks, existing in (
+        (bpy.data.meshes, meshes),
+        (bpy.data.armatures, armatures),
+        (bpy.data.materials, materials),
+        (bpy.data.images, images),
+        (bpy.data.lights, lights),
+    ):
+        for block in list(datablocks):
+            if block not in existing and block.users == 0:
+                datablocks.remove(block)
+
+
+
+@contextmanager
+def mh2ImportCleanup():
+    before = (
+        set(bpy.data.collections), set(bpy.data.objects),
+        set(bpy.data.meshes), set(bpy.data.armatures),
+        set(bpy.data.materials), set(bpy.data.images),
+        set(bpy.data.lights),
+    )
+    try:
+        yield
+    except Exception:
+        cleanupMh2Datablocks(before, failed=True)
+        raise
+    else:
+        cleanupMh2Datablocks(before)
+
+
+
+def mh2ImportTransaction(import_function):
+    @wraps(import_function)
+    def wrapper(*args, **kwargs):
+        with mh2ImportCleanup():
+            return import_function(*args, **kwargs)
+    return wrapper
+
+
+
+def sourceMatrix(values):
+    return Matrix(tuple(
+        tuple(values[column * 4 + row] for column in range(4))
+        for row in range(4)
+    ))
+
+
+
+def makeMaterial(record, images):
+    material = bpy.data.materials.new(record['name'] or 'MH2 Material')
+    material.use_nodes = True
+    material.diffuse_color = tuple(channel / 255.0 for channel in record['color'])
+    nodes = material.node_tree.nodes
+    links = material.node_tree.links
+    shader = nodes.get('Principled BSDF')
+    shader.inputs['Base Color'].default_value = material.diffuse_color
+    shader.inputs['Roughness'].default_value = 0.8
+    color = nodes.new('ShaderNodeAttribute')
+    color.attribute_name = 'Prelight'
+    image = images.get(record['name'].casefold())
+    if image:
+        texture = nodes.new('ShaderNodeTexImage')
+        texture.image = image
+        multiply = nodes.new('ShaderNodeMixRGB')
+        multiply.blend_type = 'MULTIPLY'
+        multiply.inputs[0].default_value = 1.0
+        links.new(texture.outputs['Color'], multiply.inputs[1])
+        links.new(color.outputs['Color'], multiply.inputs[2])
+        links.new(multiply.outputs[0], shader.inputs['Base Color'])
+        links.new(texture.outputs['Alpha'], shader.inputs['Alpha'])
+        if hasattr(material, 'blend_method'):
+            material.blend_method = 'HASHED'
+    else:
+        links.new(color.outputs['Color'], shader.inputs['Base Color'])
+    material['bleeds_model_game'] = 'MH2'
+    material['bleeds_texture_name'] = record['name']
+    return material
+
+
+
+def makeArmature(context, collection, root, bones, rotation):
+    if not bones:
+        return None, {}
+    data = bpy.data.armatures.new(root.name + ' Skeleton')
+    armature = bpy.data.objects.new(data.name, data)
+    collection.objects.link(armature)
+    armature.parent = root
+    armature.show_in_front = True
+    armature['bleeds_model_game'] = 'MH2'
+    context.view_layer.objects.active = armature
+    armature.select_set(True)
+    bpy.ops.object.mode_set(mode='EDIT')
+    names = {}
+    rotation_inverse = rotation.inverted()
+    try:
+        for index, record in enumerate(bones):
+            bone = data.edit_bones.new(record['name'] or 'Bone_%d' % index)
+            matrix = rotation @ sourceMatrix(record['matrix']) @ rotation_inverse
+            if not all(math.isfinite(value) for row in matrix for value in row):
+                raise ValueError('MH2 bone matrix contains non-finite values')
+            bone.head = matrix.translation
+            direction = matrix.to_3x3() @ Vector((0.0, 0.05, 0.0))
+            if direction.length < 0.0001:
+                direction = Vector((0.0, 0.05, 0.0))
+            bone.tail = bone.head + direction
+            bone.align_roll(matrix.to_3x3() @ Vector((0.0, 0.0, 1.0)))
+            names[record['offset']] = bone.name
+        for record in bones:
+            if record['parent'] in names:
+                data.edit_bones[names[record['offset']]].parent = data.edit_bones[names[record['parent']]]
+    finally:
+        bpy.ops.object.mode_set(mode='OBJECT')
+    for index, record in enumerate(bones):
+        bone = data.bones[names[record['offset']]]
+        if record['identifier'] is not None:
+            bone['BoneID'] = record['identifier']
+            bone['bone_id'] = record['identifier']
+        bone['bleeds_mh2_source_offset'] = record['offset']
+    return armature, names
+
+
+
+def makeMesh(collection, root, name, part, materials, rotation,
+             parent_matrix=None, armature=None, bones=None,
+             palette=None, names=None, rigid_parent=0):
+    positions = []
+    weighted = any(part['weights'])
+    if weighted and len(part['weights']) != len(part['vertices']):
+        raise ValueError('MH2 skin weight count does not match its vertex count')
+    for vertex in part['vertices']:
+        position = Vector(vertex)
+        if parent_matrix is not None and not weighted:
+            position = parent_matrix @ position
+        positions.append(rotation @ position)
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(positions, [], part['faces'])
+    mesh.update()
+    mesh.materials.append(materials[part['material']])
+    uv = mesh.uv_layers.new(name='UVMap')
+    colors = mesh.color_attributes.new(name='Prelight', type='BYTE_COLOR', domain='CORNER')
+    loop_vertices = np.empty(len(mesh.loops), dtype=np.int32)
+    mesh.loops.foreach_get('vertex_index', loop_vertices)
+    uv_values = np.asarray(part['uvs'], dtype=np.float64)[loop_vertices].copy()
+    uv_values[:, 1] = 1.0 - uv_values[:, 1]
+    uv.data.foreach_set('uv', uv_values.reshape(-1))
+    color_values = np.asarray(part['colors'], dtype=np.float64)[loop_vertices] / 255.0
+    colors.data.foreach_set('color', color_values.reshape(-1))
+    mesh.polygons.foreach_set('use_smooth', np.ones(len(mesh.polygons), dtype=np.bool_))
+    if part['normals'] and hasattr(mesh, 'normals_split_custom_set_from_vertices'):
+        normal_matrix = rotation.to_3x3()
+        if parent_matrix is not None and not weighted:
+            normal_matrix = normal_matrix @ parent_matrix.to_3x3().inverted().transposed()
+        mesh.normals_split_custom_set_from_vertices([
+            (normal_matrix @ Vector(normal)).normalized()
+            for normal in part['normals']
+        ])
+        if hasattr(mesh, 'use_auto_smooth'):
+            mesh.use_auto_smooth = True
+    obj = bpy.data.objects.new(name, mesh)
+    collection.objects.link(obj)
+    obj.parent = armature or root
+    obj['bleeds_model_game'] = 'MH2'
+    obj['bleeds_mh2_geometry_offset'] = part['offset']
+    obj['bleeds_mh2_metadata_version'] = 2
+    obj['bleeds_mh2_source_face_count'] = len(part['faces'])
+    obj['bleeds_mh2_source_material_index'] = int(part['material'])
+    obj['bleeds_mh2_source_weighted'] = bool(weighted)
+    if weighted:
+        for influence_index in range(4):
+            palette_attribute = mesh.attributes.new(
+                name='bleeds_mh2_source_palette_index_%d' % influence_index, 
+                type='INT', domain='POINT'
+            )
+            weight_attribute = mesh.attributes.new(
+                name='bleeds_mh2_source_palette_weight_%d' % influence_index, 
+                type='FLOAT', domain='POINT'
+            )
+            tokens = np.fromiter(
+                (int(influences[influence_index][0]) if influence_index < len(influences) else -1
+                 for influences in part['weights']), 
+                dtype=np.int32, count=len(part['weights'])
+            )
+            weights = np.fromiter(
+                (float(influences[influence_index][1]) if influence_index < len(influences) else 0.0
+                 for influences in part['weights']), 
+                dtype=np.float32, count=len(part['weights'])
+            )
+            palette_attribute.data.foreach_set('value', tokens)
+            weight_attribute.data.foreach_set('value', weights)
+    if armature:
+        group_names = {}
+        vertex_weights = part['weights'] if weighted else (() for vertex in positions)
+        for vertex_index, influences in enumerate(vertex_weights):
+            merged = {}
+            for token, weight in influences:
+                weight = float(weight)
+                if not math.isfinite(weight) or weight <= 0.0:
+                    continue
+                if token < 0 or token >= len(palette) or palette[token] is None:
+                    raise ValueError('MH2 vertex refers to an unresolved bone palette entry')
+                offset = bones[palette[token]]['offset']
+                if offset not in names:
+                    raise ValueError('MH2 vertex refers to a bone absent from the armature')
+                group_name = names[offset]
+                merged[group_name] = merged.get(group_name, 0.0) + weight
+            if not merged and rigid_parent in names:
+                merged[names[rigid_parent]] = 1.0
+            total_weight = sum(merged.values())
+            if not math.isfinite(total_weight) or total_weight <= 0.0:
+                raise ValueError('MH2 skinned vertex has no valid bone weights')
+            for group_name, weight in merged.items():
+                if group_name not in group_names:
+                    group_names[group_name] = obj.vertex_groups.new(name=group_name)
+                group_names[group_name].add([vertex_index], weight / total_weight, 'REPLACE')
+        modifier = obj.modifiers.new('MH2 Armature', 'ARMATURE')
+        modifier.object = armature
+    return obj
+
+
+
+@mh2ImportTransaction
+def importModel(context, path, platform='AUTO', import_textures=True, model_type='AUTO'):
+    resource, entries = readModel(Path(path).read_bytes(), platform)
+    model_type = str(model_type or 'AUTO').upper().strip()
+    if model_type not in {'AUTO', 'SIM', 'PED', 'CUT'}:
+        raise ValueError('Unsupported Manhunt 2 model class: ' + model_type)
+    entry_types = []
+    for entry in entries:
+        has_skin = any(bool(part['weights']) for atomic in entry['objects'] for part in atomic['parts'])
+        detected_type = 'PED' if entry['bones'] or has_skin else 'SIM'
+        if model_type == 'SIM' and detected_type != 'SIM':
+            raise ValueError('MH2 source has a skeleton or skin weights; use ClumpModel')
+        if model_type in {'PED', 'CUT'} and detected_type != 'PED':
+            raise ValueError('MH2 source has no clump skeleton or skin weights; use SimpleModel')
+        entry_types.append(detected_type if model_type == 'AUTO' else model_type)
+    if context.object is not None and context.object.mode != 'OBJECT':
+        bpy.ops.object.mode_set(mode='OBJECT')
+    rotation = Matrix.Rotation(math.pi / 2.0, 4, 'X')
+    collection = bpy.data.collections.new(Path(path).stem)
+    context.scene.collection.children.link(collection)
+    created = []
+    images = {}
+    if import_textures:
+        platforms = sorted({atomic['platform'] for entry in entries for atomic in entry['objects']})
+        for actual in platforms:
+            sidecar = companionTexture(path, actual)
+            if sidecar:
+                images.update(importTextures(sidecar, actual))
+    for entry_index, entry in enumerate(entries):
+        root = bpy.data.objects.new(entry['name'], None)
+        collection.objects.link(root)
+        root['bleeds_model_game'] = 'MH2'
+        root['bleeds_is_mdl_root'] = True
+        root['bleeds_mdl_filepath'] = str(Path(path).resolve())
+        root['bleeds_mh2_metadata_version'] = 2
+        root['bleeds_mh2_path'] = str(Path(path).resolve())
+        root['bleeds_mh2_clump_index'] = entry_index
+        platforms = {atomic['platform'] for atomic in entry['objects']}
+        root['bleeds_mh2_platform'] = ','.join(sorted(platforms))
+        root['bleeds_mdl_platform'] = root['bleeds_mh2_platform']
+        root['bleeds_mdl_type'] = entry_types[entry_index]
+        root['bleeds_mh2_model_class'] = entry_types[entry_index]
+        if hasattr(root, 'bleeds_mdl_type'):
+            root.bleeds_mdl_type = entry_types[entry_index]
+        armature, names = makeArmature(context, collection, root, entry['bones'], rotation)
+        by_offset = {bone['offset']:bone for bone in entry['bones']}
+        for object_index, atomic in enumerate(entry['objects']):
+            materials = [makeMaterial(record, images) for record in atomic['materials']]
+            parent_record = by_offset.get(atomic['parent'])
+            parent_matrix = sourceMatrix(parent_record['matrix']) if parent_record else None
+            for part_index, part in enumerate(atomic['parts']):
+                obj = makeMesh(collection, root, '%s_%d_%d' % (root.name, object_index, part_index), part, materials, rotation, 
+                               parent_matrix, armature, entry['bones'], entry['palette'], names, atomic['parent'])
+                obj['bleeds_mh2_platform'] = atomic['platform']
+                obj['bleeds_mh2_clump_index'] = entry_index
+                obj['bleeds_mh2_atomic_index'] = object_index
+                obj['bleeds_mh2_part_index'] = part_index
+                obj['bleeds_mh2_source_vertex_count'] = len(part['vertices'])
+                obj['bleeds_mdl_filepath'] = str(Path(path).resolve())
+                obj['bleeds_mdl_part_index'] = part_index
+                obj['bleeds_mdl_source_part_index'] = part_index
+                obj['bleeds_mh2_parent_bone_offset'] = int(atomic['parent'])
+                created.append(obj)
+        created.append(root)
+    return created
+

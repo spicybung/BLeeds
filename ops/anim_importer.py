@@ -829,14 +829,31 @@ def makePoseQuaternionContinuous(pose_bone, previous_quaternion=None):
         return current
 
 
-def finalizeImportedAnimActionCurves(action, start_frame: float, end_frame: float) -> int:
+def iterActionCurves(action, slot=None):
+    if action is None:
+        return
+    if getattr(action, 'is_action_layered', False):
+        for layer in action.layers:
+            for strip in layer.strips:
+                if slot is not None:
+                    channelbag = strip.channelbag(slot) if hasattr(strip, 'channelbag') else None
+                    if channelbag is not None:
+                        yield from channelbag.fcurves
+                else:
+                    for channelbag in getattr(strip, 'channelbags', ()):
+                        yield from channelbag.fcurves
+    else:
+        yield from getattr(action, 'fcurves', ())
+
+
+def finalizeImportedAnimActionCurves(action, start_frame: float, end_frame: float, slot=None) -> int:
     if action is None:
         return 0
     changed = 0
     lo = min(float(start_frame), float(end_frame)) - 1.0e-5
     hi = max(float(start_frame), float(end_frame)) + 1.0e-5
     try:
-        fcurves = list(action.fcurves)
+        fcurves = list(iterActionCurves(action, slot))
     except Exception:
         return 0
 
@@ -1574,10 +1591,17 @@ def repairImportedMdlMeshBinding(mesh_object, armature_object) -> Tuple[bool, st
         bone_names = set()
 
     normalized_to_bone = {}
-    for bone_name in bone_names:
+    ambiguous_bone_names = set()
+    for bone_name in sorted(bone_names):
         normalized = normalizeBindingBoneName(bone_name)
-        if normalized and normalized not in normalized_to_bone:
+        if not normalized:
+            continue
+        if normalized in normalized_to_bone and normalized_to_bone[normalized] != bone_name:
+            ambiguous_bone_names.add(normalized)
+        else:
             normalized_to_bone[normalized] = bone_name
+    for normalized in ambiguous_bone_names:
+        normalized_to_bone.pop(normalized, None)
 
     renamed_groups = 0
     unmatched_groups = []
@@ -1587,7 +1611,7 @@ def repairImportedMdlMeshBinding(mesh_object, armature_object) -> Tuple[bool, st
             if group_name in bone_names:
                 continue
             matching_name = normalized_to_bone.get(normalizeBindingBoneName(group_name))
-            if matching_name:
+            if matching_name and mesh_object.vertex_groups.get(matching_name) is None:
                 vertex_group.name = matching_name
                 renamed_groups += 1
                 changed = True
@@ -1716,7 +1740,7 @@ def measureImportedMdlAnimationMotion(
     if action is not None:
         key_frames = set()
         try:
-            for fcurve in action.fcurves:
+            for fcurve in iterActionCurves(action, getattr(armature_object.animation_data, 'action_slot', None)):
                 for keyframe in fcurve.keyframe_points:
                     frame_value = float(keyframe.co[0])
                     if frame_value >= float(start_frame) - 1.0e-5 and frame_value <= float(end_frame) + 1.0e-5:
@@ -2069,7 +2093,10 @@ def applyAnimEntryToArmature(
     scene.frame_start = min(int(scene.frame_start), int(start_frame))
     scene.frame_end = max(int(scene.frame_end), int(math.ceil(end_frame)) + 1)
 
-    linear_key_count = finalizeImportedAnimActionCurves(action, float(start_frame), float(end_frame))
+    linear_key_count = finalizeImportedAnimActionCurves(
+        action, float(start_frame), float(end_frame),
+        getattr(armature_object.animation_data, 'action_slot', None),
+    )
     if linear_key_count:
         log_lines.append(f"Interpolation: set {linear_key_count} imported keyframe points to LINEAR.")
 
