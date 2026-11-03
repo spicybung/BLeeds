@@ -4824,19 +4824,40 @@ def makeMesh(collection, root, name, part, materials, rotation,
             position = parent_matrix @ position
         positions.append(rotation @ position)
     mesh = bpy.data.meshes.new(name)
-    mesh.from_pydata(positions, [], part['faces'])
+    vertex_positions = [tuple(float(component) for component in position) for position in positions]
+    triangles = [tuple(int(index) for index in face) for face in part['faces']]
+    if any(len(face) != 3 or any(index < 0 or index >= len(vertex_positions) for index in face)
+           for face in triangles):
+        raise ValueError('MH2 model contains invalid triangle indices')
+    mesh.from_pydata(vertex_positions, [], triangles)
     mesh.update()
     mesh.materials.append(materials[part['material']])
     uv = mesh.uv_layers.new(name='UVMap')
     colors = mesh.color_attributes.new(name='Prelight', type='BYTE_COLOR', domain='CORNER')
     loop_vertices = np.empty(len(mesh.loops), dtype=np.int32)
-    mesh.loops.foreach_get('vertex_index', loop_vertices)
-    uv_values = np.asarray(part['uvs'], dtype=np.float64)[loop_vertices].copy()
+    try:
+        mesh.loops.foreach_get('vertex_index', loop_vertices)
+    except (TypeError, ValueError, RuntimeError, BufferError):
+        loop_vertices = np.fromiter(
+            (int(loop.vertex_index) for loop in mesh.loops),
+            dtype=np.int32,
+            count=len(mesh.loops),
+        )
+    uv_values = np.asarray(part['uvs'], dtype=np.float32)[loop_vertices].copy()
     uv_values[:, 1] = 1.0 - uv_values[:, 1]
-    uv.data.foreach_set('uv', uv_values.reshape(-1))
-    color_values = np.asarray(part['colors'], dtype=np.float64)[loop_vertices] / 255.0
-    colors.data.foreach_set('color', color_values.reshape(-1))
-    mesh.polygons.foreach_set('use_smooth', np.ones(len(mesh.polygons), dtype=np.bool_))
+    try:
+        uv.data.foreach_set('uv', np.ascontiguousarray(uv_values.reshape(-1)))
+    except (TypeError, ValueError, RuntimeError, BufferError):
+        for loop_index, value in enumerate(uv_values):
+            uv.data[loop_index].uv = (float(value[0]), float(value[1]))
+    color_values = np.asarray(part['colors'], dtype=np.float32)[loop_vertices] / 255.0
+    try:
+        colors.data.foreach_set('color', np.ascontiguousarray(color_values.reshape(-1)))
+    except (TypeError, ValueError, RuntimeError, BufferError):
+        for loop_index, value in enumerate(color_values):
+            colors.data[loop_index].color = tuple(float(component) for component in value)
+    for polygon in mesh.polygons:
+        polygon.use_smooth = True
     if part['normals'] and hasattr(mesh, 'normals_split_custom_set_from_vertices'):
         normal_matrix = rotation.to_3x3()
         if parent_matrix is not None and not weighted:

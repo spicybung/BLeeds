@@ -13494,11 +13494,20 @@ class Manhunt2MdlReader:
     def stamp_skin_source_attributes(self, mesh, bone_indices, bone_weights):
         if not bone_indices or not bone_weights:
             return
-        count = min(len(mesh.vertices), len(bone_indices), len(bone_weights))
-        if count == 0:
+        vertex_count = len(mesh.vertices)
+        source_count = min(vertex_count, len(bone_indices), len(bone_weights))
+        if source_count == 0:
             return
-        indices = np.asarray(bone_indices[:count], dtype=np.int32)
-        weights = np.asarray(bone_weights[:count], dtype=np.float32)
+
+        indices = np.zeros((vertex_count, 4), dtype=np.int32)
+        weights = np.zeros((vertex_count, 4), dtype=np.float32)
+        for vertex_index in range(source_count):
+            for influence_index, index in enumerate(bone_indices[vertex_index][:4]):
+                indices[vertex_index, influence_index] = int(index)
+            for influence_index, weight in enumerate(bone_weights[vertex_index][:4]):
+                weight = float(weight)
+                weights[vertex_index, influence_index] = weight if math.isfinite(weight) else 0.0
+
         for influence_index in range(4):
             index_name = "bleeds_mh2_source_bone_index_{}".format(influence_index)
             weight_name = "bleeds_mh2_source_bone_weight_{}".format(influence_index)
@@ -13508,8 +13517,19 @@ class Manhunt2MdlReader:
             weight_attribute = mesh.attributes.get(weight_name)
             if weight_attribute is None:
                 weight_attribute = mesh.attributes.new(name=weight_name, type='FLOAT', domain='POINT')
-            index_attribute.data.foreach_set('value', indices[:, influence_index])
-            weight_attribute.data.foreach_set('value', weights[:, influence_index])
+
+            index_values = np.ascontiguousarray(indices[:, influence_index])
+            weight_values = np.ascontiguousarray(weights[:, influence_index])
+            try:
+                index_attribute.data.foreach_set('value', index_values)
+            except (TypeError, ValueError, RuntimeError, BufferError):
+                for vertex_index, value in enumerate(index_values):
+                    index_attribute.data[vertex_index].value = int(value)
+            try:
+                weight_attribute.data.foreach_set('value', weight_values)
+            except (TypeError, ValueError, RuntimeError, BufferError):
+                for vertex_index, value in enumerate(weight_values):
+                    weight_attribute.data[vertex_index].value = float(value)
         mesh["bleeds_mh2_source_skin_attributes_version"] = 1
 
     def apply_skin_weights(self, mesh_object, bone_indices, bone_weights):
@@ -13568,24 +13588,38 @@ class Manhunt2MdlReader:
     def apply_vertex_colors(self, mesh, colors):
         if not colors or len(colors) < len(mesh.vertices):
             return None
+
         loop_indices = np.empty(len(mesh.loops), dtype=np.int32)
-        mesh.loops.foreach_get('vertex_index', loop_indices)
-        mapped_colors = np.asarray(colors, dtype=np.float64)[loop_indices]
+        try:
+            mesh.loops.foreach_get('vertex_index', loop_indices)
+        except (TypeError, ValueError, RuntimeError, BufferError):
+            loop_indices = np.fromiter(
+                (int(loop.vertex_index) for loop in mesh.loops),
+                dtype=np.int32,
+                count=len(mesh.loops),
+            )
+        mapped_colors = np.ascontiguousarray(
+            np.asarray(colors, dtype=np.float32)[loop_indices].reshape(-1)
+        )
+
         try:
             if hasattr(mesh, "color_attributes"):
                 color_layer = mesh.color_attributes.get("Color")
                 if color_layer is None:
                     color_layer = mesh.color_attributes.new(name="Color", type="BYTE_COLOR", domain="CORNER")
-                color_layer.data.foreach_set('color', mapped_colors.reshape(-1))
-                return color_layer
-        except Exception:
-            pass
-        try:
-            color_layer = mesh.vertex_colors.get("Color") or mesh.vertex_colors.new(name="Color")
-            color_layer.data.foreach_set('color', mapped_colors.reshape(-1))
-            return color_layer
-        except Exception:
+            else:
+                color_layer = mesh.vertex_colors.get("Color") or mesh.vertex_colors.new(name="Color")
+        except (AttributeError, TypeError, ValueError, RuntimeError):
             return None
+
+        try:
+            color_layer.data.foreach_set('color', mapped_colors)
+        except (TypeError, ValueError, RuntimeError, BufferError):
+            for loop_index, vertex_index in enumerate(loop_indices):
+                color_layer.data[loop_index].color = tuple(
+                    float(component) for component in colors[int(vertex_index)][:4]
+                )
+        return color_layer
 
     def apply_custom_normals(self, mesh, normals):
         if not normals or len(normals) < len(mesh.vertices):
@@ -13621,7 +13655,16 @@ class Manhunt2MdlReader:
             return None
 
         mesh = bpy.data.meshes.new(name)
-        mesh.from_pydata([tuple(vertex) for vertex in vertices], [], faces)
+        vertex_positions = [tuple(float(component) for component in vertex) for vertex in vertices]
+        face_indices = []
+        for face in faces:
+            if len(face) != 3:
+                raise ValueError("MH2 mesh contains a non-triangle face")
+            triangle = tuple(int(index) for index in face)
+            if any(index < 0 or index >= len(vertex_positions) for index in triangle):
+                raise ValueError("MH2 mesh contains a face with an invalid vertex index")
+            face_indices.append(triangle)
+        mesh.from_pydata(vertex_positions, [], face_indices)
         for polygon in mesh.polygons:
             polygon.use_smooth = True
         try:
@@ -13632,14 +13675,29 @@ class Manhunt2MdlReader:
         mesh.update()
 
         loop_indices = np.empty(len(mesh.loops), dtype=np.int32)
-        mesh.loops.foreach_get('vertex_index', loop_indices)
+        try:
+            mesh.loops.foreach_get('vertex_index', loop_indices)
+        except (TypeError, ValueError, RuntimeError, BufferError):
+            loop_indices = np.fromiter(
+                (int(loop.vertex_index) for loop in mesh.loops),
+                dtype=np.int32,
+                count=len(mesh.loops),
+            )
         for uv_layer_index, source_uvs in enumerate(uv_layers or []):
             if source_uvs is None or len(source_uvs) < len(vertices):
                 continue
             layer_name = "UVMap" if uv_layer_index == 0 else "UVMap.{}".format(uv_layer_index + 1)
             uv_layer = mesh.uv_layers.new(name=layer_name)
-            mapped_uvs = np.asarray(source_uvs, dtype=np.float64)[loop_indices]
-            uv_layer.data.foreach_set('uv', mapped_uvs.reshape(-1))
+            mapped_uvs = np.ascontiguousarray(
+                np.asarray(source_uvs, dtype=np.float32)[loop_indices].reshape(-1)
+            )
+            try:
+                uv_layer.data.foreach_set('uv', mapped_uvs)
+            except (TypeError, ValueError, RuntimeError, BufferError):
+                for loop_index, vertex_index in enumerate(loop_indices):
+                    uv_layer.data[loop_index].uv = tuple(
+                        float(component) for component in source_uvs[int(vertex_index)][:2]
+                    )
 
         self.apply_vertex_colors(mesh, colors or [])
         self.apply_custom_normals(mesh, normals or [])

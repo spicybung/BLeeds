@@ -20,6 +20,7 @@ from ..leedsLib import native_mdl as mdl_core
 from ..ops import tex_importer
 
 import os
+import traceback
 import bpy
 from bpy.types import Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper, ExportHelper
@@ -380,6 +381,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
             except Exception as exc:
                 failed.append((filepath, str(exc)))
                 print("MDL import failed: {}: {}".format(filepath, exc))
+                traceback.print_exc()
 
         print("MDL import results: {} imported, {} failed".format(imported_count, len(failed)))
 
