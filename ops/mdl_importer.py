@@ -4811,6 +4811,86 @@ def makeArmature(context, collection, root, bones, rotation):
 
 
 
+def writeMh2MeshPointAttribute(mesh, name, data_type, values):
+    expected = len(mesh.vertices)
+    value_dtype = np.int32 if data_type == 'INT' else np.float32
+    values = np.ascontiguousarray(np.asarray(values, dtype=value_dtype).reshape(-1))
+    if len(values) != expected:
+        raise ValueError(
+            'MH2 mesh attribute {} has {} source values for {} vertices'.format(
+                name, len(values), expected
+            )
+        )
+
+    attribute = mesh.attributes.get(name)
+    if attribute is None:
+        try:
+            attribute = mesh.attributes.new(name=name, type=data_type, domain='POINT')
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            print('MH2 could not create mesh attribute {}: {}'.format(name, exc))
+            attribute = None
+
+    collection = getattr(attribute, 'data', None)
+    if collection is not None and len(collection) != expected:
+        mesh.update()
+        collection = getattr(attribute, 'data', None)
+
+    if collection is not None and len(collection) == expected:
+        try:
+            collection.foreach_set('value', values)
+            return True
+        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
+            print('MH2 mesh attribute {} bulk write failed: {}'.format(name, exc))
+            try:
+                convert = int if data_type == 'INT' else float
+                for index, value in enumerate(values):
+                    collection[index].value = convert(value)
+                return True
+            except (IndexError, AttributeError, TypeError, ValueError, RuntimeError) as scalar_error:
+                print('MH2 mesh attribute {} scalar write failed: {}'.format(name, scalar_error))
+
+    mesh[name + '_values'] = [int(value) if data_type == 'INT' else float(value) for value in values]
+    print('MH2 stored {} source values as mesh properties'.format(name))
+    return False
+
+
+def writeMh2MeshCornerData(mesh, layer, property_name, values, component_count, fallback_name):
+    expected = len(mesh.loops)
+    values = np.ascontiguousarray(np.asarray(values, dtype=np.float32).reshape(-1))
+    if len(values) != expected * component_count:
+        raise ValueError(
+            'MH2 {} has {} source components for {} corners'.format(
+                fallback_name, len(values), expected
+            )
+        )
+
+    collection = getattr(layer, 'data', None)
+    if collection is not None and len(collection) != expected:
+        mesh.update()
+        collection = getattr(layer, 'data', None)
+
+    if collection is not None and len(collection) == expected:
+        try:
+            collection.foreach_set(property_name, values)
+            return True
+        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
+            print('MH2 {} bulk write failed: {}'.format(fallback_name, exc))
+            try:
+                for index in range(expected):
+                    start = index * component_count
+                    setattr(
+                        collection[index], property_name,
+                        tuple(float(value) for value in values[start:start + component_count])
+                    )
+                return True
+            except (IndexError, AttributeError, TypeError, ValueError, RuntimeError) as scalar_error:
+                print('MH2 {} scalar write failed: {}'.format(fallback_name, scalar_error))
+
+    mesh[fallback_name] = [float(value) for value in values]
+    print('MH2 stored {} source values as mesh properties'.format(fallback_name))
+    return False
+
+
 def makeMesh(collection, root, name, part, materials, rotation,
              parent_matrix=None, armature=None, bones=None,
              palette=None, names=None, rigid_parent=0):
@@ -4832,30 +4912,44 @@ def makeMesh(collection, root, name, part, materials, rotation,
     mesh.from_pydata(vertex_positions, [], triangles)
     mesh.update()
     mesh.materials.append(materials[part['material']])
-    uv = mesh.uv_layers.new(name='UVMap')
-    colors = mesh.color_attributes.new(name='Prelight', type='BYTE_COLOR', domain='CORNER')
-    loop_vertices = np.empty(len(mesh.loops), dtype=np.int32)
-    try:
-        mesh.loops.foreach_get('vertex_index', loop_vertices)
-    except (TypeError, ValueError, RuntimeError, BufferError):
-        loop_vertices = np.fromiter(
-            (int(loop.vertex_index) for loop in mesh.loops),
-            dtype=np.int32,
-            count=len(mesh.loops),
+    corner_count = len(mesh.loops)
+    loop_vertices = np.empty(corner_count, dtype=np.int32)
+    if corner_count:
+        try:
+            mesh.loops.foreach_get('vertex_index', loop_vertices)
+        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
+            loop_vertices = np.fromiter(
+                (int(loop.vertex_index) for loop in mesh.loops),
+                dtype=np.int32,
+                count=corner_count,
+            )
+
+    if corner_count and len(part['uvs']) >= len(vertex_positions):
+        uv_values = np.asarray(part['uvs'], dtype=np.float32)[loop_vertices].copy()
+        uv_values[:, 1] = 1.0 - uv_values[:, 1]
+        try:
+            uv_layer = mesh.uv_layers.get('UVMap') or mesh.uv_layers.new(name='UVMap')
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            print('MH2 could not create UV layer: {}'.format(exc))
+            uv_layer = None
+        writeMh2MeshCornerData(
+            mesh, uv_layer, 'uv', uv_values, 2, 'bleeds_mh2_source_loop_uvs'
         )
-    uv_values = np.asarray(part['uvs'], dtype=np.float32)[loop_vertices].copy()
-    uv_values[:, 1] = 1.0 - uv_values[:, 1]
-    try:
-        uv.data.foreach_set('uv', np.ascontiguousarray(uv_values.reshape(-1)))
-    except (TypeError, ValueError, RuntimeError, BufferError):
-        for loop_index, value in enumerate(uv_values):
-            uv.data[loop_index].uv = (float(value[0]), float(value[1]))
-    color_values = np.asarray(part['colors'], dtype=np.float32)[loop_vertices] / 255.0
-    try:
-        colors.data.foreach_set('color', np.ascontiguousarray(color_values.reshape(-1)))
-    except (TypeError, ValueError, RuntimeError, BufferError):
-        for loop_index, value in enumerate(color_values):
-            colors.data[loop_index].color = tuple(float(component) for component in value)
+
+    if corner_count and len(part['colors']) >= len(vertex_positions):
+        color_values = np.asarray(part['colors'], dtype=np.float32)[loop_vertices] / 255.0
+        try:
+            color_layer = mesh.color_attributes.get('Prelight')
+            if color_layer is None:
+                color_layer = mesh.color_attributes.new(
+                    name='Prelight', type='BYTE_COLOR', domain='CORNER'
+                )
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            print('MH2 could not create vertex color layer: {}'.format(exc))
+            color_layer = None
+        writeMh2MeshCornerData(
+            mesh, color_layer, 'color', color_values, 4, 'bleeds_mh2_source_loop_colors'
+        )
     for polygon in mesh.polygons:
         polygon.use_smooth = True
     if part['normals'] and hasattr(mesh, 'normals_split_custom_set_from_vertices'):
@@ -4879,26 +4973,24 @@ def makeMesh(collection, root, name, part, materials, rotation,
     obj['bleeds_mh2_source_weighted'] = bool(weighted)
     if weighted:
         for influence_index in range(4):
-            palette_attribute = mesh.attributes.new(
-                name='bleeds_mh2_source_palette_index_%d' % influence_index, 
-                type='INT', domain='POINT'
-            )
-            weight_attribute = mesh.attributes.new(
-                name='bleeds_mh2_source_palette_weight_%d' % influence_index, 
-                type='FLOAT', domain='POINT'
-            )
             tokens = np.fromiter(
                 (int(influences[influence_index][0]) if influence_index < len(influences) else -1
-                 for influences in part['weights']), 
-                dtype=np.int32, count=len(part['weights'])
+                 for influences in part['weights']),
+                dtype=np.int32,
+                count=len(part['weights']),
             )
             weights = np.fromiter(
                 (float(influences[influence_index][1]) if influence_index < len(influences) else 0.0
-                 for influences in part['weights']), 
-                dtype=np.float32, count=len(part['weights'])
+                 for influences in part['weights']),
+                dtype=np.float32,
+                count=len(part['weights']),
             )
-            palette_attribute.data.foreach_set('value', tokens)
-            weight_attribute.data.foreach_set('value', weights)
+            writeMh2MeshPointAttribute(
+                mesh, 'bleeds_mh2_source_palette_index_{}'.format(influence_index), 'INT', tokens
+            )
+            writeMh2MeshPointAttribute(
+                mesh, 'bleeds_mh2_source_palette_weight_{}'.format(influence_index), 'FLOAT', weights
+            )
     if armature:
         group_names = {}
         vertex_weights = part['weights'] if weighted else (() for vertex in positions)

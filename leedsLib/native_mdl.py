@@ -17,6 +17,7 @@
 
 import os
 import io
+import json
 import struct
 import zlib
 import math
@@ -13508,29 +13509,51 @@ class Manhunt2MdlReader:
                 weight = float(weight)
                 weights[vertex_index, influence_index] = weight if math.isfinite(weight) else 0.0
 
+        missing_attributes = []
         for influence_index in range(4):
             index_name = "bleeds_mh2_source_bone_index_{}".format(influence_index)
             weight_name = "bleeds_mh2_source_bone_weight_{}".format(influence_index)
-            index_attribute = mesh.attributes.get(index_name)
-            if index_attribute is None:
-                index_attribute = mesh.attributes.new(name=index_name, type='INT', domain='POINT')
-            weight_attribute = mesh.attributes.get(weight_name)
-            if weight_attribute is None:
-                weight_attribute = mesh.attributes.new(name=weight_name, type='FLOAT', domain='POINT')
-
             index_values = np.ascontiguousarray(indices[:, influence_index])
             weight_values = np.ascontiguousarray(weights[:, influence_index])
-            try:
-                index_attribute.data.foreach_set('value', index_values)
-            except (TypeError, ValueError, RuntimeError, BufferError):
-                for vertex_index, value in enumerate(index_values):
-                    index_attribute.data[vertex_index].value = int(value)
-            try:
-                weight_attribute.data.foreach_set('value', weight_values)
-            except (TypeError, ValueError, RuntimeError, BufferError):
-                for vertex_index, value in enumerate(weight_values):
-                    weight_attribute.data[vertex_index].value = float(value)
+
+            for name, data_type, values, convert in (
+                (index_name, 'INT', index_values, int),
+                (weight_name, 'FLOAT', weight_values, float),
+            ):
+                attribute = mesh.attributes.get(name)
+                if attribute is None:
+                    try:
+                        attribute = mesh.attributes.new(name=name, type=data_type, domain='POINT')
+                    except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                        self.log("MH2 point attribute {!r} unavailable: {}".format(name, exc))
+                        attribute = None
+
+                attribute_data = getattr(attribute, 'data', None)
+                if attribute_data is not None and len(attribute_data) != vertex_count:
+                    mesh.update()
+                    attribute_data = getattr(attribute, 'data', None)
+
+                if attribute_data is None or len(attribute_data) != vertex_count:
+                    missing_attributes.append(name)
+                    mesh[name + '_values'] = [convert(value) for value in values]
+                    continue
+
+                try:
+                    attribute_data.foreach_set('value', values)
+                except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
+                    self.log("MH2 attribute {!r} bulk write failed: {}".format(name, exc))
+                    try:
+                        for vertex_index, value in enumerate(values):
+                            attribute_data[vertex_index].value = convert(value)
+                    except (IndexError, TypeError, ValueError, RuntimeError) as element_error:
+                        missing_attributes.append(name)
+                        mesh[name + '_values'] = [convert(value) for value in values]
+                        self.log("MH2 attribute {!r} scalar write failed: {}".format(name, element_error))
+
         mesh["bleeds_mh2_source_skin_attributes_version"] = 1
+        if missing_attributes:
+            mesh["bleeds_mh2_source_skin_attribute_fallbacks"] = json.dumps(missing_attributes)
+            self.log("MH2 stored source skin data as mesh properties for: {}".format(', '.join(missing_attributes)))
 
     def apply_skin_weights(self, mesh_object, bone_indices, bone_weights):
         if mesh_object is None or not bone_indices or not bone_weights:
@@ -13540,8 +13563,8 @@ class Manhunt2MdlReader:
             return 0
 
         vertex_groups = mesh_object.vertex_groups
-        while len(vertex_groups) > 0:
-            vertex_groups.remove(vertex_groups[0])
+        for vertex_group in tuple(vertex_groups):
+            vertex_groups.remove(vertex_group)
         groups_by_name = {}
         groups = []
         for name in palette_names:
@@ -13579,7 +13602,7 @@ class Manhunt2MdlReader:
                 assigned_influence_count += 1
 
         mesh_object["bleeds_mh2_skin_palette_size"] = len(palette_names)
-        mesh_object["bleeds_mh2_skin_palette_names"] = [str(name) for name in palette_names]
+        mesh_object["bleeds_mh2_skin_palette_names"] = json.dumps([str(name) for name in palette_names])
         mesh_object["bleeds_mh2_skin_palette_source"] = "ANIM_BIND_TABLE" if self.skin_palette else "HIERARCHY_FALLBACK"
         mesh_object["bleeds_mh2_weighted_vertex_count"] = int(weighted_vertex_count)
         mesh_object["bleeds_mh2_assigned_influence_count"] = int(assigned_influence_count)
@@ -13589,36 +13612,58 @@ class Manhunt2MdlReader:
         if not colors or len(colors) < len(mesh.vertices):
             return None
 
-        loop_indices = np.empty(len(mesh.loops), dtype=np.int32)
+        total_loops = len(mesh.loops)
+        if total_loops == 0:
+            return None
+
+        loop_indices = np.empty(total_loops, dtype=np.int32)
         try:
             mesh.loops.foreach_get('vertex_index', loop_indices)
-        except (TypeError, ValueError, RuntimeError, BufferError):
+        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
             loop_indices = np.fromiter(
                 (int(loop.vertex_index) for loop in mesh.loops),
                 dtype=np.int32,
-                count=len(mesh.loops),
+                count=total_loops,
             )
         mapped_colors = np.ascontiguousarray(
             np.asarray(colors, dtype=np.float32)[loop_indices].reshape(-1)
         )
 
+        color_layer = None
         try:
-            if hasattr(mesh, "color_attributes"):
-                color_layer = mesh.color_attributes.get("Color")
+            if hasattr(mesh, 'color_attributes'):
+                color_layer = mesh.color_attributes.get('Color')
                 if color_layer is None:
-                    color_layer = mesh.color_attributes.new(name="Color", type="BYTE_COLOR", domain="CORNER")
-            else:
-                color_layer = mesh.vertex_colors.get("Color") or mesh.vertex_colors.new(name="Color")
-        except (AttributeError, TypeError, ValueError, RuntimeError):
+                    color_layer = mesh.color_attributes.new(name='Color', type='BYTE_COLOR', domain='CORNER')
+        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            self.log('MH2 color attribute unavailable: {}'.format(exc))
+
+        if color_layer is None or len(color_layer.data) != total_loops:
+            mesh.update()
+            try:
+                color_layer = mesh.vertex_colors.get('Color') or mesh.vertex_colors.new(name='Color')
+            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                self.log('MH2 legacy vertex color layer unavailable: {}'.format(exc))
+                color_layer = None
+
+        if color_layer is None or len(color_layer.data) != total_loops:
+            mesh['bleeds_mh2_source_loop_colors'] = [float(value) for value in mapped_colors]
+            self.log('MH2 color layer has no loop data; source colors retained as mesh properties')
             return None
 
         try:
             color_layer.data.foreach_set('color', mapped_colors)
-        except (TypeError, ValueError, RuntimeError, BufferError):
-            for loop_index, vertex_index in enumerate(loop_indices):
-                color_layer.data[loop_index].color = tuple(
-                    float(component) for component in colors[int(vertex_index)][:4]
-                )
+        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
+            self.log('MH2 bulk vertex color write failed: {}'.format(exc))
+            try:
+                for loop_index, vertex_index in enumerate(loop_indices):
+                    color_layer.data[loop_index].color = tuple(
+                        float(component) for component in colors[int(vertex_index)][:4]
+                    )
+            except (IndexError, TypeError, ValueError, RuntimeError) as element_error:
+                mesh['bleeds_mh2_source_loop_colors'] = [float(value) for value in mapped_colors]
+                self.log('MH2 vertex color fallback failed: {}'.format(element_error))
+                return None
         return color_layer
 
     def apply_custom_normals(self, mesh, normals):
@@ -13665,39 +13710,68 @@ class Manhunt2MdlReader:
                 raise ValueError("MH2 mesh contains a face with an invalid vertex index")
             face_indices.append(triangle)
         mesh.from_pydata(vertex_positions, [], face_indices)
+        mesh.update()
+        if len(mesh.vertices) != len(vertex_positions) or len(mesh.polygons) != len(face_indices):
+            raise ValueError(
+                "MH2 mesh {!r}: Blender created {} vertices / {} faces, expected {} vertices / {} faces".format(
+                    name, len(mesh.vertices), len(mesh.polygons), len(vertex_positions), len(face_indices)
+                )
+            )
+
         for polygon in mesh.polygons:
             polygon.use_smooth = True
         try:
-            if hasattr(mesh, "use_auto_smooth"):
+            if hasattr(mesh, 'use_auto_smooth'):
                 mesh.use_auto_smooth = True
-        except Exception:
+        except (AttributeError, TypeError, ValueError, RuntimeError):
             pass
         mesh.update()
 
-        loop_indices = np.empty(len(mesh.loops), dtype=np.int32)
-        try:
-            mesh.loops.foreach_get('vertex_index', loop_indices)
-        except (TypeError, ValueError, RuntimeError, BufferError):
-            loop_indices = np.fromiter(
-                (int(loop.vertex_index) for loop in mesh.loops),
-                dtype=np.int32,
-                count=len(mesh.loops),
-            )
+        total_loops = len(mesh.loops)
+        loop_indices = np.empty(total_loops, dtype=np.int32)
+        if total_loops:
+            try:
+                mesh.loops.foreach_get('vertex_index', loop_indices)
+            except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
+                loop_indices = np.fromiter(
+                    (int(loop.vertex_index) for loop in mesh.loops),
+                    dtype=np.int32,
+                    count=total_loops,
+                )
+
         for uv_layer_index, source_uvs in enumerate(uv_layers or []):
-            if source_uvs is None or len(source_uvs) < len(vertices):
+            if not source_uvs or len(source_uvs) < len(vertices) or not total_loops:
                 continue
-            layer_name = "UVMap" if uv_layer_index == 0 else "UVMap.{}".format(uv_layer_index + 1)
-            uv_layer = mesh.uv_layers.new(name=layer_name)
+            layer_name = 'UVMap' if uv_layer_index == 0 else 'UVMap.{}'.format(uv_layer_index + 1)
             mapped_uvs = np.ascontiguousarray(
                 np.asarray(source_uvs, dtype=np.float32)[loop_indices].reshape(-1)
             )
             try:
+                uv_layer = mesh.uv_layers.get(layer_name) or mesh.uv_layers.new(name=layer_name)
+            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                uv_layer = None
+                self.log("MH2 UV layer {!r} unavailable: {}".format(layer_name, exc))
+
+            if uv_layer is not None and len(uv_layer.data) != total_loops:
+                mesh.update()
+
+            if uv_layer is None or len(uv_layer.data) != total_loops:
+                mesh['bleeds_mh2_source_uv_layer_{}'.format(uv_layer_index)] = [float(value) for value in mapped_uvs]
+                self.log("MH2 UV layer {!r} has no loop data; source UVs retained as mesh properties".format(layer_name))
+                continue
+
+            try:
                 uv_layer.data.foreach_set('uv', mapped_uvs)
-            except (TypeError, ValueError, RuntimeError, BufferError):
-                for loop_index, vertex_index in enumerate(loop_indices):
-                    uv_layer.data[loop_index].uv = tuple(
-                        float(component) for component in source_uvs[int(vertex_index)][:2]
-                    )
+            except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
+                self.log("MH2 UV layer {!r} bulk write failed: {}".format(layer_name, exc))
+                try:
+                    for loop_index, vertex_index in enumerate(loop_indices):
+                        uv_layer.data[loop_index].uv = tuple(
+                            float(component) for component in source_uvs[int(vertex_index)][:2]
+                        )
+                except (IndexError, TypeError, ValueError, RuntimeError) as element_error:
+                    mesh['bleeds_mh2_source_uv_layer_{}'.format(uv_layer_index)] = [float(value) for value in mapped_uvs]
+                    self.log("MH2 UV layer {!r} fallback write failed: {}".format(layer_name, element_error))
 
         self.apply_vertex_colors(mesh, colors or [])
         self.apply_custom_normals(mesh, normals or [])
@@ -13706,22 +13780,54 @@ class Manhunt2MdlReader:
             mesh.materials.append(self.get_or_create_material(material_info))
 
         if face_material_indices is not None:
-            material_attribute = mesh.attributes.new(
-                name="bleeds_mh2_source_material_index", type='INT', domain='FACE'
-            )
-            for polygon_index, material_index in enumerate(face_material_indices):
-                if polygon_index < len(mesh.polygons):
-                    material_attribute.data[polygon_index].value = int(material_index)
-                    if 0 <= int(material_index) < len(mesh.materials):
-                        mesh.polygons[polygon_index].material_index = int(material_index)
+            polygon_count = len(mesh.polygons)
+            material_attribute = None
+            try:
+                material_attribute = mesh.attributes.get('bleeds_mh2_source_material_index')
+                if material_attribute is None:
+                    material_attribute = mesh.attributes.new(
+                        name='bleeds_mh2_source_material_index', type='INT', domain='FACE'
+                    )
+            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                self.log('MH2 face material attribute unavailable: {}'.format(exc))
+
+            attribute_data = getattr(material_attribute, 'data', None)
+            if attribute_data is not None and len(attribute_data) != polygon_count:
+                mesh.update()
+                attribute_data = getattr(material_attribute, 'data', None)
+
+            if attribute_data is None or len(attribute_data) != polygon_count:
+                mesh['bleeds_mh2_source_face_material_indices'] = [int(value) for value in face_material_indices]
+                self.log('MH2 face material attribute has no face data; source indices retained as mesh properties')
+            else:
+                material_values = np.zeros(polygon_count, dtype=np.int32)
+                for polygon_index, value in enumerate(face_material_indices[:polygon_count]):
+                    material_values[polygon_index] = int(value)
+                try:
+                    attribute_data.foreach_set('value', material_values)
+                except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
+                    self.log('MH2 face material attribute bulk write failed: {}'.format(exc))
+                    try:
+                        for polygon_index, value in enumerate(material_values):
+                            attribute_data[polygon_index].value = int(value)
+                    except (IndexError, TypeError, ValueError, RuntimeError) as element_error:
+                        mesh['bleeds_mh2_source_face_material_indices'] = [int(value) for value in material_values]
+                        self.log('MH2 face material attribute fallback write failed: {}'.format(element_error))
+
+            for polygon_index, material_index in enumerate(face_material_indices[:polygon_count]):
+                material_index = int(material_index)
+                if 0 <= material_index < len(mesh.materials):
+                    mesh.polygons[polygon_index].material_index = material_index
         elif material_id_records:
+            polygon_count = len(mesh.polygons)
             for record in material_id_records:
-                material_index = int(record.get("material_id", 0))
-                start_face = int(record.get("start_face", 0))
-                end_face = start_face + int(record.get("num_faces", 0))
+                material_index = int(record.get('material_id', 0))
+                if not 0 <= material_index < len(mesh.materials):
+                    continue
+                start_face = max(0, int(record.get('start_face', 0)))
+                end_face = min(polygon_count, start_face + int(record.get('num_faces', 0)))
                 for polygon_index in range(start_face, end_face):
-                    if polygon_index < len(mesh.polygons) and material_index < len(mesh.materials):
-                        mesh.polygons[polygon_index].material_index = material_index
+                    mesh.polygons[polygon_index].material_index = material_index
 
         mesh_object = bpy.data.objects.new(name, mesh)
         self.collection.objects.link(mesh_object)
