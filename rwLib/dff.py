@@ -493,7 +493,10 @@ def readPs2Geometry(resource, offset):
         decoder = Ps2VifStreamDecoder()
         records = decoder.feed(resource.data[start:finish], final=True)
         part = dict(vertices=[], faces=[], uvs=[], normals=[], colors=[], weights=[], material=material,
-                    position_sources=[], scale=scale, translation=translation, offset=offset)
+                    position_sources=[], uv_sources=[], normal_sources=[], color_sources=[], weight_sources=[],
+                    uv_scales=[], uv_component_sizes=[], normal_component_sizes=[], color_formats=[],
+                    weight_component_sizes=[], weight_component_counts=[], weight_palettes=[],
+                    scale=scale, translation=translation, offset=offset)
         batch = {}
         def flush():
             positions = batch.get(0x79)
@@ -515,12 +518,24 @@ def readPs2Geometry(resource, offset):
                 part['position_sources'].append(start + positions.stream_offset + 4 + vertex_index * 6)
                 uv = batch.get(0x76)
                 part['uvs'].append((uv.payload[vertex_index * 2] / 128.0 * us, uv.payload[vertex_index * 2 + 1] / 128.0 * vs) if uv else (0.0, 0.0))
+                part['uv_sources'].append(start + uv.stream_offset + 4 + vertex_index * 2 if uv else None)
+                part['uv_scales'].append((us, vs))
+                part['uv_component_sizes'].append(1 if uv else 0)
                 normal = batch.get(0x6A)
+                part['normal_sources'].append(start + normal.stream_offset + 4 + vertex_index * 3 if normal else None)
+                part['normal_component_sizes'].append(1 if normal else 0)
                 part['normals'].append(tuple(value / 128.0 for value in struct.unpack_from('<3b', normal.payload, vertex_index * 3)) if normal else (0.0, 0.0, 1.0))
                 color = batch.get(0x6E)
+                part['color_sources'].append(start + color.stream_offset + 4 + vertex_index * 4 if color else None)
+                part['color_formats'].append(7 if color else 0)
                 rgba = struct.unpack_from('<4B', color.payload, vertex_index * 4) if color else (255, 255, 255, 128)
                 part['colors'].append(tuple(rgba[:3]) + (min(255, rgba[3] * 255 // 128),))
                 skin = batch.get(0x6C)
+                has_skin = skin is not None and skin.num == vertex_count
+                part['weight_sources'].append(start + skin.stream_offset + 4 + vertex_index * 16 if has_skin else None)
+                part['weight_component_sizes'].append(4 if has_skin else 0)
+                part['weight_component_counts'].append(4 if has_skin else 0)
+                part['weight_palettes'].append(None)
                 influences = []
                 if skin and skin.num == vertex_count:
                     for word in struct.unpack_from('<4I', skin.payload, vertex_index * 16):
@@ -606,7 +621,10 @@ def readPspGeometry(resource, offset, world=False):
         if not math.isfinite(vs) or abs(vs) < 1e-30:
             vs = us
         part = dict(vertices=[], faces=[], uvs=[], normals=[], colors=[], weights=[], material=material,
-                    position_sources=[], scale=scale, translation=translation, offset=offset)
+                    position_sources=[], uv_sources=[], normal_sources=[], color_sources=[], weight_sources=[],
+                    uv_scales=[], uv_component_sizes=[], normal_component_sizes=[], color_formats=[],
+                    weight_component_sizes=[], weight_component_counts=[], weight_palettes=[],
+                    scale=scale, translation=translation, offset=offset)
         for index in range(count):
             vertex = offset + buffer + (cursor + index) * stride
             resource.check(vertex, stride)
@@ -618,6 +636,9 @@ def readPspGeometry(resource, offset, world=False):
             part['position_sources'].append(vertex + position_offset)
             part['position_size'] = component_size
             uv = (0.0, 0.0)
+            part['uv_sources'].append(vertex + fields['uv'][0] if 'uv' in fields else None)
+            part['uv_scales'].append((us, vs))
+            part['uv_component_sizes'].append(fields['uv'][1] if 'uv' in fields else 0)
             if 'uv' in fields:
                 address, width, unused = fields['uv']
                 raw_uv = resource.values('<2' + {1:'B', 2:'H', 4:'f'}[width], vertex + address)
@@ -625,11 +646,15 @@ def readPspGeometry(resource, offset, world=False):
                 uv = (raw_uv[0] / uv_divisor * us, raw_uv[1] / uv_divisor * vs)
             part['uvs'].append(uv)
             normal = (0.0, 0.0, 1.0)
+            part['normal_sources'].append(vertex + fields['normal'][0] if 'normal' in fields else None)
+            part['normal_component_sizes'].append(fields['normal'][1] if 'normal' in fields else 0)
             if 'normal' in fields:
                 address, width, unused = fields['normal']
                 normal = tuple(value / {1:128.0, 2:32768.0, 4:1.0}[width] for value in resource.values('<3' + {1:'b', 2:'h', 4:'f'}[width], vertex + address))
             part['normals'].append(normal)
             rgba = (255, 255, 255, 255)
+            part['color_sources'].append(vertex + fields['color'][0] if 'color' in fields else None)
+            part['color_formats'].append((flags >> 2) & 7 if 'color' in fields else 0)
             if 'color' in fields:
                 address, width, unused = fields['color']
                 if width == 4:
@@ -644,6 +669,10 @@ def readPspGeometry(resource, offset, world=False):
                     else:
                         rgba = tuple(((value >> shift) & 15) * 17 for shift in (0, 4, 8, 12))
             part['colors'].append(rgba)
+            part['weight_sources'].append(vertex + fields['weights'][0] if 'weights' in fields else None)
+            part['weight_component_sizes'].append(fields['weights'][1] if 'weights' in fields else 0)
+            part['weight_component_counts'].append(fields['weights'][2] if 'weights' in fields else 0)
+            part['weight_palettes'].append(tuple(resource.data[descriptor + 24:descriptor + 32]) if 'weights' in fields else None)
             influences = []
             if 'weights' in fields:
                 address, width, number = fields['weights']

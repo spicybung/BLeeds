@@ -16,6 +16,7 @@
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 import os
+import json
 import struct
 import math
 from contextlib import contextmanager
@@ -4911,7 +4912,10 @@ def makeMesh(collection, root, name, part, materials, rotation,
         raise ValueError('MH2 model contains invalid triangle indices')
     mesh.from_pydata(vertex_positions, [], triangles)
     mesh.update()
-    mesh.materials.append(materials[part['material']])
+    if materials and 0 <= int(part['material']) < len(materials):
+        material = materials[int(part['material'])]
+        if material is not None:
+            mesh.materials.append(material)
     corner_count = len(mesh.loops)
     loop_vertices = np.empty(corner_count, dtype=np.int32)
     if corner_count:
@@ -5023,8 +5027,10 @@ def makeMesh(collection, root, name, part, materials, rotation,
 
 
 @mh2ImportTransaction
-def importModel(context, path, platform='AUTO', import_textures=True, model_type='AUTO'):
-    resource, entries = readModel(Path(path).read_bytes(), platform)
+def importModel(context, path, platform='AUTO', import_textures=True, model_type='AUTO',
+                import_armature=True, import_materials=True):
+    source_bytes = Path(path).read_bytes()
+    resource, entries = readModel(source_bytes, platform)
     model_type = str(model_type or 'AUTO').upper().strip()
     if model_type not in {'AUTO', 'SIM', 'PED', 'CUT'}:
         raise ValueError('Unsupported Manhunt 2 model class: ' + model_type)
@@ -5064,12 +5070,21 @@ def importModel(context, path, platform='AUTO', import_textures=True, model_type
         root['bleeds_mdl_platform'] = root['bleeds_mh2_platform']
         root['bleeds_mdl_type'] = entry_types[entry_index]
         root['bleeds_mh2_model_class'] = entry_types[entry_index]
+        try:
+            stories_mdl.storeMh2NativeModel(root, source_bytes)
+        except Exception:
+            pass
         if hasattr(root, 'bleeds_mdl_type'):
             root.bleeds_mdl_type = entry_types[entry_index]
-        armature, names = makeArmature(context, collection, root, entry['bones'], rotation)
+        if import_armature:
+            armature, names = makeArmature(context, collection, root, entry['bones'], rotation)
+        else:
+            armature = None
+            names = {bone['offset']: bone['name'] for bone in entry['bones']}
         by_offset = {bone['offset']:bone for bone in entry['bones']}
         for object_index, atomic in enumerate(entry['objects']):
-            materials = [makeMaterial(record, images) for record in atomic['materials']]
+            materials = ([makeMaterial(record, images) for record in atomic['materials']]
+                         if import_materials else [])
             parent_record = by_offset.get(atomic['parent'])
             parent_matrix = sourceMatrix(parent_record['matrix']) if parent_record else None
             for part_index, part in enumerate(atomic['parts']):
@@ -5084,6 +5099,14 @@ def importModel(context, path, platform='AUTO', import_textures=True, model_type
                 obj['bleeds_mdl_part_index'] = part_index
                 obj['bleeds_mdl_source_part_index'] = part_index
                 obj['bleeds_mh2_parent_bone_offset'] = int(atomic['parent'])
+                palette_names = []
+                for bone_index in entry['palette']:
+                    if bone_index is None or bone_index < 0 or bone_index >= len(entry['bones']):
+                        palette_names.append('')
+                    else:
+                        bone_offset = entry['bones'][bone_index]['offset']
+                        palette_names.append(str(names.get(bone_offset, '') or ''))
+                obj['bleeds_mh2_skin_palette_names'] = json.dumps(palette_names)
                 created.append(obj)
         created.append(root)
     return created

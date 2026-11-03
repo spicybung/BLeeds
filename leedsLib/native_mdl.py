@@ -11330,6 +11330,7 @@ class Manhunt2MdlReader:
         self.file_size = 0
         self.file_data = b""
         self.file_was_compressed = False
+        self.native_source_container = None
         self.stem = os.path.splitext(os.path.basename(path))[0]
         self.collection = None
         self.root_obj = None
@@ -11375,6 +11376,7 @@ class Manhunt2MdlReader:
                         self.model_type,
                     )
                     reader.input_container = (self.file_data, self.file_was_compressed)
+                    reader.native_source_container = self.native_source_container
                     reader.entry_index_offset = entry_offset
                     reader.stem = "{}_clump_{:03d}".format(self.stem, index)
                     reader.texture_file_index = self.texture_file_index
@@ -11405,6 +11407,12 @@ class Manhunt2MdlReader:
         self.read_object_infos()
         self.prepare_meshes()
         self.finalize_import_root()
+        for mesh_object in self.imported_mesh_objects:
+            if mesh_object is None or getattr(mesh_object, 'type', None) != 'MESH':
+                continue
+            mesh_object['bleeds_mh2_geometry_signature'] = json.dumps(
+                mh2GeometryFingerprint(mesh_object), sort_keys=True, separators=(',', ':')
+            )
         if self.print_debug_log:
             self.ensure_text_block("BLeeds_MH2_" + self.stem[:40], "\n".join(self.debug_log) + "\n")
         imported_objects = []
@@ -11439,6 +11447,7 @@ class Manhunt2MdlReader:
         with open(filepath, 'rb') as input_file:
             raw_data = input_file.read()
         decoded, compressed_offset, unused_data = decodePmlcContainer(raw_data)
+        self.native_source_container = raw_data
         return decoded, compressed_offset is not None
 
     def is_valid_offset(self, value, minimum=0, size=1):
@@ -11631,6 +11640,43 @@ class Manhunt2MdlReader:
         root["bleeds_mh2_texture_source_path"] = self.texture_source_path
         root["bleeds_mh2_texture_image_count"] = int(len(self.preloaded_texture_images))
         root["bleeds_mh2_import_textures"] = bool(self.import_textures)
+        part_properties = (
+            'bleeds_mh2_objinfo_offset',
+            'bleeds_mh2_object_data_offset',
+            'bleeds_mh2_object_header_size',
+            'bleeds_mh2_material_id_size',
+            'bleeds_mh2_source_material_record_count',
+            'bleeds_mh2_vertex_stride',
+            'bleeds_mh2_vertex_element_type',
+            'bleeds_mh2_vertex_start',
+            'bleeds_mh2_source_vertex_count',
+            'bleeds_mh2_parent_bone_offset',
+            'bleeds_mh2_import_parent_matrix',
+            'bleeds_mh2_skin_palette_names',
+        )
+        part_slots = []
+        for mesh_object in self.imported_mesh_objects:
+            if mesh_object is None or 'bleeds_mh2_objinfo_offset' not in mesh_object:
+                continue
+            properties = {}
+            for name in part_properties:
+                if name not in mesh_object:
+                    continue
+                value = mesh_object[name]
+                if hasattr(value, 'to_list'):
+                    value = value.to_list()
+                elif not isinstance(value, (int, float, bool, str)):
+                    value = list(value)
+                properties[name] = value
+            part_slots.append({'name': str(mesh_object.name), 'properties': properties})
+        root['bleeds_mh2_part_slots'] = json.dumps(part_slots)
+        source_data = self.native_source_container
+        if source_data is None:
+            source_data = (self.file_data if not self.file_was_compressed else
+                           b'Z2HM' + struct.pack('<I', len(self.file_data)) + zlib.compress(self.file_data, 9))
+        if not storeMh2NativeModel(root, source_data):
+            raise RuntimeError('Could not save the Manhunt 2 model data in Blender')
+        root['bleeds_mh2_native_exact'] = self.native_source_container is not None
         if stamp_bleeds_entity_type is not None:
             stamp_bleeds_entity_type(root, entity_type)
 
@@ -12065,13 +12111,13 @@ class Manhunt2MdlReader:
             matches.sort(key=lambda item: (item[0], item[1]))
             return matches[0][2]
 
-        return "unnamed"
+        return self.stem
 
     def build_armature(self):
         import bpy
 
         armature_name = self.get_imported_armature_name()
-        armature = bpy.data.armatures.new(armature_name)
+        armature = bpy.data.armatures.new(armature_name + " Skeleton")
         armature_object = bpy.data.objects.new(armature_name, armature)
         self.collection.objects.link(armature_object)
 
@@ -12148,6 +12194,21 @@ class Manhunt2MdlReader:
         for offset, bone_info in self.bone_map.items():
             pose_bone = armature_object.pose.bones.get(bone_info["name"])
             data_bone = armature_object.data.bones.get(bone_info["name"])
+            parent_offset = int(bone_info.get('parent_offset', 0) or 0)
+            bone_position = bone_info.get('rebuilt_matrix', bone_info['matrix']).to_translation()
+            is_root_handle = int(offset) == int(self.root_bone_offset)
+            is_floor_attachment = (
+                parent_offset == int(self.root_bone_offset)
+                and bone_position.length < 0.10
+                and not bone_info['name'].lower().startswith('bip')
+            )
+            unused_attachment = bone_info['name'].casefold() in {
+                'danny_broken_cutscene_l0',
+                'weapstrap',
+                'lurebagempty_(ct)',
+            }
+            if data_bone is not None and (is_root_handle or is_floor_attachment or unused_attachment):
+                data_bone.hide = True
             for target in (pose_bone, data_bone):
                 if target is None:
                     continue
@@ -14190,6 +14251,149 @@ def validatePspResource(data):
 
 
 MAX_PMLC_SIZE = 512 * 1024 * 1024
+
+
+def mh2GeometryFingerprint(obj):
+    import hashlib
+
+    mesh = obj.data
+    digests = {name: hashlib.sha256() for name in (
+        'positions', 'topology', 'materials', 'uv', 'normals', 'colors',
+        'weights', 'transform',
+    )}
+
+    def packValues(section, values):
+        values = tuple(float(value) for value in values)
+        digests[section].update(struct.pack('<I', len(values)))
+        if values:
+            digests[section].update(struct.pack('<{}f'.format(len(values)), *values))
+
+    def packText(section, value):
+        data = str(value).encode('utf-8', errors='replace')
+        digests[section].update(struct.pack('<I', len(data)))
+        digests[section].update(data)
+
+    digests['positions'].update(struct.pack('<I', len(mesh.vertices)))
+    digests['topology'].update(struct.pack('<II', len(mesh.polygons), len(mesh.loops)))
+    digests['materials'].update(struct.pack('<I', len(mesh.polygons)))
+    group_names = [str(group.name) for group in obj.vertex_groups]
+    packText('weights', obj.get('bleeds_mh2_skin_palette_names', '[]'))
+    for name in group_names:
+        packText('weights', name)
+    digests['weights'].update(struct.pack('<I', len(mesh.vertices)))
+
+    for vertex in mesh.vertices:
+        packValues('positions', vertex.co)
+        groups = sorted((int(member.group), float(member.weight)) for member in vertex.groups)
+        digests['weights'].update(struct.pack('<I', len(groups)))
+        for group_index, weight in groups:
+            digests['weights'].update(struct.pack('<If', group_index, weight))
+
+    for polygon in mesh.polygons:
+        indices = tuple(int(value) for value in polygon.vertices)
+        digests['topology'].update(struct.pack('<I', len(indices)))
+        for index in indices:
+            digests['topology'].update(struct.pack('<I', index))
+        digests['materials'].update(struct.pack('<I', int(polygon.material_index)))
+
+    for loop in mesh.loops:
+        digests['topology'].update(struct.pack('<I', int(loop.vertex_index)))
+        try:
+            normal = loop.normal
+        except (AttributeError, RuntimeError):
+            normal = mesh.vertices[int(loop.vertex_index)].normal
+        packValues('normals', normal)
+
+    digests['uv'].update(struct.pack('<I', len(mesh.uv_layers)))
+    for layer in mesh.uv_layers:
+        packText('uv', layer.name)
+        digests['uv'].update(struct.pack('<I', len(layer.data)))
+        for corner in layer.data:
+            packValues('uv', corner.uv)
+
+    color_attributes = getattr(mesh, 'color_attributes', None)
+    selected_color = None
+    if color_attributes is not None:
+        selected_color = (color_attributes.get('Color') or color_attributes.get('Col')
+                          or getattr(color_attributes, 'active_color', None))
+    if selected_color is None:
+        packText('colors', '')
+    else:
+        packText('colors', selected_color.name)
+        packText('colors', selected_color.domain)
+        digests['colors'].update(struct.pack('<I', len(selected_color.data)))
+        for entry in selected_color.data:
+            packValues('colors', entry.color)
+
+    for row in obj.matrix_world:
+        packValues('transform', row)
+
+    return {section: digest.hexdigest() for section, digest in digests.items()}
+
+
+def storeMh2NativeModel(root, source):
+    import base64
+    import hashlib
+    import bpy
+
+    if not source or len(source) > MAX_PMLC_SIZE:
+        return False
+    if source[:4] not in (b'PMLC', b'Z2HM'):
+        return False
+    texts = getattr(getattr(bpy, 'data', None), 'texts', None)
+    if texts is None:
+        return False
+    digest = hashlib.sha256(source).hexdigest()
+    name = 'BLeeds MH2 ' + digest[:20]
+    text = texts.get(name)
+    if text is None:
+        text = texts.new(name)
+        compressed = zlib.compress(source, 9)
+        text.write(base64.b85encode(compressed).decode('ascii'))
+    text.use_fake_user = True
+    root['bleeds_mh2_native_text'] = text.name
+    root['bleeds_mh2_native_sha256'] = digest
+    return True
+
+
+def loadMh2NativeModel(root):
+    import base64
+    import hashlib
+    from pathlib import Path
+    import bpy
+
+    name = str(root.get('bleeds_mh2_native_text', '') or '')
+    if name:
+        texts = getattr(getattr(bpy, 'data', None), 'texts', None)
+        text = texts.get(name) if texts is not None else None
+        if text is not None:
+            try:
+                encoded = text.as_string().strip().encode('ascii')
+                decoded = zlib.decompress(base64.b85decode(encoded))
+                expected = str(root.get('bleeds_mh2_native_sha256', '') or '')
+                if expected and hashlib.sha256(decoded).hexdigest() != expected:
+                    raise ValueError('Embedded MH2 model data failed its integrity check')
+                if decoded[:4] not in (b'PMLC', b'Z2HM'):
+                    raise ValueError('Embedded MH2 model data has an invalid header')
+                if not root.get('bleeds_mh2_native_exact', False):
+                    source_path = str(root.get('bleeds_mh2_path', '') or root.get('bleeds_mdl_filepath', '') or '')
+                    if source_path and Path(source_path).is_file():
+                        candidate = Path(source_path).read_bytes()
+                        try:
+                            candidate_decoded, _offset, _suffix = decodePmlcContainer(candidate)
+                            embedded_decoded, _offset, _suffix = decodePmlcContainer(decoded)
+                            if candidate_decoded == embedded_decoded:
+                                return candidate
+                        except ValueError:
+                            pass
+                return decoded
+            except (UnicodeError, ValueError, zlib.error) as exc:
+                raise ValueError('Embedded MH2 model data could not be decoded: {}'.format(exc)) from exc
+
+    path = str(root.get('bleeds_mh2_path', '') or root.get('bleeds_mdl_filepath', '') or '')
+    if path and Path(path).is_file():
+        return Path(path).read_bytes()
+    raise FileNotFoundError('This model was imported without its file data, and the original MDL cannot be found. Reimport the MDL once; the Blender file will then keep the data for future exports.')
 
 
 

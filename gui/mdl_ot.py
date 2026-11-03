@@ -93,45 +93,6 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         options={"HIDDEN"},
     )
 
-    import_game: EnumProperty(
-        name="Game",
-        description="Stories title used by the MDL",
-        items=(
-            ("AUTO", "Auto", "Choose the game automatically"),
-            ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),
-            ("VCS", "VCS", "Grand Theft Auto: Vice City Stories"),
-            ("MH2", "MH2", "Manhunt 2"),
-        ),
-        default="AUTO",
-        options={"HIDDEN"},
-    )
-
-    platform: EnumProperty(
-        name="Platform",
-        description="Platform this Stories MDL was built for",
-        items=(
-            ("AUTO", "Auto", "Choose PS2 or PSP automatically"),
-            ("PS2", "PS2", "PlayStation 2 (Liberty City Stories / Vice City Stories)"),
-            ("PSP", "PSP", "PlayStation Portable (Liberty City Stories / Vice City Stories)"),
-        ),
-        default="AUTO",
-        options={"HIDDEN"},
-    )
-
-    mdl_type: EnumProperty(
-        name="Model Type",
-        description="Type of model to import",
-        items=(
-            ("AUTO", "Auto", "Read the model type from the file"),
-            ("SIM", "SimpleModel", "Object or weapon model"),
-            ("PED", "PedModel", "Character model with skin weights"),
-            ("CUT", "ClumpModel (Cutscene)", "Cutscene character or object"),
-            ("VEH", "VehicleModel", "Vehicle parts and frame hierarchy"),
-        ),
-        default="AUTO",
-        options={"HIDDEN"},
-    )
-
     import_texture: BoolProperty(
         name="Import Textures",
         description="Import the matching texture file beside the model",
@@ -150,17 +111,15 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
     )
 
     mh2_import_armature: BoolProperty(
-        name="Import Bones",
-        description="Create the model’s bones and attach its meshes",
+        name="Import Armature",
+        description="Create the skeleton and vertex groups",
         default=True,
-        options={"HIDDEN"},
     )
 
     mh2_import_materials: BoolProperty(
         name="Import Materials",
-        description="Create materials and assign them to the mesh",
+        description="Create the native material slots",
         default=True,
-        options={"HIDDEN"},
     )
 
     create_armature: BoolProperty(
@@ -189,8 +148,34 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         layout = self.layout
         layout.use_property_split = True
         layout.use_property_decorate = False
+
+        filepath = str(getattr(self, "filepath", "") or "")
+        if filepath and self.isManhunt2PcContainer(filepath):
+            layout.prop(self, "mh2_import_armature")
+            layout.prop(self, "mh2_import_materials")
+        else:
+            layout.prop(self, "create_armature")
+
         layout.prop(self, "import_texture")
         drawImportLogOptions(layout, self)
+
+    inspected_filepath: StringProperty(
+        name="Inspected File",
+        default="",
+        options={"HIDDEN"},
+    )
+
+    def check(self, context):
+        filepath = str(getattr(self, "filepath", "") or "")
+        if not filepath or not os.path.isfile(filepath):
+            return False
+
+        inspected = str(getattr(self, "inspected_filepath", "") or "")
+        if os.path.normcase(os.path.normpath(filepath)) == os.path.normcase(os.path.normpath(inspected)):
+            return False
+
+        self.inspected_filepath = filepath
+        return True
 
     def gatherImportFilepaths(self):
         paths = []
@@ -260,42 +245,42 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         for filepath in filepaths:
             try:
                 target_collection_name = collection_name or os.path.basename(filepath)
-                use_manhunt2_pc_reader = (
-                    self.import_game == "MH2"
-                    or (self.import_game == "AUTO" and self.isManhunt2PcContainer(filepath))
-                )
-                if use_manhunt2_pc_reader:
+                is_mh2_container = self.isManhunt2PcContainer(filepath)
+                if is_mh2_container:
                     from ..ops.mdl_importer import mh2ImportCleanup
+                    from ..rwLib.dff import readModel
                     from pathlib import Path
-                    from ..rwLib.dff import Resource, unwrapResource
-                    decoded = unwrapResource(Path(filepath).read_bytes())
-                    if decoded[:4] == b'PMLC':
-                        resource = Resource(decoded, b'PMLC')
-                        first_entry = resource.uint(32)
-                        body = resource.uint(first_entry + 8)
-                        atomic = resource.uint(body + 20)
-                        if atomic and atomic != body + 20:
-                            mesh = resource.uint(atomic + 12)
-                            resource.check(mesh, 96)
-                            is_ps2 = resource.data[mesh + 80:mesh + 84] == b'D2SP'
-                            is_psp = False
-                            if not is_ps2:
-                                try:
-                                    from ..rwLib.dff import readPspGeometry
-                                    readPspGeometry(resource, mesh + 16)
-                                    is_psp = True
-                                except ValueError:
-                                    pass
-                            if is_ps2 or is_psp:
-                                detected_platform = 'PS2' if is_ps2 else 'PSP'
-                                from ..ops.mdl_importer import importModel
-                                imported_objects = importModel(
-                                    context, filepath, detected_platform,
-                                    import_textures=self.import_texture,
-                                )
-                                all_created_objects.extend(imported_objects)
-                                imported_count += 1
-                                continue
+
+                    model_bytes = Path(filepath).read_bytes()
+                    detected_platform = "PC"
+                    try:
+                        _resource, entries = readModel(model_bytes, platform="AUTO")
+                        native_platforms = {
+                            obj["platform"] for entry in entries for obj in entry["objects"]
+                        }
+                        if native_platforms:
+                            if len(native_platforms) != 1:
+                                raise ValueError("MH2 model mixes PS2 and PSP geometry")
+                            detected_platform = native_platforms.pop()
+                    except ValueError as exc:
+                        if "mixes PS2 and PSP" in str(exc):
+                            raise
+                        detected_platform = "PC"
+
+                    if detected_platform in {"PS2", "PSP"}:
+                        from ..ops.mdl_importer import importModel
+                        imported_objects = importModel(
+                            context,
+                            filepath,
+                            platform=detected_platform,
+                            import_textures=self.import_texture,
+                            model_type="AUTO",
+                            import_armature=self.mh2_import_armature,
+                            import_materials=self.mh2_import_materials,
+                        )
+                        all_created_objects.extend(imported_objects)
+                        imported_count += 1
+                        continue
                     with mh2ImportCleanup():
                         texture_path = None
                         texture_images = []
@@ -316,8 +301,8 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                             preloaded_texture_images=texture_images,
                             texture_source_path=texture_path,
                             print_debug_log=self.print_debug_log or self.print_text_log,
+                            model_type="AUTO",
                         )
-
                     if self.import_texture:
                         loaded_materials = set()
                         for imported_object in imported_objects or []:
@@ -350,9 +335,9 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
                 created_objects, detected = mdl_importer.import_stories_mdl_detected(
                     context=context,
                     filepath=filepath,
-                    import_game=self.import_game,
-                    platform=self.platform,
-                    mdl_type=self.mdl_type,
+                    import_game="AUTO",
+                    platform="AUTO",
+                    mdl_type="AUTO",
                     collection_name=target_collection_name,
                     create_armature=self.create_armature,
                     link_to_scene=self.link_to_scene,
@@ -417,7 +402,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
 class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_stories_mdl"
-    bl_label = "Export R* Leeds Stories MDL"
+    bl_label = "Export R* Leeds MDL"
     bl_description = "Export Rockstar Leeds .MDL"
     bl_options = {"UNDO"}
 
@@ -430,7 +415,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
     platform: EnumProperty(
         name="Platform",
-        description="Platform to export for",
+        description="Stories model target",
         items=(
             ("PS2", "PlayStation 2", "Export a PlayStation 2 Stories MDL"),
             ("PSP", "PlayStation Portable", "Export a PSP Stories MDL"),
@@ -444,27 +429,37 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         items=(
             ("LCS", "LCS", "Grand Theft Auto: Liberty City Stories"),
             ("VCS", "VCS", "Grand Theft Auto: Vice City Stories"),
-            ("MH2", "MH2", "Manhunt 2 (source-backed model export)"),
+            ("MH2", "MH2", "Manhunt 2"),
         ),
         default="VCS",
     )
 
-    mh2_rebuild_geometry: BoolProperty(
-        name="Rebuild Mesh",
-        description="Export edited MH2 PC meshes using the original model and bones",
-        default=True,
+    mh2_source_root: StringProperty(
+        name="Source Model",
+        default="",
+        options={"HIDDEN"},
+    )
+
+    mh2_platform: EnumProperty(
+        name="Platform",
+        description="Manhunt 2 platform",
+        items=(
+            ("PC", "PC", "Manhunt 2 Windows PC"),
+            ("PS2", "PS2", "Manhunt 2 PlayStation 2"),
+            ("PSP", "PSP", "Manhunt 2 PlayStation Portable"),
+        ),
+        default="PC",
     )
 
     mh2_model_type: EnumProperty(
         name="Model Format",
-        description="Model type from the imported Manhunt 2 file",
+        description="Manhunt 2 model class",
         items=(
-            ("AUTO", "Use Imported Type", "Use the model class recorded on the imported root"),
-            ("SIM", "SimpleModel", "Export a source-backed non-skinned Manhunt 2 model"),
-            ("CUT", "ClumpModel (CUT)", "Export a source-backed cutscene clump"),
-            ("PED", "ClumpModel", "Export a source-backed hierarchical or skinned clump"),
+            ("SIM", "SimpleModel", "Static model"),
+            ("PED", "ClumpModel", "Skinned or hierarchical model"),
+            ("CUT", "ClumpModel (CUT)", "Cutscene model"),
         ),
-        default="AUTO",
+        default="PED",
     )
 
     mdl_type: EnumProperty(
@@ -537,12 +532,8 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         col = layout.column(align=True)
         col.prop(self, "export_game")
         if self.export_game == "MH2":
+            col.prop(self, "mh2_platform")
             col.prop(self, "mh2_model_type")
-            col.prop(self, "mh2_rebuild_geometry")
-            if self.mh2_rebuild_geometry:
-                col.label(text="Requires the original MH2 PC model.")
-            else:
-                col.label(text="Keep the original vertices and faces.")
             return
         col.prop(self, "platform")
         col.prop(self, "mdl_type")
@@ -559,16 +550,23 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
             self.mdl_type = "CLUMP"
         self.use_normals = bool(root_use_normals)
 
+        self.mh2_source_root = ''
+        root = None
+        from ..ops.mdl_exporter import findMh2Root, normalizeMh2ArmatureNames
         try:
-            root = mdl_exporter.find_mdl_root(context, create_if_missing=False)
-        except Exception:
+            root = findMh2Root(context)
+        except ValueError:
             root = None
-        if root is None:
+
+        if root is not None:
+            normalizeMh2ArmatureNames(root)
+            self.export_game = 'MH2'
+            self.mh2_source_root = root.name
+        else:
             try:
-                from ..ops.mdl_exporter import findMh2Root
-                root = findMh2Root(context)
-            except ValueError:
-                pass
+                root = mdl_exporter.find_mdl_root(context, create_if_missing=False)
+            except (RuntimeError, ValueError):
+                root = None
 
         try:
             if root is not None:
@@ -582,8 +580,11 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         try:
             if root is not None:
                 if self.export_game == "MH2":
-                    imported_type = str(root.get("bleeds_mdl_type", "AUTO") or "AUTO").upper()
-                    self.mh2_model_type = imported_type if imported_type in {"SIM", "CUT", "PED"} else "AUTO"
+                    imported_type = str(root.get("bleeds_mh2_model_class", root.get("bleeds_mdl_type", "PED")) or "PED").upper()
+                    self.mh2_model_type = imported_type if imported_type in {"SIM", "CUT", "PED"} else "PED"
+                    source_platform = str(root.get("bleeds_mh2_platform", root.get("bleeds_mdl_platform", "PC")) or "PC").upper()
+                    if source_platform in {"PC", "PS2", "PSP"}:
+                        self.mh2_platform = source_platform
                 model_info_value = None
                 hash_value = None
                 if hasattr(root, "bleeds_mdl_model_info_id"):
@@ -635,17 +636,19 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         if self.export_game == "MH2":
             try:
                 from ..ops.mdl_exporter import exportMh2Model, findMh2Root, validateMh2ExportType
-                root = findMh2Root(context)
+                root = findMh2Root(context, self.mh2_source_root or None)
                 validateMh2ExportType(root, self.mh2_model_type)
-                if self.mh2_rebuild_geometry:
-                    if str(root.get('bleeds_mh2_platform', '')).upper() != 'PC':
-                        raise ValueError('Geometry rebuilding currently supports MH2 PC only; disable Rebuild for PS2/PSP position export')
+                source_platform = str(root.get('bleeds_mh2_platform', root.get('bleeds_mdl_platform', 'PC')) or 'PC').upper()
+                if source_platform != self.mh2_platform:
+                    raise ValueError(f'This model contains {source_platform} data, not {self.mh2_platform} data')
+                if self.mh2_platform == 'PC':
                     from ..ops.mdl_exporter import exportMh2RebuiltModel
                     part_count, vertex_count, face_count = exportMh2RebuiltModel(root, self.filepath)
-                    self.report({"INFO"}, f"Rebuilt MH2 PC MDL: {part_count} objects, {vertex_count} vertices, {face_count} triangles")
+                    self.report({"INFO"}, f"Exported MH2 PC MDL: {part_count} meshes, {vertex_count} vertices, {face_count} triangles")
                     return {"FINISHED"}
-                part_count, vertex_count, changed_count = exportMh2Model(context, self.filepath)
+                part_count, vertex_count, changed_count = exportMh2Model(context, self.filepath, root=root)
             except Exception as exc:
+                traceback.print_exc()
                 self.report({"ERROR"}, f"Export MH2 MDL failed: {exc}")
                 return {"CANCELLED"}
             self.report({"INFO"}, f"Exported MH2 MDL: {part_count} parts, {vertex_count} vertices ({changed_count} changed)")
