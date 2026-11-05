@@ -222,7 +222,17 @@ def worldMaterialsMatch(materials):
         image = images[0]
         pixels = array('f', [0.0]) * len(image.pixels)
         image.pixels.foreach_get(pixels)
-        current = (tuple(image.size), hashlib.sha256(pixels.tobytes()).digest())
+        current = (
+            tuple(image.size),
+            hashlib.sha256(pixels.tobytes()).digest(),
+            int(image.get('bleeds_texture_native_format_flags',
+                          image.get('blds_lvz_texture_flags',
+                                    material.get('blds_lvz_texture_flags', 0)))),
+            str(image.get('bleeds_uv_game_hint', material.get('bleeds_uv_game_hint', ''))),
+            int(material.get('bleeds_rslmatfx_type', 0)),
+            str(material.get('bleeds_rslmatfx_texture_name', '')),
+            str(material.get('bleeds_rslmatfx_blend', '')),
+        )
         if signature is not None and current != signature:
             return False
         signature = current
@@ -298,6 +308,10 @@ def bindWorldMaterials(records, owners, master):
 def worldMaterialVariant(material, culling, vertex_colors):
     result = material.copy()
     result.use_backface_culling = culling
+    if (int(result.get('bleeds_uv_animated_nodes', 0)) > 0
+            or result.get('bleeds_uv_source') == 'VCS_PS2_WORLD'):
+        from ..leedsLib.lvz_img import syncNativeWorldUvAnimation
+        syncNativeWorldUvAnimation(result)
     if not vertex_colors or not result.use_nodes or result.node_tree is None:
         return result
     nodes, links = result.node_tree.nodes, result.node_tree.links

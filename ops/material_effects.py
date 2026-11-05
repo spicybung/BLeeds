@@ -221,6 +221,14 @@ def removeMaterialFxNodes(material):
             material.node_tree.nodes.remove(node)
 
 
+def refreshMaterialUvFx(material):
+    from ..leedsLib.lvz_img import syncNativeWorldUvAnimation
+    if (material.get('bleeds_uv_game_hint') == 'vcs'
+            and (int(material.get('bleeds_uv_animated_nodes', 0)) > 0
+                 or int(material.get('bleeds_rslmatfx_type', 0)) in (2, 4))):
+        syncNativeWorldUvAnimation(material)
+
+
 def rebuildMaterialFx(material):
     if material is None or not getattr(material, 'use_nodes', False) or material.node_tree is None:
         return False
@@ -244,6 +252,7 @@ def rebuildMaterialFx(material):
     if effect not in (2, 4):
         if previous_socket:
             links.new(previous_socket, current)
+        refreshMaterialUvFx(material)
         return False
     image_name = str(material.get('bleeds_rslmatfx_texture_name', '') or '')
     image = exactImage(image_name)
@@ -251,6 +260,7 @@ def rebuildMaterialFx(material):
         if previous_socket:
             links.new(previous_socket, current)
         material['bleeds_rslmatfx_missing_texture'] = image_name
+        refreshMaterialUvFx(material)
         return False
     material['bleeds_rslmatfx_missing_texture'] = ''
     secondary = nodes.new('ShaderNodeTexImage')
@@ -296,6 +306,7 @@ def rebuildMaterialFx(material):
             uv.name = 'BLeeds RSL Second UV'
             uv.uv_map = uv_name
             links.new(uv.outputs['UV'], secondary.inputs['Vector'])
+    refreshMaterialUvFx(material)
     return True
 
 

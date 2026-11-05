@@ -9591,6 +9591,26 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             import_root_collection["blds_identity_contract"] = "RES_STREAMED_GEOMETRY;ROWLINK_PLACEMENT_LINK;GAME_MODEL_AERA_SECONDARY"
         except Exception as exc:
             LVZ.dbg(f"[collections] import summary metadata failed: {exc}")
+    animated_materials = set()
+    animated_textures = 0
+    for imported_object in context.scene.objects:
+        for material_slot in imported_object.material_slots:
+            animated_material = material_slot.material
+            if animated_material is None or int(animated_material.get('bleeds_uv_animated_nodes', 0)) == 0:
+                continue
+            material_pointer = animated_material.as_pointer()
+            if material_pointer in animated_materials:
+                continue
+            animated_materials.add(material_pointer)
+            animated_textures += int(animated_material.get('bleeds_uv_animated_nodes', 0))
+    LVZ.dbg(
+        '[uv] animated texture nodes=%d materials=%d (all used material slots)' %
+        (animated_textures, len(animated_materials))
+    )
+    if import_root_collection is not None:
+        import_root_collection['blds_animated_texture_nodes'] = animated_textures
+        import_root_collection['blds_animated_materials'] = len(animated_materials)
+
     LVZ.dbg(f"[summary] LVZ-table MDL resource objects parsed: {len(built_by_res)}")
     LVZ.dbg(f"[summary] IMG sector overlay MDL objects parsed: {len(overlay_by_sector_res)}")
     LVZ.dbg(f"[summary] IMG legacy ROWLINK fallback sector MDLs parsed: {len(ipl_overlay_by_sector_res)}")

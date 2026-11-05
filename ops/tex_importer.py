@@ -594,17 +594,6 @@ def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image
     native_game = game_hint or str(image.get("bleeds_uv_game_hint", ""))
 
 
-    for name in ("Leeds World UV", "Leeds UV Offset", "Leeds Animated UV"):
-        node = nodes.get(name)
-        if node is not None and material.get("bleeds_uv_source") == "VCS_PS2_WORLD":
-            if node.type == 'COMBXYZ':
-                for socket in node.inputs:
-                    socket.driver_remove("default_value")
-            nodes.remove(node)
-    for key in ("bleeds_uv_source", "bleeds_uv_mode_u", "bleeds_uv_mode_v",
-                "bleeds_uv_brightness_effect", "bleeds_uv_phase_step", "bleeds_uv_frame_start"):
-        if key in material:
-            del material[key]
     configureNativeWorldUvAnimation(material, format_flags, native_game,
                                     bpy.context.scene.frame_start, v_flipped=v_flipped)
     from .material_effects import rebuildMaterialFx

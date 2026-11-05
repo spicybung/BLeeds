@@ -22,18 +22,26 @@ pendingScenes = set()
 
 
 def sceneHasNativeUvAnimation(scene):
+    checked = set()
     for obj in scene.objects:
         for slot in obj.material_slots:
             material = slot.material
-            if material is None or material.get("bleeds_uv_source") != "VCS_PS2_WORLD":
+            if material is None:
                 continue
-            modes = (material.get("bleeds_uv_mode_u", 0), material.get("bleeds_uv_mode_v", 0))
-            if 3 in modes or not any(mode in (1, 2) for mode in modes):
+            pointer = material.as_pointer()
+            if pointer in checked:
+                continue
+            checked.add(pointer)
+            if (int(material.get('bleeds_uv_animated_nodes', 0)) == 0
+                    and material.get('bleeds_uv_source') != 'VCS_PS2_WORLD'):
                 continue
             tree = material.node_tree
-            offset = tree.nodes.get("Leeds UV Offset") if tree is not None else None
-            if offset is not None and tree.animation_data is not None and tree.animation_data.drivers:
-                return True
+            if tree is None or tree.animation_data is None or not tree.animation_data.drivers:
+                continue
+            for node in tree.nodes:
+                if node.type == 'COMBXYZ' and (
+                        node.get('bleeds_uv_controller', False) or node.name == 'Leeds UV Offset'):
+                    return True
     return False
 
 

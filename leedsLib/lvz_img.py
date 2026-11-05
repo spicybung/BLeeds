@@ -1414,10 +1414,7 @@ def nativeWorldUvModes(format_flags: int) -> Tuple[int, int]:
 
 
 def nativeWorldUvOffset(format_flags: int, phase: float) -> Tuple[float, float]:
-
     modes = nativeWorldUvModes(format_flags)
-    if 3 in modes:
-        return 0.0, 0.0
     phase = float(phase) % 1.0
     if not math.isfinite(phase):
         raise ValueError("native world UV phase must be finite")
@@ -1426,68 +1423,171 @@ def nativeWorldUvOffset(format_flags: int, phase: float) -> Tuple[float, float]:
     return offsets[0], offsets[1]
 
 
-def configureNativeWorldUvAnimation(material, format_flags: int, game_hint: str,
-                                    frame_start: int = 1, v_flipped: bool = False) -> bool:
+def nativeUvFormatFlags(image, material, default_flags: int, primary: bool) -> int:
+    if image is not None:
+        for key in ("bleeds_texture_native_format_flags", "blds_lvz_texture_flags"):
+            if key in image:
+                return int(image[key])
+    if primary:
+        for key in ("bleeds_texture_native_format_flags", "blds_lvz_texture_flags"):
+            if key in material:
+                return int(material[key])
+        return int(default_flags)
+    return 0
 
-    if str(game_hint).lower() != "vcs" or int(format_flags) & 0xF000 != 0xC000:
-        return False
-    u_mode, v_mode = nativeWorldUvModes(format_flags)
-    material["bleeds_uv_source"] = "VCS_PS2_WORLD"
-    material["bleeds_uv_mode_u"] = u_mode
-    material["bleeds_uv_mode_v"] = v_mode
-    material["bleeds_uv_brightness_effect"] = 3 in (u_mode, v_mode)
-    if 3 in (u_mode, v_mode) or (u_mode, v_mode) == (0, 0):
-        return False
+
+def nativeUvControllerNode(node) -> bool:
+    return bool(node.get("bleeds_uv_controller", False)) or node.name in (
+        "Leeds World UV", "Leeds UV Offset", "Leeds Animated UV") or any(
+            node.name.startswith(prefix) for prefix in (
+                "Leeds World UV ", "Leeds UV Offset ", "Leeds Animated UV "))
+
+
+def nativeUvOriginalVector(texture_node):
+    vector = texture_node.inputs.get('Vector')
+    if vector is None or not vector.is_linked:
+        return None
+    linked = vector.links[0].from_socket
+    for depth in range(6):
+        owner = linked.node
+        if not nativeUvControllerNode(owner):
+            return linked
+        if owner.type == 'VECT_MATH' and owner.operation == 'ADD':
+            input_socket = owner.inputs[0]
+        elif owner.type == 'MAPPING':
+            input_socket = owner.inputs.get('Vector')
+        else:
+            return None
+        if not input_socket.is_linked:
+            return None
+        linked = input_socket.links[0].from_socket
+    return None
+
+
+def nativeUvDriverExpression(mode: int, frame_start: int, phase_step: float,
+                             invert: bool = False) -> str:
+    advance = f"((frame-({int(frame_start)}))*{float(phase_step):.9g})"
+    phase = f"({advance}-floor({advance}))"
+    if mode == 1:
+        expression = phase
+    elif mode == 2:
+        expression = f"(0.0 if {phase}==0.25 else floor(2.0*{phase}+0.5)*0.25)"
+    else:
+        expression = "0.0"
+    return f"-({expression})" if invert else expression
+
+
+def syncNativeWorldUvAnimation(material) -> int:
     tree = getattr(material, "node_tree", None)
     if tree is None:
-        return False
-    texture_nodes = [node for node in tree.nodes if node.type == 'TEX_IMAGE']
-    if not texture_nodes:
-        return False
+        return 0
+    nodes = tree.nodes
+    game_hint = str(material.get("bleeds_uv_game_hint", "")).lower()
+    default_flags = int(material.get("bleeds_uv_format_flags", 0))
+    frame_start = int(material.get("bleeds_uv_frame_start", 1))
+    phase_step = float(material.get("bleeds_uv_phase_step", 0.05))
+    v_flipped = bool(material.get("bleeds_uv_v_flipped", False))
 
+    texture_nodes = [node for node in list(nodes) if node.type == 'TEX_IMAGE'
+                     and getattr(node, 'image', None) is not None]
+    sources = {node.name: nativeUvOriginalVector(node) for node in texture_nodes}
 
-    material["bleeds_uv_phase_step"] = 0.05
-    material["bleeds_uv_frame_start"] = int(frame_start)
+    # Each material has its own node tree. An animated material may contain
+    # several textures, each with different UV behaviour and a different UV map.
+    for node in list(nodes):
+        if nativeUvControllerNode(node) and node.type in ('TEX_COORD', 'COMBXYZ', 'VECT_MATH', 'MAPPING'):
+            if node.type == 'COMBXYZ':
+                for socket in node.inputs:
+                    try:
+                        socket.driver_remove('default_value')
+                    except (TypeError, ValueError, RuntimeError):
+                        pass
+            nodes.remove(node)
 
-    for name in ("Leeds World UV", "Leeds UV Offset", "Leeds Animated UV"):
-        previous = tree.nodes.get(name)
-        if previous is not None:
-            if previous.type == 'COMBXYZ':
-                for socket in previous.inputs:
-                    socket.driver_remove("default_value")
-            tree.nodes.remove(previous)
-    coordinates = tree.nodes.new("ShaderNodeTexCoord")
-    coordinates.name = "Leeds World UV"
-    coordinates.location = (-900, 0)
-    offset = tree.nodes.new("ShaderNodeCombineXYZ")
-    offset.name = "Leeds UV Offset"
-    offset.label = "Native scrolling"
-    offset.location = (-900, -200)
-    addition = tree.nodes.new("ShaderNodeVectorMath")
-    addition.operation = 'ADD'
-    addition.name = "Leeds Animated UV"
-    addition.location = (-600, 0)
-    tree.links.new(coordinates.outputs['UV'], addition.inputs[0])
-    tree.links.new(offset.outputs['Vector'], addition.inputs[1])
-    advance = f"((frame-({int(frame_start)}))*0.05)"
-    phase = f"({advance}-floor({advance}))"
-    for axis, mode in enumerate((u_mode, v_mode)):
-        if mode == 0:
-            continue
-        expression = phase
-        if mode == 2:
-
-
-            expression = f"(0.0 if {phase}==0.25 else floor(2.0*{phase}+0.5)*0.25)"
-        if axis == 1 and v_flipped:
-            expression = f"-({expression})"
-        curve = offset.inputs[axis].driver_add("default_value")
-        curve.driver.type = 'SCRIPTED'
-        curve.driver.expression = expression
+    created = 0
+    first_modes = (0, 0)
+    has_brightness = False
+    animated_resources = []
     for texture_node in texture_nodes:
+        texture_node['bleeds_uv_animated'] = False
+        if 'bleeds_uv_offset_node' in texture_node:
+            del texture_node['bleeds_uv_offset_node']
+        image = texture_node.image
+        if texture_node.name.startswith('BLeeds RSL ') and int(material.get('bleeds_rslmatfx_type', 0)) == 2:
+            # Environment coordinates are generated from the camera's normal,
+            # not the world mesh UVs.
+            continue
+        primary = not texture_node.name.startswith('BLeeds RSL ')
+        flags = nativeUvFormatFlags(image, material, default_flags, primary)
+        hint = str(image.get('bleeds_uv_game_hint', game_hint)).lower()
+        if hint != 'vcs' or (flags & 0xF000) != 0xC000:
+            continue
+        modes = nativeWorldUvModes(flags)
+        has_brightness |= 3 in modes
+        texture_node['bleeds_uv_mode_u'] = modes[0]
+        texture_node['bleeds_uv_mode_v'] = modes[1]
+        texture_node['bleeds_uv_format_flags'] = flags
+        if not any(mode in (1, 2) for mode in modes):
+            continue
+        if created == 0:
+            first_modes = modes
+        created += 1
+        suffix = '' if created == 1 else ' %03d' % created
+        initial_vector = sources[texture_node.name]
+        if initial_vector is None:
+            coords = nodes.new('ShaderNodeTexCoord')
+            coords.name = 'Leeds World UV' + suffix
+            coords.label = 'World UV' if primary else 'Second texture UV'
+            coords.location = (-1000, -260 * created)
+            coords['bleeds_uv_controller'] = True
+            initial_vector = coords.outputs['UV']
+        offset = nodes.new('ShaderNodeCombineXYZ')
+        offset.name = 'Leeds UV Offset' + suffix
+        offset.label = 'Native UV animation'
+        offset.location = (-780, -260 * created)
+        offset['bleeds_uv_controller'] = True
+        addition = nodes.new('ShaderNodeVectorMath')
+        addition.operation = 'ADD'
+        addition.name = 'Leeds Animated UV' + suffix
+        addition.location = (-520, -260 * created)
+        addition['bleeds_uv_controller'] = True
+        tree.links.new(initial_vector, addition.inputs[0])
+        tree.links.new(offset.outputs['Vector'], addition.inputs[1])
+        for axis, mode in enumerate(modes):
+            if mode not in (1, 2):
+                continue
+            driver = offset.inputs[axis].driver_add('default_value')
+            driver.driver.type = 'SCRIPTED'
+            driver.driver.expression = nativeUvDriverExpression(
+                mode, frame_start, phase_step, axis == 1 and v_flipped)
         texture_node.extension = 'REPEAT'
         tree.links.new(addition.outputs['Vector'], texture_node.inputs['Vector'])
-    return True
+        texture_node['bleeds_uv_animated'] = True
+        texture_node['bleeds_uv_offset_node'] = offset.name
+        animated_resources.append(str(getattr(image, 'name', '')))
+
+    material['bleeds_uv_animated_nodes'] = created
+    material['bleeds_uv_animated_textures'] = ', '.join(animated_resources)
+    if created:
+        material['bleeds_uv_source'] = 'VCS_PS2_WORLD'
+        material['bleeds_uv_mode_u'] = first_modes[0]
+        material['bleeds_uv_mode_v'] = first_modes[1]
+    else:
+        for key in ('bleeds_uv_source', 'bleeds_uv_mode_u', 'bleeds_uv_mode_v'):
+            if key in material:
+                del material[key]
+    material['bleeds_uv_brightness_effect'] = has_brightness
+    return created
+
+
+def configureNativeWorldUvAnimation(material, format_flags: int, game_hint: str,
+                                    frame_start: int = 1, v_flipped: bool = False) -> bool:
+    material['bleeds_uv_game_hint'] = str(game_hint).lower()
+    material['bleeds_uv_format_flags'] = int(format_flags)
+    material['bleeds_uv_phase_step'] = 0.05
+    material['bleeds_uv_frame_start'] = int(frame_start)
+    material['bleeds_uv_v_flipped'] = bool(v_flipped)
+    return syncNativeWorldUvAnimation(material) > 0
 
 
 class read_lvz:
