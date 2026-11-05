@@ -15,61 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-import bpy
-
-from bpy.props import (
-    StringProperty,
-    PointerProperty,
-)
-from bpy.types import (
-    PropertyGroup,
-    Operator,
-    Menu,
-)
-
-class CW_InstanceProps(PropertyGroup):
-    mdl_name: StringProperty(
-        name="Instance MDL",
-        description="Name of the MDL associated with this instance",
-        default="",
-    )
-    custom_id: StringProperty(
-        name="Custom ID",
-        description="Custom identifier for this CW instance",
-        default="",
-    )
-
-class CW_OT_LoadFromCustom(Operator):
-    bl_idname = "cw_instance.load_from_custom"
-    bl_label = "Load from Custom"
-    bl_description = "Load instance data from custom field"
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or not hasattr(obj, "cw_instance"):
-            self.report({"ERROR"}, "No active object or CW instance property.")
-            return {"CANCELLED"}
-
-        inst = obj.cw_instance
-
-        self.report({"INFO"}, f"Loaded from custom ID: {inst.custom_id}")
-        return {"FINISHED"}
-
-class CW_OT_SaveToCustom(Operator):
-    bl_idname = "cw_instance.save_to_custom"
-    bl_label = "Save to Custom"
-    bl_description = "Save instance data to custom field"
-
-    def execute(self, context):
-        obj = context.object
-        if obj is None or not hasattr(obj, "cw_instance"):
-            self.report({"ERROR"}, "No active object or CW instance property.")
-            return {"CANCELLED"}
-
-        inst = obj.cw_instance
-
-        self.report({"INFO"}, f"Saved to custom ID: {inst.custom_id}")
-        return {"FINISHED"}
+from bpy.types import Menu
 
 class CW_MT_ExportChoice(Menu):
     bl_idname = "CW_MT_ExportChoice"

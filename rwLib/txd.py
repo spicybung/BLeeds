@@ -72,7 +72,7 @@ class MobileTxd:
             strings = []
             for string_index in range(2):
                 _, size, version = readHeader(data, cursor, 2)
-                strings.append(data[cursor + 12:cursor + 12 + size].split(b'\0', 1)[0].decode('ascii'))
+                strings.append(data[cursor + 12:cursor + 12 + size].split(b'\0', 1)[0].decode('utf-8', errors='replace'))
                 cursor += 12 + size
             readHeader(data, cursor, 1)
             cursor += 12
@@ -106,7 +106,7 @@ class MobileTxd:
             _, raster_size, version = readHeader(data, cursor, 1)
             pixel_offset = cursor + 12
             palette_size = (1 << depth) * 4 if depth in (4, 8) else 0
-            pixel_size = sum(max(1, width >> level) * max(1, height >> level) * depth // 8
+            pixel_size = sum((max(1, width >> level) * max(1, height >> level) * depth + 7) // 8
                              for level in range(mip_count))
             allowed_sizes = (pixel_size + palette_size, pixel_size + 4) if depth == 32 else (pixel_size + palette_size,)
             if raster_size not in allowed_sizes:
@@ -130,7 +130,7 @@ class MobileTxd:
             raise ValueError('Unsupported mobile texture layout flags: 0x%X' % texture.flags)
         offset = texture.pixel_offset
         for previous in range(level):
-            offset += max(1, texture.width >> previous) * max(1, texture.height >> previous) * texture.depth // 8
+            offset += (max(1, texture.width >> previous) * max(1, texture.height >> previous) * texture.depth + 7) // 8
         width = max(1, texture.width >> level)
         height = max(1, texture.height >> level)
         count = width * height
@@ -445,5 +445,12 @@ class TextureDictionary(Resource):
 def openTextures(data, platform='AUTO'):
     if unwrapResource(data)[:4] == b'TCDT':
         return TextureDictionary(data, platform)
+    if len(data) >= 56 and struct.unpack_from('<I', data, 0)[0] == 0x16:
+        native_offset = 28
+        if struct.unpack_from('<I', data, native_offset)[0] == 0x15:
+            platform_id = struct.unpack_from('<I', data, native_offset + 24)[0]
+            if platform_id in (8, 9):
+                from .pc_txd import PcTextureDictionary
+                return PcTextureDictionary(data)
     return MobileTxd(data)
 

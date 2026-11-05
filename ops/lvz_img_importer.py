@@ -1886,16 +1886,19 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
     vertices: List[Tuple[float, float, float]] = []
     uvs: List[Tuple[float, float]] = []
     faces: List[Tuple[int, int, int]] = []
+    colors = []
     face_ranges: List[Tuple[int, int, int]] = []
 
     for group in groups:
         for strip in group.strips:
-            count = min(len(strip.verts), len(strip.uvs), int(strip.count))
+            count = min(len(strip.verts), int(strip.count))
             if count < 3:
                 continue
             base = len(vertices)
             vertices.extend(strip.verts[:count])
-            uvs.extend(strip.uvs[:count])
+            source_colors = list(getattr(strip, 'cols_rgba4444', []) or [])
+            colors.extend(source_colors[index] if index < len(source_colors) else (255,255,255,255) for index in range(count))
+            uvs.extend(strip.uvs[index] if index < len(strip.uvs) else (0.0, 0.0) for index in range(count))
             poly_start = len(faces)
             for i in range(count - 2):
                 if i & 1:
@@ -1922,6 +1925,12 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
             for loop_index, vertex_index in enumerate(poly.vertices):
                 if vertex_index < len(uvs):
                     uv_data[loop_start + loop_index].uv = uvs[vertex_index]
+
+    if colors:
+        from .. import get_or_create_corner_color_layer
+        layer = get_or_create_corner_color_layer(mesh, 'Col')
+        for loop in mesh.loops:
+            layer.data[loop.index].color = tuple(value / 255.0 for value in colors[loop.vertex_index])
 
     obj = bpy.data.objects.new(mesh_name, mesh)
     target_collection = globals().get("_ACTIVE_IMPORT_OBJECTS_COLLECTION")
@@ -3153,6 +3162,15 @@ def lookup_verified_render_pair_alias_base(
 
 
 def get_or_create_missing_lvz_material(texture_id: int):
+    if int(texture_id) == 0xFFFF:
+        material = bpy.data.materials.get('BLeeds Untextured World')
+        if material is None:
+            material = bpy.data.materials.new('BLeeds Untextured World')
+            material.use_nodes = True
+            material.node_tree.nodes.get('Principled BSDF').inputs['Base Color'].default_value = (1,1,1,1)
+            material['blds_kind'] = 'WORLD_UNTEXTURED'
+            material['blds_texture_res_index'] = -1
+        return material
     name = f"lvz_texres_{int(texture_id)}_missing_image"
     material = bpy.data.materials.get(name)
     if material is not None:
@@ -3176,6 +3194,7 @@ def add_material_slots(obj, material_by_res_index: Dict[int, bpy.types.Material]
         for index, material in enumerate(obj.data.materials)
         if material is not None
     }
+    obj['blds_material_culling'] = {str(record.texture_id): bool(record.backface_cull) for record in material_list.materials}
     if material_list.materials:
         for material_record in material_list.materials:
             texture_id = int(material_record.texture_id)
@@ -4003,6 +4022,7 @@ def iter_build_sector_overlay_mdl_objects(stem: str, img_bytes: bytes, lvz_reade
         obj["blds_img_overlay_resource"] = True
         obj["blds_img_overlay_raw_off"] = raw_off
         obj["blds_img_overlay_raw_ptr"] = int(overlay.get("raw_ptr", 0))
+        obj["blds_img_texture_owner"] = int(overlay.get("cont", 0))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
             obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
@@ -4094,6 +4114,7 @@ def iter_build_row_shared_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: L
         obj["blds_img_row_base_sector_y"] = int(overlay.get("sector_y", 0))
         obj["blds_img_overlay_raw_off"] = raw_off
         obj["blds_img_overlay_raw_ptr"] = int(overlay.get("raw_ptr", 0))
+        obj["blds_img_texture_owner"] = int(overlay.get("cont", 0))
         obj["blds_source_lvz_path"] = str(source_lvz_path)
         if img_name:
             obj["blds_source_img_path"] = str((Path(source_lvz_path).parent / img_name))
@@ -4584,7 +4605,7 @@ def blds_prepare_import_collection_tree(lvz_path: str, img_name: Optional[str]):
 
     objects = get_or_create_named_child("Objects", "LVZ_IMG_OBJECTS_COLLECTION")
     linked = get_or_create_named_child("Linked Placements", "LVZ_IMG_LINKED_COLLECTION")
-    effects = get_or_create_named_child("2DFX", "LVZ_IMG_2DFX_COLLECTION")
+    effects = get_or_create_named_child("2D Effects", "LVZ_IMG_2DFX_COLLECTION")
 
 
     for collection in (objects, linked, effects):
@@ -4749,10 +4770,13 @@ def purge_stale_raw_parser_bases(import_stem: str = "", reason: str = "stale") -
                 if mesh is not None and mesh.users == 0:
                     bpy.data.meshes.remove(mesh)
             else:
-                obj.hide_viewport = True
-                obj.hide_render = True
+                if not obj.hide_viewport:
+                    obj.hide_viewport = True
+                if not obj.hide_render:
+                    obj.hide_render = True
                 try:
-                    obj.hide_set(True)
+                    if not obj.hide_get():
+                        obj.hide_set(True)
                 except Exception:
                     pass
                 obj["blds_raw_parser_base_hidden_fast_cleanup"] = True
@@ -4793,10 +4817,13 @@ def remove_unplaced_base_objects(candidate_objects, used_object_ids) -> int:
                 if mesh is not None and mesh.users == 0:
                     bpy.data.meshes.remove(mesh)
             else:
-                obj.hide_viewport = True
-                obj.hide_render = True
+                if not obj.hide_viewport:
+                    obj.hide_viewport = True
+                if not obj.hide_render:
+                    obj.hide_render = True
                 try:
-                    obj.hide_set(True)
+                    if not obj.hide_get():
+                        obj.hide_set(True)
                 except Exception:
                     pass
                 obj["blds_raw_parser_base_hidden_fast_cleanup"] = True
@@ -5176,7 +5203,7 @@ def blds_write_placement_res_report(lvz_path: str, details, report_rows_by_key: 
             f"ATTRACTOR={int(effect_type_counts.get(2, 0))}, "
             f"PED_BEHAVIOUR={int(effect_type_counts.get(3, 0))}\n"
         )
-        f.write("2DFX Blender helpers: {}\n".format(
+        f.write("2D Effects Blender helpers: {}\n".format(
             "ENABLED" if bool(model_2dfx_summary.get("helpers_enabled", False)) else "DISABLED FOR THIS IMPORT"
         ))
         f.write("2DFX ownership: allocated GAME.DTZ BUILDING/TREADABLE/DUMMY CEntity.modelIndex\n")
@@ -5196,7 +5223,7 @@ def blds_write_placement_res_report(lvz_path: str, details, report_rows_by_key: 
         f.write(f"2DFX entity instances selected for this LVZ: {int(model_2dfx_summary.get('entity_instances_selected', 0))}\n")
         f.write(f"2DFX entity instances attached to matching map objects: {int(model_2dfx_summary.get('entity_instances_attached', 0))}\n")
         f.write(f"2DFX independent entity instances kept in the map 2DFX collection: {int(model_2dfx_summary.get('entity_instances_unattached', 0))}\n")
-        f.write(f"2DFX helpers imported: {int(model_2dfx_summary.get('effects_imported', 0))}\n")
+        f.write(f"2D Effects helpers imported: {int(model_2dfx_summary.get('effects_imported', 0))}\n")
         f.write(f"2DFX selected entity instances by pool: {model_2dfx_summary.get('entity_selected_by_pool', {}) or {}}\n")
         f.write(f"2DFX selection reasons: {model_2dfx_summary.get('entity_selected_by_reason', {}) or {}}\n")
         f.write(f"2DFX imported helpers by pool: {model_2dfx_summary.get('entity_imported_helpers_by_pool', {}) or {}}\n")
@@ -8111,7 +8138,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             helper_matrix[1][3] = float(world.y)
             helper_matrix[2][3] = float(world.z)
             helper.matrix_world = helper_matrix
-            helper["blds_kind"] = "LEEDS_2DFX"
+            helper["blds_kind"] = "LEEDS_2D_EFFECT"
             helper["blds_2dfx_source"] = "GAME.DTZ"
             helper["blds_2dfx_source_path"] = str(source_path or "")
             helper["blds_2dfx_game"] = str(source_game or "Stories").upper()
@@ -8188,7 +8215,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
                         helper["blds_2dfx_" + str(key)] = value
                     except Exception:
                         pass
-            stamp_bleeds_entity_type(helper, "2DFX")
+            stamp_bleeds_entity_type(helper, "2D_EFFECT")
             target_collection = blds_2dfx_type_collection(collection, effect_type) or collection
             target_collection.objects.link(helper)
             if parent_to_placed and placed_obj is not None:
@@ -8206,7 +8233,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             )
     return made
 
-def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True, import_textures: bool = True, import_lods: bool = IMPORT_LOD_PASSES_BY_DEFAULT, import_vegetation: bool = True, import_generics: bool = True):
+def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True, import_textures: bool = True, scan_dtz: bool = True, import_lods: bool = IMPORT_LOD_PASSES_BY_DEFAULT, import_vegetation: bool = True, import_generics: bool = True):
     if not lvz_path:
         operator.report({'ERROR'}, "No LVZ selected.")
         return {'CANCELLED'}
@@ -8352,6 +8379,9 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         import_root_collection = import_objects_collection = import_linked_collection = import_2dfx_collection = None
         LVZ.dbg(f"[collections] source-named hierarchy setup failed: {exc}")
 
+    if import_root_collection is not None:
+        import_root_collection['blds_scan_dtz'] = bool(scan_dtz)
+        import_root_collection['blds_import_lods'] = bool(import_lods)
     img = LVZ.read_img(img_bytes=img_bytes, lvz_bytes=decomp) if img_bytes else None
     platform = detect_lvz_img_platform(lvz, img)
     use_swizzle = platform_uses_ps2_swizzle(platform)
@@ -8540,13 +8570,13 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         f"unresolved={int(identity_summary.get('unresolved', 0))} conflicts={len(area_model_info_conflicts)}"
     )
 
-    progress.update(27, "Reading 2DFX...")
+    progress.update(27, "Reading DTZ...")
     yield None
-    model_2dfx_by_game_model_id, two_dfx_summary = blds_parse_game_dtz_2dfx(
-        lvz_path,
-        explicit_path=game_dtz_path,
-        wanted_model_ids=None,
-    )
+    if scan_dtz or game_dtz_path:
+        model_2dfx_by_game_model_id, two_dfx_summary = blds_parse_game_dtz_2dfx(
+            lvz_path, explicit_path=game_dtz_path, wanted_model_ids=None)
+    else:
+        model_2dfx_by_game_model_id, two_dfx_summary = {}, {'status': 'disabled'}
     two_dfx_summary["helpers_enabled"] = bool(create_game_dtz_2dfx_helpers)
     two_dfx_summary["import_vegetation"] = import_vegetation
     two_dfx_summary["import_generics"] = import_generics
@@ -8565,14 +8595,17 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
     if model_2dfx_collection is not None:
         blds_clear_model_2dfx_collection(model_2dfx_collection)
     if create_game_dtz_2dfx_helpers and model_2dfx_collection is None:
-        model_2dfx_collection = get_or_create_import_collection(f"{stem} 2DFX", globals().get("_ACTIVE_IMPORT_ROOT_COLLECTION"))
+        model_2dfx_collection = get_or_create_import_collection(f"{stem} 2D Effects", globals().get("_ACTIVE_IMPORT_ROOT_COLLECTION"))
     if str(two_dfx_summary.get("status", "")) == "not_found":
         LVZ.dbg(
             "[2dfx-model] no GAME.DTZ found beside the LVZ; allocated world entity pools and "
             "global C2dEffect rows are unavailable. LIGHTS mesh rows remain separate. "
             "A placement/RES report will still be written."
         )
+    elif str(two_dfx_summary.get("status", "")) == "disabled":
+        LVZ.dbg("[dtz] automatic DTZ scanning disabled")
     elif str(two_dfx_summary.get("status", "")) != "ok":
+        operator.report({'WARNING'}, 'DTZ could not be read; its models and 2D Effects were skipped')
         LVZ.dbg(
             f"[2dfx-model] GAME.DTZ parse failed status={two_dfx_summary.get('status', '')} "
             f"source={two_dfx_summary.get('source_path', '')} error={two_dfx_summary.get('error', '')}"
@@ -8628,6 +8661,11 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         else:
             LVZ.dbg("[2dfx-model] Beach3528 has no visible placement row in this LVZ/IMG import")
 
+
+    from .world_materials import importWorldTextureOwners, importWorldExtraTextures, bindWorldMaterials
+    texture_owners = importWorldTextureOwners(lvz, img, sector_records, import_textures) if img is not None else {'sector': {}, 'area': {}, 'cell': {}}
+    if import_root_collection is not None:
+        import_root_collection['blds_img_texture_bindings'] = sum(len(mapping) for group in ('sector', 'area') for mapping in texture_owners[group].values())
 
     lights_kept = sum(
         1 for detail in (details or [])
@@ -8721,6 +8759,12 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             int(detail[0]) for detail in details
             if detail and int(detail[0]) >= 0
         }
+        if (scan_dtz or game_dtz_path) and (import_vegetation or import_generics):
+            dtz_model_ids = {int(entity['model_id']) for entity in two_dfx_summary.get('world_entities', [])}
+            # Some trees and props are placed only by DTZ, so they have no LVZ placement row.
+            for area_row in img.collect_area_resources(area_records_for_identity, max_resource_id=int(res_count)):
+                if int(area_row.get('secondary_id', -1)) in dtz_model_ids:
+                    visible_placement_res_ids.add(int(area_row['res_id']))
         area_direct_objects = yield from iter_build_official_area_resource_mdl_objects(
             stem,
             img_bytes,
@@ -9200,8 +9244,32 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 import_vegetation=import_vegetation,
                 import_generics=import_generics,
             )
+            if (scan_dtz or game_dtz_path) and two_dfx_summary.get('status') == 'ok':
+                from .world_selection import importDtzWorldPlacements
+                dtz_count, missing_dtz_models = importDtzWorldPlacements(
+                    context, two_dfx_summary, globals().get('_CURRENT_PLACED_OBJECT_RECORDS', []),
+                    [obj for obj in context.scene.objects if obj.type == 'MESH' and obj.get('blds_source_lvz_path') == str(lvz_path)],
+                    area_model_info_by_res, sector_records, import_objects_collection,
+                    import_vegetation, import_generics)
+                if missing_dtz_models:
+                    operator.report({'WARNING'}, '%d DTZ models have placements but no matching mesh in this pair' % len(missing_dtz_models))
+                if import_root_collection is not None:
+                    import_root_collection['blds_dtz_models_imported'] = dtz_count
+                    import_root_collection['blds_dtz_missing_model_ids'] = json.dumps(missing_dtz_models)
+            if img is not None:
+                importWorldExtraTextures(lvz, img, texture_owners,
+                    globals().get('_CURRENT_PLACED_OBJECT_RECORDS', []), extra_container_records, import_textures)
+                if import_root_collection is not None:
+                    import_root_collection['blds_img_texture_bindings'] = sum(len(mapping) for mapping in texture_owners.get('owner', {}).values())
+            material_assignments, missing_texture_ids = bindWorldMaterials(
+                globals().get('_CURRENT_PLACED_OBJECT_RECORDS', []), texture_owners, lvz.material_by_res_index)
+            if import_root_collection is not None:
+                import_root_collection['blds_missing_texture_ids'] = json.dumps(missing_texture_ids)
+                import_root_collection['blds_texture_assignments'] = material_assignments
+            if import_textures and missing_texture_ids:
+                operator.report({'WARNING'}, '%d texture resources could not be loaded; see the import collection for their IDs' % len(missing_texture_ids))
             if create_game_dtz_2dfx_helpers and str(two_dfx_summary.get("status", "")) == "ok":
-                progress.update(98, "Importing 2DFX...")
+                progress.update(98, "Importing 2D Effects...")
                 blds_import_game_entity_2dfx_helpers(
                     model_2dfx_collection,
                     stem,
@@ -9215,6 +9283,10 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             LVZ.dbg(f"[apply] linked duplicate placement objects created: {linked_instances}")
         except Exception as exc:
             LVZ.dbg(f"[apply] IMG placement transform pass failed: {exc}")
+            operator.report({'ERROR'}, 'World placement or material import failed: %s' % exc)
+            restore_global_undo()
+            progress.finish(succeeded=False, message='World placement import failed')
+            return {'CANCELLED'}
     elif apply_img_transforms:
         LVZ.dbg("[apply] no IMG transforms available to apply")
 
@@ -9349,7 +9421,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             LVZ.DEBUG.close()
         except Exception:
             LVZ.DEBUG.flush()
-    operator.report({'INFO'}, f"Imported LVZ+IMG: {len(details)} map placements, {linked_instances} linked copies, {len(built_by_res)} LVZ models, {len(overlay_by_sector_res)} IMG models, {int(two_dfx_summary.get('effects_imported', 0))} model 2DFX helpers, {removed_unplaced} unused model bases cleaned up ({platform}).")
+    operator.report({'INFO'}, f"Imported LVZ+IMG: {len(details)} map placements, {linked_instances} linked copies, {len(built_by_res)} LVZ models, {len(overlay_by_sector_res)} IMG models, {int(two_dfx_summary.get('effects_imported', 0))} model 2D Effects helpers, {removed_unplaced} unused model bases cleaned up ({platform}).")
     progress.finish(succeeded=True, message="Import complete")
     finish_active_import_progress(context, succeeded=True)
     return {'FINISHED'}

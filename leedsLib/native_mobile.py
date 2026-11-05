@@ -34,6 +34,7 @@ class MobileEntry:
 
 
 def writeAtomic(path, data):
+    # Finish the new file before replacing the old one, so a failed export does not destroy it.
     path = Path(path)
     descriptor, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
     try:

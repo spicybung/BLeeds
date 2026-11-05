@@ -53,6 +53,12 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
         min=0,
     )
 
+    import_all: BoolProperty(
+        name='Import All Animations',
+        description='Create an action for every clip that matches the selected armature',
+        default=True,
+    )
+
     fps: FloatProperty(
         name="FPS",
         description="Seconds-to-Blender-frames multiplier",
@@ -99,7 +105,9 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "game")
-        layout.prop(self, "animation_index")
+        layout.prop(self, 'import_all')
+        if not self.import_all:
+            layout.prop(self, "animation_index")
 
         box = layout.box()
         box.label(text="Channels")
@@ -131,6 +139,8 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
         if not ifp_file.animations:
             self.report({"ERROR"}, "IFP parsed but contains no animations")
             return {"CANCELLED"}
+        if self.import_all:
+            return self.importAllAnimations(context, ifp_file)
         if self.animation_index >= len(ifp_file.animations):
             self.report(
                 {"ERROR"},
@@ -199,3 +209,41 @@ class IMPORT_SCENE_OT_bleeds_manhunt_ifp(Operator, ImportHelper):
             ),
         )
         return {"FINISHED"}
+
+    def importAllAnimations(self, context, ifp_file):
+        armature = ifp_importer.findSelectedArmature(context)
+        if armature is None:
+            self.report({'ERROR'}, 'Select a Manhunt armature or one of its meshes')
+            return {'CANCELLED'}
+        actions = []
+        messages = []
+        failed = []
+        for animation in ifp_file.animations:
+            try:
+                action, mapped, keyed, ignored, lines = ifp_importer.applyManhuntIfpAnimation(
+                    armature, animation, self.filepath, fps=self.fps, start_frame=self.start_frame,
+                    apply_rotation=self.apply_rotation, apply_translation=self.apply_translation,
+                    allow_foreign_rig=self.allow_foreign_rig)
+                actions.append(action)
+                messages.append('{}: {} tracks, {} samples'.format(animation.name, mapped, keyed))
+            except (ValueError, RuntimeError) as exc:
+                failed.append('{}: {}'.format(animation.name, exc))
+        if not actions:
+            self.report({'ERROR'}, failed[0] if failed else 'No matching animations found')
+            return {'CANCELLED'}
+        ifp_importer.resetArmaturePose(armature)
+        armature.animation_data.action = actions[0]
+        if getattr(actions[0], 'is_action_layered', False):
+            slots = [slot for slot in actions[0].slots if slot.target_id_type == 'OBJECT']
+            if slots:
+                armature.animation_data.action_slot = slots[0]
+        context.scene.frame_set(int(self.start_frame))
+        if self.create_text_summary or self.print_debug_log or self.print_text_log:
+            summary = '\n'.join(messages + ['Skipped: ' + message for message in failed]) + '\n'
+            if self.create_text_summary:
+                ifp_importer.ensureTextBlock('BLeeds_IFP_' + Path(self.filepath).stem[:40], summary)
+            if self.print_debug_log or self.print_text_log:
+                print(summary)
+        self.report({'WARNING'} if failed else {'INFO'},
+                    'Imported {} animations; skipped {}'.format(len(actions), len(failed)))
+        return {'FINISHED'}

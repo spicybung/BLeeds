@@ -147,7 +147,7 @@ def decode_game_dtz_2dfx_entry(data: bytes, off: int, index: int, table_abs: int
         return None
 
 
-def parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[str, object]]], ide_count: int):
+def parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[str, object]]], ide_count: int, include_without_effects=False):
     pools = (("BUILDING", 0x24), ("TREADABLE", 0x28), ("DUMMY", 0x2C))
     entities, pool_stats = [], {}
     for pool_name, header_off in pools:
@@ -178,15 +178,18 @@ def parse_game_dtz_entity_pools(data: bytes, model_effects: Dict[int, List[Dict[
                 entity_off = items_abs + entity_index * 0x60
                 model_id = int(struct.unpack_from("<h", data, entity_off + 0x56)[0])
                 model_id2 = int(struct.unpack_from("<h", data, entity_off + 0x58)[0])
-                entries = model_effects.get(model_id, []) if 0 <= model_id < int(ide_count) else []
-                if not entries:
+                if not 0 <= model_id < int(ide_count):
+                    continue
+                entries = model_effects.get(model_id, [])
+                if not entries and not include_without_effects:
                     continue
                 values = struct.unpack_from("<16f", data, entity_off)
                 right, up = tuple(map(float, values[0:3])), tuple(map(float, values[4:7]))
                 at, position = tuple(map(float, values[8:11])), tuple(map(float, values[12:15]))
                 if not all(math.isfinite(v) for v in right + up + at + position):
                     continue
-                stats["with_effects"] += 1
+                if entries:
+                    stats["with_effects"] += 1
                 stats["effect_rows"] += len(entries)
                 entities.append({
                     "pool_name": pool_name, "pool_index": int(entity_index), "pool_flag": pool_flag,
@@ -334,7 +337,9 @@ def parse_game_dtz_2dfx_bytes(data: bytes, wanted_model_ids=None) -> Tuple[Dict[
         "models_with_effects": len(mapping), "entries_available": entry_total,
         "model_meta_by_id": model_meta_by_id, "rejected_model_refs": rejected,
     })
-    entities, pool_stats = parse_game_dtz_entity_pools(data, mapping, ide_count)
+    world_entities, pool_stats = parse_game_dtz_entity_pools(data, mapping, ide_count, include_without_effects=True)
+    entities = [entity for entity in world_entities if entity["effect_count"] > 0]
+    summary["world_entities"] = world_entities
     summary.update({
         "effect_entities": entities, "entity_pool_stats": pool_stats,
         "entity_instances_with_effects": len(entities),
@@ -376,6 +381,9 @@ def find_game_dtz(lvz_path: str, explicit_path: str = "") -> str:
         child for child in children
         if child.suffix.lower() == ".dtz" and normalizedCopyStem(child.stem).lower() == "game"
     )
+    other_dtz_files = [child for child in children if child.suffix.casefold() == '.dtz']
+    if len(other_dtz_files) == 1:
+        candidates.append(other_dtz_files[0])
     seen = set()
     for candidate in candidates:
         try:

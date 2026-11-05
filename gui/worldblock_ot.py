@@ -354,7 +354,8 @@ class EXPORT_OT_CW_wbl(bpy.types.Operator, ExportHelper):
                     'no output file was created'
                 )
 
-            sel = [o for o in context.selected_objects if o.type in {'MESH', 'EMPTY', 'LIGHT'}]
+            from ..ops.object_types import isObjectExportable
+            sel = [o for o in context.selected_objects if o.type in {'MESH', 'EMPTY', 'LIGHT'} and isObjectExportable(o)]
             if not sel:
                 raise RuntimeError("select objects (mesh/light) to export")
 

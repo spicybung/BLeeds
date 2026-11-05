@@ -127,23 +127,93 @@ def readLeedsGeometry(chunk):
 
 
 def readMaterialNames(sections):
+    # A material slot can point back to an earlier slot instead of storing another material.
     material_list = next((section for section in sections if section.type_id == 8), None)
     if material_list is None:
         return []
+    children = material_list.children()
+    structure = next((child for child in children if child.type_id == 1), None)
+    if structure is None or len(structure.payload) < 4:
+        raise ValueError('The DFF material list is incomplete')
+    count = struct.unpack_from('<I', structure.payload)[0]
+    if len(structure.payload) != 4 + count * 4:
+        raise ValueError('The DFF material count does not match its list')
+    table = structure.payload
+    materials = iter(child for child in children if child.type_id == 7)
     result = []
-    for material in material_list.children():
-        if material.type_id != 7:
+    for index in range(count):
+        reference = struct.unpack_from('<i', table, 4 + index * 4)[0]
+        if reference != -1:
+            if reference < 0 or reference >= index:
+                raise ValueError('The DFF refers to a missing material')
+            result.append(dict(result[reference]))
             continue
-        sections = material.children()
-        structure = next((section for section in sections if section.type_id == 1), None)
+        material = next(materials, None)
+        if material is None:
+            raise ValueError('The DFF is missing a material')
+        parts = material.children()
+        structure = next((section for section in parts if section.type_id == 1), None)
         color = tuple(structure.payload[4:8]) if structure and len(structure.payload) >= 8 else (255, 255, 255, 255)
-        texture = next((section for section in sections if section.type_id == 6), None)
+        texture = next((section for section in parts if section.type_id == 6), None)
         name = ''
         if texture:
             name_chunk = next((section for section in texture.children() if section.type_id == 2), None)
             if name_chunk:
-                name = name_chunk.payload.split(b'\0', 1)[0].decode('ascii', errors='replace')
+                name = name_chunk.payload.split(b'\0', 1)[0].decode('utf-8', errors='replace')
         result.append(dict(name=name, color=color))
+    return result
+
+
+def readDffRoots(data, source):
+    # Some game files have zero padding after the model. Leave that padding alone.
+    if len(data) < 12:
+        raise ValueError('The DFF header is incomplete')
+    version = struct.unpack_from('<I', data, 8)[0]
+    if version == 0x310 and source != 'BETA':
+        return readMobileDffChunks(data)
+    roots = []
+    offset = 0
+    while offset < len(data):
+        if not any(data[offset:]):
+            if roots:
+                roots[-1].trailing_bytes = data[offset:]
+            break
+        if offset + 12 > len(data):
+            raise ValueError('The DFF ends inside a file header')
+        size = struct.unpack_from('<I', data, offset + 4)[0]
+        end = offset + 12 + size
+        roots.extend(readChunks(data[offset:end]))
+        offset = end
+    return roots
+
+
+def readGeometrySkin(sections, vertex_count):
+    plugin = next((plugin for section in sections if section.type_id == 3
+                   for plugin in section.children() if plugin.type_id == 0x116), None)
+    if plugin is None:
+        return []
+    data = plugin.payload
+    if len(data) < 4:
+        raise ValueError('The DFF skeleton weights are incomplete')
+    bone_count, used_count, maximum, padding = struct.unpack_from('<4B', data)
+    offset = 4 + used_count
+    required = offset + vertex_count * 20
+    if bone_count == 0 or maximum > 4 or used_count > bone_count or required > len(data):
+        raise ValueError('The DFF skeleton weights do not match its mesh')
+    indices = [struct.unpack_from('<4B', data, offset + index * 4) for index in range(vertex_count)]
+    offset += vertex_count * 4
+    weights = [struct.unpack_from('<4f', data, offset + index * 16) for index in range(vertex_count)]
+    result = []
+    for vertex_indices, vertex_weights in zip(indices, weights):
+        influences = []
+        for bone, weight in zip(vertex_indices, vertex_weights):
+            if not math.isfinite(weight) or weight < 0.0:
+                raise ValueError('The DFF contains invalid skeleton weights')
+            if weight > 0.0:
+                if bone >= bone_count:
+                    raise ValueError('The DFF mesh refers to a missing bone')
+                influences.append((bone, weight))
+        result.append(influences)
     return result
 
 
@@ -183,6 +253,7 @@ def replaceLeedsVertices(chunk, part_vertices):
 
 
 def readFrames(chunk):
+    # Keep frame names, parents and bone numbers together so the model can be rebuilt.
     sections = chunk.children()
     structure = next((item for item in sections if item.type_id == 1), None)
     if structure is None or len(structure.payload) < 4:
@@ -213,7 +284,7 @@ def readFrames(chunk):
         if index < len(extensions):
             for plugin in extensions[index].children():
                 if plugin.type_id == 0x253F2FE:
-                    name = plugin.payload.split(b'\0', 1)[0].decode('ascii', errors='replace') or name
+                    name = plugin.payload.split(b'\0', 1)[0].decode('utf-8', errors='replace') or name
                 elif plugin.type_id == 0x11E and len(plugin.payload) >= 12:
                     bone_id = struct.unpack_from('<i', plugin.payload, 4)[0]
         frames.append(dict(index=index, values=values[:12], parent=parent, name=name, bone_id=bone_id, skin_index=skin_indices.get(bone_id)))
@@ -229,7 +300,7 @@ def readFrames(chunk):
 
 
 def readDff(data, source='MOBILE'):
-    roots = readMobileDffChunks(data) if source == "MOBILE" else readChunks(data)
+    roots = readDffRoots(data, source)
     clumps = []
     for root in roots:
         if root.type_id != 0x10:
@@ -245,9 +316,13 @@ def readDff(data, source='MOBILE'):
                 continue
             children = section.children()
             structure = next((item for item in children if item.type_id == 1), None)
-            if structure is None or len(structure.payload) < 16:
-                raise ValueError('Invalid DFF atomic')
-            frame_index, geometry_index, flags, unused = struct.unpack_from('<4I', structure.payload)
+            if structure is None or len(structure.payload) not in (12, 16):
+                raise ValueError('The DFF model mesh header is incomplete')
+            if len(structure.payload) == 12:
+                frame_index, flags, unused = struct.unpack_from('<3I', structure.payload)
+                geometry_index = 0
+            else:
+                frame_index, geometry_index, flags, unused = struct.unpack_from('<4I', structure.payload)
             if frame_index >= len(frames):
                 raise ValueError('DFF atomic references a missing frame')
             geometry = next((item for item in children if item.type_id == 0xF), None)
@@ -256,29 +331,29 @@ def readDff(data, source='MOBILE'):
                     raise ValueError('DFF atomic references a missing geometry')
                 geometry = shared_geometry[geometry_index]
             if geometry.version == 0xF00D:
-                if source != 'MOBILE':
+                if source == 'BETA':
                     raise ValueError('Select LCS Mobile for this Leeds geometry; prototype handling is separate')
                 decoded, material_sections = readLeedsGeometry(geometry)
-                parts = [dict(vertices=part.verts, faces=part.faces, uvs=part.uvs,
+                parts = [dict(vertices=part.verts, faces=[face for face in part.faces if len({tuple(part.verts[index]) for index in face}) == 3], uvs=part.uvs,
                               colors=part.vertex_colors, normals=part.normals,
                               material=part.material_id, source=part) for part in decoded.parts]
             else:
                 decoded = readGeometry(geometry)
                 material_sections = decoded['sections']
-                for extension in material_sections:
-                    if extension.type_id == 3 and any(plugin.type_id == 0x116 for plugin in extension.children()):
-                        raise ValueError('This standard RenderWare skin layout is not implemented yet; no static substitute was imported')
+                weights = readGeometrySkin(material_sections, decoded['vertex_count'])
                 if not decoded['morphs'] or not decoded['morphs'][0]['vertices']:
                     raise ValueError('DFF has no vertex positions')
                 parts = [dict(vertices=decoded['morphs'][0]['vertices'], faces=decoded['faces'], 
                               uvs=decoded['uvs'][0] if decoded['uvs'] else [], 
                               colors=decoded['colors'], normals=decoded['morphs'][0]['normals'], 
-                              material=0, face_materials=decoded['materials'])]
+                              material=0, face_materials=decoded['materials'], weights=weights, uv_sets=decoded['uvs'])]
             atomics.append(dict(chunk=section, children=children, geometry=geometry,
                                 frame=frame_index, parts=parts, materials=readMaterialNames(material_sections),
                                 shared=geometry_list is not None and geometry in shared_geometry))
         clumps.append(dict(root=root, sections=sections, frames=frames, atomics=atomics,
                            geometry_list=geometry_list, shared_geometry=shared_geometry))
+    if not clumps:
+        raise ValueError('The file contains no DFF model')
     return clumps
 
 

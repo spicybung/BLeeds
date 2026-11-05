@@ -22,11 +22,19 @@ from .ifp_ot import *
 from .mdl_menus import *
 from .gui_menus import *
 from .col2_ot import *
-from .col2_menus import *
 from .tex_ot import *
 from .lvz_img_ot import *
-from .two_dfx_menus import *
+from importlib import import_module
+effects = import_module('.2d_effects', __package__)
+OBJECT_PT_BLeeds_2D_Effects = effects.OBJECT_PT_BLeeds_2D_Effects
+DATA_PT_BLeeds_2D_Effects_Light = effects.DATA_PT_BLeeds_2D_Effects_Light
+OBJECT_OT_BLeeds_EffectPointLight = effects.OBJECT_OT_BLeeds_EffectPointLight
 from .world_ot import *
 from .worldblock_ot import *
 
 from .mobile_ot import *
+from .animation_viewer import *
+from .object_menus import *
+
+effect_gizmos = import_module('.2d_effects_gizmos', __package__)
+VIEW3D_GGT_BLeeds_2D_Effects = effect_gizmos.VIEW3D_GGT_BLeeds_2D_Effects

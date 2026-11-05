@@ -15,7 +15,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from .mesh_compat import objectChildren
 import math
+from .mesh_compat import meshColorLayer, colorLayerDomain
+from .object_types import isModelMesh, isObjectExportable
 import json
 import os
 import struct
@@ -70,7 +73,7 @@ def isMh2Member(obj):
 
 def mh2Descendants(obj):
     try:
-        return list(obj.children_recursive)
+        return list(objectChildren(obj))
     except (AttributeError, TypeError, RuntimeError):
         return []
 
@@ -232,37 +235,6 @@ def findMh2Root(context, preferred_name=None):
 
 
 
-def normalizeMh2ArmatureNames(root):
-    if root is None or getattr(root, 'type', None) != 'ARMATURE':
-        return
-    filepath = str(mh2ObjectValue(root, 'bleeds_mdl_filepath', '') or mh2ObjectValue(root, 'bleeds_mh2_path', '') or '')
-    model_name = Path(filepath).stem.strip()
-    if not model_name:
-        return
-    if root.name.casefold() == 'unnamed':
-        root.name = model_name
-    armature = getattr(root, 'data', None)
-    if armature is not None and armature.name.casefold() == 'unnamed':
-        armature.name = model_name + ' Skeleton'
-    if armature is None:
-        return
-    root_bone = next((bone for bone in armature.bones if bone.parent is None), None)
-    if root_bone is None:
-        return
-    root_bone.hide = True
-    attachment_names = {
-        'danny_broken_cutscene_l0',
-        'weapstrap',
-        'lurebagempty_(ct)',
-    }
-    for bone in armature.bones:
-        if bone.name.casefold() in attachment_names:
-            bone.hide = True
-        elif bone.parent == root_bone and not bone.name.casefold().startswith('bip'):
-            if (bone.head_local - root_bone.head_local).length < 0.10:
-                bone.hide = True
-
-
 def validateMh2ExportType(root, model_type='PED'):
     requested = str(model_type or 'PED').upper().strip()
     if requested not in {'SIM', 'PED', 'CUT'}:
@@ -310,12 +282,14 @@ def encodeMh2Position(position, part, vertex_index, platform):
 def mh2ConsoleCornerValues(obj, part):
     mesh = obj.data
     vertex_count = len(mesh.vertices)
-    uv_layer = getattr(mesh.uv_layers, 'active', None) if hasattr(mesh, 'uv_layers') else None
-    color_layers = getattr(mesh, 'color_attributes', None)
-    color_layer = None
-    if color_layers is not None:
-        color_layer = (color_layers.get('Prelight') or color_layers.get('Color')
-                       or color_layers.get('Col') or getattr(color_layers, 'active_color', None))
+    uv_layer = None
+    if hasattr(mesh, 'uv_layers') and len(mesh.uv_layers):
+        selected = getattr(mesh.uv_layers, 'active', None)
+        if selected is not None and len(selected.data) == len(mesh.loops):
+            uv_layer = selected
+        else:
+            uv_layer = mh2ValidUvLayers(mesh, 1)[0]
+    color_layer = mh2ValidColorLayer(mesh)
     uv_values = [None] * vertex_count
     color_values = [None] * vertex_count
     normal_values = [None] * vertex_count
@@ -331,7 +305,7 @@ def mh2ConsoleCornerValues(obj, part):
         attributes = (
             ('UV', uv_values, tuple(uv_layer.data[loop_index].uv) if uv_layer else None),
             ('vertex color', color_values,
-             tuple(color_layer.data[loop_index if color_layer.domain == 'CORNER' else vertex_index].color)
+             tuple(color_layer.data[loop_index if colorLayerDomain(color_layer) == 'CORNER' else vertex_index].color)
              if color_layer else None),
             ('normal', normal_values,
              tuple(loop.normal) if hasattr(loop, 'normal') else tuple(mesh.vertices[vertex_index].normal)),
@@ -520,18 +494,27 @@ def exportMh2Model(context, output_path: str, root=None):
         root = findMh2Root(context)
     root = recoverMh2RootProperties(root)
     if root.get('bleeds_mh2_clump_index') is None or not root.get('bleeds_mh2_path'):
-        return exportMh2PcPositions(root, output_path)
+        return exportMh2RebuiltModel(root, output_path, context=context)
     resource, entries = readModel(loadMh2NativeModel(root), platform='AUTO')
     clump_index = int(root['bleeds_mh2_clump_index'])
     if clump_index < 0 or clump_index >= len(entries):
         raise ValueError('MH2 source clump index is outside the original model')
 
+    if not isObjectExportable(root):
+        raise ValueError("This model is marked Don't Export")
+    excluded_objects = set()
+    for atomic_index, atomic in enumerate(entries[clump_index]['objects']):
+        members = [obj for obj in objectChildren(root) if obj.type == 'MESH'
+                   and int(obj.get('bleeds_mh2_atomic_index', -1)) == atomic_index]
+        excluded = [obj for obj in members if not isModelMesh(obj)]
+        if excluded and len(excluded) != len(members):
+            raise ValueError('Exclude all mesh parts of an MH2 console object together')
+        if excluded:
+            excluded_objects.add(int(atomic['offset']))
     meshes = {}
-    for obj in root.children_recursive:
-        if getattr(obj, 'type', None) == 'MESH' and getattr(obj, 'mode', '') == 'EDIT':
-            obj.update_from_editmode()
-    for obj in root.children_recursive:
-        if getattr(obj, 'type', None) != 'MESH':
+    mh2SyncEditedMeshes(root)
+    for obj in objectChildren(root):
+        if not isModelMesh(obj):
             continue
         if obj.get('bleeds_model_game') != 'MH2':
             continue
@@ -549,7 +532,7 @@ def exportMh2Model(context, output_path: str, root=None):
     entry = entries[clump_index]
     bones_by_offset = {bone['offset']: bone for bone in entry['bones']}
     inverse_rotation = Matrix.Rotation(-math.pi / 2.0, 4, 'X')
-    patched = bytearray(resource.data)
+    patched = bytearray(removeMh2ObjectInfos(resource.data, excluded_objects))
     touched = 0
     changed = 0
     for (atomic_index, part_index), obj in sorted(meshes.items()):
@@ -656,7 +639,9 @@ def exportMh2Model(context, output_path: str, root=None):
     verified_entry = verified_entries[clump_index]
     for (atomic_index, part_index), obj in meshes.items():
         original_part = entry['objects'][atomic_index]['parts'][part_index]
-        written_part = verified_entry['objects'][atomic_index]['parts'][part_index]
+        original_offset = entry['objects'][atomic_index]['offset']
+        written_atomic = next(atomic for atomic in verified_entry['objects'] if atomic['offset'] == original_offset)
+        written_part = written_atomic['parts'][part_index]
         if len(written_part['vertices']) != len(original_part['vertices']):
             raise ValueError(f'{obj.name}: MH2 round-trip vertex count changed')
         if written_part['faces'] != original_part['faces']:
@@ -674,7 +659,7 @@ def exportMh2PcPositions(root, output_path):
     changed = 0
     processed = 0
     mesh_count = 0
-    mesh_objects = [obj for obj in root.children_recursive
+    mesh_objects = [obj for obj in objectChildren(root)
                     if obj.type == 'MESH' and 'bleeds_mh2_vertex_start' in obj]
     if not mesh_objects:
         raise ValueError('No MH2 PC mesh source offsets found; reimport this MDL')
@@ -723,16 +708,30 @@ def exportMh2PcPositions(root, output_path):
         uv_by_vertex = []
         loop_vertex_indices = np.empty(len(obj.data.loops), dtype=np.int32)
         if uv_offsets[element_type]:
-            obj.data.loops.foreach_get('vertex_index', loop_vertex_indices)
+            try:
+                obj.data.loops.foreach_get('vertex_index', loop_vertex_indices)
+            except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
+                loop_vertex_indices[:] = np.fromiter(
+                    (int(loop.vertex_index) for loop in obj.data.loops),
+                    dtype=np.int32,
+                    count=len(obj.data.loops),
+                )
+        live_uv_layers = mh2ValidUvLayers(obj.data, len(uv_offsets[element_type]))
         for uv_layer_index, uv_offset in enumerate(uv_offsets[element_type]):
-            if uv_layer_index >= len(obj.data.uv_layers):
+            layer = live_uv_layers[uv_layer_index]
+            if layer is None:
                 uv_by_vertex.append(None)
                 continue
-            layer = obj.data.uv_layers[uv_layer_index]
             vertex_uvs = [None] * count
             loop_uvs = np.empty(len(loop_vertex_indices) * 2, dtype=np.float32)
-            layer.data.foreach_get('uv', loop_uvs)
-            loop_uvs = loop_uvs.reshape((-1, 2))
+            try:
+                layer.data.foreach_get('uv', loop_uvs)
+                loop_uvs = loop_uvs.reshape((-1, 2))
+            except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
+                loop_uvs = np.asarray(
+                    [tuple(float(value) for value in loop.uv) for loop in layer.data],
+                    dtype=np.float32,
+                ).reshape((-1, 2))
             for loop_index, vertex_index in enumerate(loop_vertex_indices):
                 vertex_index = int(vertex_index)
                 uv = (float(loop_uvs[loop_index, 0]), float(loop_uvs[loop_index, 1]))
@@ -907,31 +906,43 @@ def encodePcGeometry(obj, source):
 
     mesh = obj.data
     mesh.calc_loop_triangles()
+    if hasattr(mesh, 'calc_normals_split'):
+        mesh.calc_normals_split()
+    if not mesh.polygons:
+        raise ValueError(f'{obj.name}: the MH2 part has no faces')
+    if len(mesh.vertices) > 65535:
+        raise ValueError(f'{obj.name}: MH2 PC supports at most 65535 vertices per part')
+    if any(int(loop.vertex_index) >= len(mesh.vertices) for loop in mesh.loops):
+        raise ValueError(f'{obj.name}: mesh contains a face that references a missing vertex')
     if any(len(poly.vertices) < 3 for poly in mesh.polygons):
         raise ValueError(f'{obj.name}: mesh contains degenerate polygons')
-    active_uv_layers = list(mesh.uv_layers)[:len(uv_offsets)]
-    color_layer = None
-    if getattr(mesh, 'color_attributes', None):
-        color_layer = (mesh.color_attributes.get('Color') or mesh.color_attributes.get('Col')
-                       or mesh.color_attributes.active_color)
+    active_uv_layers = mh2ValidUvLayers(mesh, len(uv_offsets))
+    color_layer = mh2ValidColorLayer(mesh)
 
     def cornerNormal(loop_index, vertex_index):
         if hasattr(mesh, 'corner_normals') and len(mesh.corner_normals) > loop_index:
             return Vector(mesh.corner_normals[loop_index].vector)
-        loop = mesh.loops[loop_index]
-        if hasattr(loop, 'normal'):
-            return Vector(loop.normal)
-        return Vector(mesh.vertices[vertex_index].normal)
+        if loop_index < len(mesh.loops):
+            loop = mesh.loops[loop_index]
+            if hasattr(loop, 'normal'):
+                return Vector(loop.normal)
+        if 0 <= vertex_index < len(mesh.vertices):
+            return Vector(mesh.vertices[vertex_index].normal)
+        raise ValueError(f'{obj.name}: face refers to missing vertex {vertex_index}')
 
     def cornerColor(loop_index, vertex_index):
         if color_layer is None:
             return None
-        color_index = loop_index if color_layer.domain == 'CORNER' else vertex_index
-        return tuple(float(channel) for channel in color_layer.data[color_index].color)
+        color_index = loop_index if colorLayerDomain(color_layer) == 'CORNER' else vertex_index
+        color = tuple(float(channel) for channel in color_layer.data[color_index].color)
+        if len(color) != 4 or not all(math.isfinite(channel) for channel in color):
+            raise ValueError(f'{obj.name}: invalid vertex color at corner {loop_index}')
+        return color
 
     position_matrix = sourcePositionMatrix(obj) @ obj.matrix_world
     world_position_matrix = Matrix.Rotation(-math.pi / 2.0, 4, 'X') @ obj.matrix_world
     normal_matrix = position_matrix.to_3x3().inverted().transposed()
+    reverse_winding = position_matrix.to_3x3().determinant() < 0.0
     source_vertices = memoryview(source)
     vertex_group_names = [group.name for group in obj.vertex_groups]
     vertex_map = {}
@@ -945,6 +956,25 @@ def encodePcGeometry(obj, source):
     world_positions = [tuple(world_position_matrix @ Vector(mesh.vertices[index].co))
                        for index in range(base_vertex_count)]
     assigned_source_vertices = set()
+    source_positions = [Vector(struct.unpack_from(
+        '<3f', source, old_vertex_start + index * vertex_stride
+    )) for index in range(old_vertex_count)]
+    nearest_source_indices = {}
+    custom_mesh = bool(obj.get('bleeds_mh2_custom_mesh', False))
+
+    def nearestSourceIndex(vertex_index):
+        if vertex_index < old_vertex_count and not custom_mesh:
+            return vertex_index
+        if vertex_index not in nearest_source_indices:
+            if not source_positions:
+                raise ValueError(f'{obj.name}: new vertices need an original native vertex to inherit attributes')
+            position = position_matrix @ Vector(mesh.vertices[vertex_index].co)
+            nearest_source_indices[vertex_index] = min(
+                range(len(source_positions)),
+                key=lambda index: (source_positions[index] - position).length_squared,
+            )
+        return nearest_source_indices[vertex_index]
+
     old_records_start = old_start + header_size
     old_records_end = old_records_start + record_count * record_stride
     if old_records_end > len(source):
@@ -995,12 +1025,31 @@ def encodePcGeometry(obj, source):
             raise ValueError(f'{obj.name}: material {material_index} needs a new native material record')
         material_record_index = material_record_lookup[material_index]
         face_indices = []
-        for loop_index in triangle.loops:
+        triangle_loops = tuple(triangle.loops)
+        if reverse_winding:
+            triangle_loops = (triangle_loops[0], triangle_loops[2], triangle_loops[1])
+        for loop_index in triangle_loops:
             loop = mesh.loops[loop_index]
             vertex_index = int(loop.vertex_index)
-            uv_values = tuple(tuple(float(value) for value in layer.data[loop_index].uv)
-                              for layer in active_uv_layers)
-            uv_values += ((0.0, 0.0),) * (len(uv_offsets) - len(uv_values))
+            uv_values = []
+            for layer, uv_offset in zip(active_uv_layers, uv_offsets):
+                if layer is not None:
+                    uv_values.append(tuple(float(value) for value in layer.data[loop_index].uv))
+                elif vertex_index < old_vertex_count:
+                    uv_address = old_vertex_start + vertex_index * vertex_stride + uv_offset
+                    native_u, native_v = struct.unpack_from('<2f', source, uv_address)
+                    uv_values.append((native_u, 1.0 - native_v))
+                else:
+                    # A new vertex without a UV layer inherits a source corner
+                    # rather than resetting the entire model's texture coordinates.
+                    if old_vertex_count:
+                        nearest_index = nearestSourceIndex(vertex_index)
+                        uv_address = old_vertex_start + nearest_index * vertex_stride + uv_offset
+                        native_u, native_v = struct.unpack_from('<2f', source, uv_address)
+                        uv_values.append((native_u, 1.0 - native_v))
+                    else:
+                        uv_values.append((0.0, 1.0))
+            uv_values = tuple(uv_values)
             normal = cornerNormal(loop_index, vertex_index)
             color = cornerColor(loop_index, vertex_index)
             key = (vertex_index, uv_values, tuple(normal), color)
@@ -1016,12 +1065,13 @@ def encodePcGeometry(obj, source):
                 position = position_matrix @ Vector(vertex.co)
                 if not all(math.isfinite(value) and abs(value) < 100000.0 for value in position):
                     raise ValueError(f'{obj.name}: vertex {vertex_index} has invalid coordinates')
-                if vertex_index < old_vertex_count:
-                    row_start = old_vertex_start + vertex_index * vertex_stride
+                if old_vertex_count:
+                    source_index = nearestSourceIndex(vertex_index)
+                    row_start = old_vertex_start + source_index * vertex_stride
                     row = bytearray(source_vertices[row_start:row_start + vertex_stride])
                 else:
                     row = bytearray(vertex_stride)
-                preserve_source = vertex_index < old_vertex_count
+                preserve_source = vertex_index < old_vertex_count and not custom_mesh
                 if not preserve_source or any(
                     abs(float(position[axis]) - source_value) > 0.000001
                     for axis, source_value in enumerate(struct.unpack_from('<3f', row, 0))
@@ -1089,8 +1139,8 @@ def encodePcGeometry(obj, source):
                                 raise ValueError(f'{obj.name}: native bone palette index exceeds eight bits')
                             influences[palette_index] = influences.get(palette_index, 0.0) + float(membership.weight)
                     if not influences:
-                        if not preserve_source or vertex.groups:
-                            raise ValueError(f'{obj.name}: skinned vertex {vertex_index} has no bone weights')
+                        if vertex.groups:
+                            raise ValueError(f'{obj.name}: skinned vertex {vertex_index} has no valid bone weights')
                         previous_weights = struct.unpack_from('<4f', row, 12)
                         previous_indices = struct.unpack_from('<4B', row, 28)
                         for index, weight in zip(previous_indices, previous_weights):
@@ -1171,8 +1221,8 @@ def encodePcGeometry(obj, source):
             bounds.extend(max(point[axis] for point in selected) for axis in range(3))
             source_bounds = struct.unpack_from('<6f', records, offset)
             needs_new_bounds = any(
-                bounds[axis] < source_bounds[axis] - 0.00001
-                or bounds[axis + 3] > source_bounds[axis + 3] + 0.00001
+                abs(bounds[axis] - source_bounds[axis]) > 0.00001 or
+                abs(bounds[axis + 3] - source_bounds[axis + 3]) > 0.00001
                 for axis in range(3)
             )
             if needs_new_bounds:
@@ -1198,55 +1248,185 @@ def encodePcGeometry(obj, source):
     return bytes(block), len(rows), len(faces)
 
 
-def gatherMh2PcMeshes(root):
-    objects = [obj for obj in root.children_recursive if getattr(obj, 'type', None) == 'MESH']
+class Mh2PcMeshPart:
+    def __init__(self, obj, properties):
+        self.object = obj
+        self.properties = dict(properties)
+        self.properties['bleeds_mh2_custom_mesh'] = True
+        self.properties['bleeds_mh2_geometry_signature'] = ''
+        self.properties['bleeds_model_game'] = 'MH2'
+
+    def __getattr__(self, name):
+        return getattr(self.object, name)
+
+    def __contains__(self, name):
+        return name in self.properties or name in self.object
+
+    def get(self, name, default=None):
+        return self.properties.get(name, self.object.get(name, default))
+
+
+def mh2MeshIsVisible(obj):
+    try:
+        return not obj.hide_get() and not obj.hide_viewport and not obj.hide_render
+    except (AttributeError, RuntimeError):
+        return True
+
+
+def mh2PartNames(obj):
+    import re
+
+    values = (obj.name, getattr(obj.data, 'name', ''),
+              obj.get('bleeds_mh2_source_part_name', ''))
+    return {re.sub(r'\.\d{3,}$', '', str(value)).casefold() for value in values if value}
+
+
+def mh2MeshWeightProfile(obj):
+    names = [group.name for group in obj.vertex_groups]
+    result = {}
+    for vertex in obj.data.vertices:
+        for member in vertex.groups:
+            if 0 <= member.group < len(names) and member.weight > 0.000001:
+                name = names[member.group]
+                result[name] = result.get(name, 0.0) + float(member.weight)
+    return result
+
+
+def mh2SourceWeightProfile(properties, source):
+    palette = properties.get('bleeds_mh2_skin_palette_names', '[]')
+    palette = json.loads(palette) if isinstance(palette, str) else list(palette)
+    stride = int(properties.get('bleeds_mh2_vertex_stride', 0))
+    start = int(properties.get('bleeds_mh2_vertex_start', 0))
+    count = int(properties.get('bleeds_mh2_source_vertex_count', 0))
+    vertex_type = int(properties.get('bleeds_mh2_vertex_element_type', 0))
+    if vertex_type not in {0x115E, 0x125E} or stride < 52 or start < 48:
+        return {}
+    if start + count * stride > len(source):
+        raise ValueError('The source model contains an invalid skin buffer')
+    result = {}
+    for index in range(count):
+        weights = struct.unpack_from('<4f', source, start + index * stride + 12)
+        indices = struct.unpack_from('<4B', source, start + index * stride + 28)
+        for bone, weight in zip(indices, weights):
+            if bone < len(palette) and palette[bone] and math.isfinite(weight) and weight > 0.000001:
+                name = str(palette[bone])
+                result[name] = result.get(name, 0.0) + weight
+    return result
+
+
+def mh2WeightSimilarity(first, second):
+    first_length = math.sqrt(sum(value * value for value in first.values()))
+    second_length = math.sqrt(sum(value * value for value in second.values()))
+    if first_length <= 0 or second_length <= 0:
+        return 0.0
+    return sum(value * second.get(name, 0.0) for name, value in first.items()) / (first_length * second_length)
+
+
+def mh2ReplacementSlot(obj, slots, source):
+    if len(slots) == 1:
+        return slots[0]
+    names = mh2PartNames(obj)
+    matching = []
+    for slot in slots:
+        source_names = (slot.get('name', ''),
+                        slot.get('properties', {}).get('bleeds_mh2_source_part_name', ''))
+        if any(str(name).casefold() in names for name in source_names if name):
+            matching.append(slot)
+    if len(matching) == 1:
+        return matching[0]
+    candidates = matching or slots
+    weighted = any(member.weight > 0.000001 for vertex in obj.data.vertices for member in vertex.groups)
+    same_layout = [slot for slot in candidates if (
+        int(slot.get('properties', {}).get('bleeds_mh2_vertex_element_type', 0)) in {0x115E, 0x125E}
+    ) == weighted]
+    if len(same_layout) == 1:
+        return same_layout[0]
+    profile = mh2MeshWeightProfile(obj)
+    ranked = sorted(((mh2WeightSimilarity(profile, mh2SourceWeightProfile(
+        slot.get('properties', {}), source)), index, slot)
+        for index, slot in enumerate(same_layout or candidates)), key=lambda item: item[0], reverse=True)
+    if len(ranked) >= 2 and ranked[0][0] > 0 and ranked[0][0] - ranked[1][0] > 0.05:
+        return ranked[0][2]
+    raise ValueError(
+        f'{obj.name}: cannot identify which model part this mesh replaces. '
+        'Keep the original part names when replacing several parts.'
+    )
+
+
+def gatherMh2PcMeshes(root, context=None, selected_meshes=None):
+    descendants = list(objectChildren(root))
+    objects = [obj for obj in descendants if obj.type == 'MESH']
+    rigs = {obj for obj in [root] + descendants if obj.type == 'ARMATURE'}
+    try:
+        import bpy
+        for obj in bpy.data.objects:
+            if obj.type != 'MESH' or obj in objects:
+                continue
+            if any(modifier.type == 'ARMATURE' and modifier.object in rigs
+                   for modifier in obj.modifiers):
+                objects.append(obj)
+    except ImportError:
+        pass
+    if selected_meshes is None:
+        selected_meshes = list(getattr(context, 'selected_objects', ()) or ()) if context else []
+        active = getattr(context, 'active_object', None) or getattr(context, 'object', None) if context else None
+        if active is not None and active not in selected_meshes:
+            selected_meshes.append(active)
+    for obj in selected_meshes:
+        if obj.type != 'MESH' or obj in objects:
+            continue
+        owner = getMh2RootFromObject(obj)
+        if owner is None or owner == root:
+            objects.append(obj)
+    selected = set(selected_meshes)
     by_offset = {}
     new_objects = []
     for obj in objects:
+        if not isModelMesh(obj):
+            continue
         offset = int(obj.get('bleeds_mh2_objinfo_offset', 0))
         if not offset:
-            new_objects.append(obj)
+            if mh2MeshIsVisible(obj) or obj in selected:
+                new_objects.append(obj)
             continue
-        if offset in by_offset:
-            raise ValueError('Two meshes use the same MH2 part: ' + str(obj.name))
-        by_offset[offset] = obj
+        previous = by_offset.get(offset)
+        if previous is not None:
+            candidates = [part for part in (previous, obj) if mh2MeshIsVisible(part)]
+            if len(candidates) != 1:
+                candidates = [part for part in (previous, obj) if part in selected]
+            if len(candidates) != 1:
+                raise ValueError('Two visible meshes replace the same MH2 part: ' + obj.name)
+            by_offset[offset] = candidates[0]
+        else:
+            by_offset[offset] = obj
 
     stored_slots = root.get('bleeds_mh2_part_slots', '[]')
     try:
         slots = json.loads(stored_slots) if isinstance(stored_slots, str) else list(stored_slots)
     except (ValueError, TypeError) as exc:
-        raise ValueError('MH2 part assignments are invalid: ' + str(exc)) from exc
-    missing = []
-    for slot in slots:
-        properties = slot.get('properties', {})
-        offset = int(properties.get('bleeds_mh2_objinfo_offset', 0))
-        if offset and offset not in by_offset:
-            missing.append(slot)
-
-    # A replacement mesh can be parented to the MH2 root without retaining
-    # the original Blender mesh object. Preserve the native part identity.
+        raise ValueError('The model part information could not be read: ' + str(exc)) from exc
+    source = decodePmlcContainer(loadMh2NativeModel(root))[0] if new_objects else None
+    used_slots = set()
     for obj in new_objects:
-        if not missing:
-            raise ValueError(f'{obj.name}: no unused MH2 mesh part is available. Edit or replace the mesh data on an existing part.')
-        if len(missing) > 1:
-            names = [slot for slot in missing if slot.get('name') == obj.name]
-            if len(names) == 1:
-                slot = names[0]
-            elif len(new_objects) == len(missing):
-                slot = missing[0]
-            else:
-                raise ValueError(f'{obj.name}: several native part slots are free; set bleeds_mh2_objinfo_offset to choose a part')
-        else:
-            slot = missing[0]
-        missing.remove(slot)
+        missing = [slot for slot in slots
+                   if int(slot.get('properties', {}).get('bleeds_mh2_objinfo_offset', 0)) not in by_offset
+                   and int(slot.get('properties', {}).get('bleeds_mh2_objinfo_offset', 0)) not in used_slots]
+        remaining = [slot for slot in slots
+                     if int(slot.get('properties', {}).get('bleeds_mh2_objinfo_offset', 0)) not in used_slots]
+        hidden = [slot for slot in remaining
+                  if int(slot.get('properties', {}).get('bleeds_mh2_objinfo_offset', 0)) in by_offset
+                  and not mh2MeshIsVisible(by_offset[int(slot['properties']['bleeds_mh2_objinfo_offset'])])]
+        available = missing or hidden or remaining
+        if not available:
+            raise ValueError(f'{obj.name}: this model has no remaining mesh parts to replace')
+        slot = mh2ReplacementSlot(obj, available, source)
         properties = slot['properties']
-        for key, value in properties.items():
-            if key not in obj:
-                obj[key] = value
-        by_offset[int(properties['bleeds_mh2_objinfo_offset'])] = obj
+        offset = int(properties['bleeds_mh2_objinfo_offset'])
+        used_slots.add(offset)
+        by_offset[offset] = Mh2PcMeshPart(obj, properties)
 
     if not by_offset:
-        raise ValueError('No MH2 PC mesh parts found beneath the selected root')
+        raise ValueError('No MH2 PC meshes were found for this model')
     return by_offset
 
 
@@ -1313,6 +1493,8 @@ def mh2GeometryMatchesSource(obj, source, allow_position_uv_changes=False):
         if vertex_start < 48 or source_vertex_count < 1:
             return False
         mesh = obj.data
+        if hasattr(mesh, 'calc_normals_split'):
+            mesh.calc_normals_split()
         index_count = struct.unpack_from('<I', source, start + 0x30)[0]
         source_count = struct.unpack_from('<I', source, start + 0x50)[0]
         if len(mesh.vertices) != source_count or source_vertex_count != source_count:
@@ -1347,13 +1529,8 @@ def mh2GeometryMatchesSource(obj, source, allow_position_uv_changes=False):
         matrix = sourcePositionMatrix(obj) @ obj.matrix_world
         normal_matrix = matrix.to_3x3().inverted().transposed()
         uv_offsets = VERTEX_LAYOUTS[element_type][1]
-        if len(mesh.uv_layers) < len(uv_offsets):
-            return False
-        selected_color = None
-        if getattr(mesh, 'color_attributes', None) is not None:
-            attributes = mesh.color_attributes
-            selected_color = (attributes.get('Color') or attributes.get('Col')
-                              or getattr(attributes, 'active_color', None))
+        valid_uv_layers = mh2ValidUvLayers(mesh, len(uv_offsets))
+        selected_color = mh2ValidColorLayer(mesh)
         palette = json.loads(obj.get('bleeds_mh2_skin_palette_names', '[]'))
         group_names = [group.name for group in obj.vertex_groups]
         if element_type in (0x115E, 0x125E) and not palette:
@@ -1393,7 +1570,9 @@ def mh2GeometryMatchesSource(obj, source, allow_position_uv_changes=False):
         for loop_index, loop in enumerate(mesh.loops):
             vertex_index = int(loop.vertex_index)
             offset = vertex_start + vertex_index * stride
-            for layer, uv_offset in zip(mesh.uv_layers, uv_offsets):
+            for layer, uv_offset in zip(valid_uv_layers, uv_offsets):
+                if layer is None:
+                    continue
                 actual_uv = layer.data[loop_index].uv
                 u, v = struct.unpack_from('<2f', source, offset + uv_offset)
                 if (not allow_position_uv_changes and (
@@ -1421,7 +1600,7 @@ def mh2GeometryMatchesSource(obj, source, allow_position_uv_changes=False):
             if selected_color is not None:
                 bgra = struct.unpack_from('<4B', source, offset + color_offset)
                 expected_color = tuple(float(bgra[index]) / 255.0 for index in (2, 1, 0, 3))
-                color_index = loop_index if selected_color.domain == 'CORNER' else vertex_index
+                color_index = loop_index if colorLayerDomain(selected_color) == 'CORNER' else vertex_index
                 current_color = selected_color.data[color_index].color
                 if any(abs(float(current_color[axis]) - expected_color[axis]) > 0.0015
                        for axis in range(4)):
@@ -1449,6 +1628,39 @@ def writeMh2NativeBytes(output_path, data):
             os.unlink(temporary_path)
 
 
+def mh2ValidUvLayers(mesh, count):
+    loop_count = len(mesh.loops)
+    result = []
+    for index in range(count):
+        name = 'UVMap' if index == 0 else 'UVMap.{:03d}'.format(index)
+        layer = mesh.uv_layers.get(name)
+        if layer is None and index < len(mesh.uv_layers):
+            layer = mesh.uv_layers[index]
+        if layer is None or len(layer.data) != loop_count:
+            result.append(None)
+        else:
+            result.append(layer)
+    return result
+
+
+def mh2ValidColorLayer(mesh):
+    return meshColorLayer(mesh)
+
+
+def mh2SyncEditedMeshes(root):
+    for obj in objectChildren(root):
+        if getattr(obj, 'type', None) != 'MESH' or getattr(obj, 'mode', '') != 'EDIT':
+            continue
+        try:
+            import bmesh
+            bmesh.update_edit_mesh(obj.data, loop_triangles=True, destructive=False)
+        except (ImportError, RuntimeError, ValueError):
+            pass
+        obj.update_from_editmode()
+        if len(obj.data.vertices) and not len(obj.data.polygons):
+            raise ValueError(f'{obj.name}: no faces remain after editing the mesh')
+
+
 def mh2GeometryChanges(obj):
     saved = obj.get('bleeds_mh2_geometry_signature', '')
     if not saved:
@@ -1457,20 +1669,186 @@ def mh2GeometryChanges(obj):
         previous = json.loads(saved)
     except (TypeError, ValueError):
         return None
-    current = mh2GeometryFingerprint(obj)
+    try:
+        current = mh2GeometryFingerprint(obj)
+    except (IndexError, RuntimeError, ValueError):
+        # A partially missing edit-mode data layer must not prevent rebuilding
+        # the model from its original native attributes.
+        return None
     if set(previous) != set(current):
         return None
     return {field for field in current if current[field] != previous[field]}
 
 
-def exportMh2RebuiltModel(root, output_path):
-    for obj in root.children_recursive:
-        if getattr(obj, 'type', None) == 'MESH' and getattr(obj, 'mode', '') == 'EDIT':
-            obj.update_from_editmode()
+def mh2MaterialTextureName(material):
+    if 'bleeds_mh2_texture_name' in material and not material['bleeds_mh2_texture_name']:
+        return b''
+    texture_name = str(material.get('bleeds_mh2_texture_name', '') or '')
+    if not texture_name and material.use_nodes and material.node_tree is not None:
+        images = [node.image for node in material.node_tree.nodes
+                  if node.type == 'TEX_IMAGE' and node.image is not None]
+        if len(images) > 1:
+            raise ValueError(f'{material.name}: set the MH2 Texture Name when more than one image is used')
+        if images:
+            texture_name = str(images[0].get('bleeds_texture_name', '') or Path(images[0].name).stem)
+    if not texture_name:
+        texture_name = material.name
+    if '\x00' in texture_name:
+        raise ValueError(f'{material.name}: the MH2 texture name contains a zero byte')
+    try:
+        encoded = texture_name.encode('cp1252')
+    except UnicodeEncodeError as exc:
+        raise ValueError(f'{material.name}: use a Windows-1252 MH2 texture name') from exc
+    if not encoded or len(encoded) > 255:
+        raise ValueError(f'{material.name}: the MH2 texture name must contain 1 to 255 bytes')
+    return encoded
+
+
+def updateMh2PcMaterials(source, meshes):
+    table_start, table_count = struct.unpack_from('<2I', source, 16)
+    if table_start < 48 or table_start + table_count * 4 != len(source):
+        raise ValueError('MH2 material export requires a complete relocation table')
+    fields = set(struct.unpack_from('<{}I'.format(table_count), source, table_start))
+    data = bytearray(source[:table_start])
+    changed = False
+    for info_offset, obj in meshes.items():
+        materials = list(obj.data.materials)
+        if not materials:
+            continue
+        if len(materials) > 4096:
+            raise ValueError(f'{obj.name}: too many MH2 material slots')
+        object_start = readWordChecked(source, int(info_offset) + 12)
+        material_start, material_count = struct.unpack_from('<2I', source, object_start)
+        if material_start < 48 or material_start + material_count * 12 > table_start:
+            raise ValueError(f'{obj.name}: the native material table is truncated')
+        rows = []
+        for index in range(max(material_count, len(materials))):
+            previous = (source[material_start + index * 12:material_start + (index + 1) * 12]
+                        if index < material_count else bytes(12))
+            material = materials[index] if index < len(materials) else None
+            if material is None:
+                if index >= material_count:
+                    raise ValueError(f'{obj.name}: material slot {index + 1} is empty')
+                rows.append((previous, None))
+                continue
+            name = mh2MaterialTextureName(material)
+            color = tuple(float(value) for value in material.diffuse_color)
+            if not all(math.isfinite(value) for value in color):
+                raise ValueError(f'{material.name}: invalid diffuse color')
+            color_bytes = bytes(max(0, min(255, round(value * 255))) for value in color)
+            pointer = struct.unpack_from('<I', previous)[0]
+            old_name = b''
+            if pointer:
+                if pointer < 48 or pointer >= table_start:
+                    raise ValueError(f'{obj.name}: material texture pointer is outside the model')
+                end = source.find(b'\x00', pointer, table_start)
+                if end < 0:
+                    raise ValueError(f'{obj.name}: material texture name is not terminated')
+                old_name = source[pointer:end]
+            row = bytearray(previous)
+            row[5:9] = color_bytes
+            rows.append((bytes(row), name if name != old_name else None))
+        if len(rows) == material_count and all(
+            name is None and row == source[material_start + i * 12:material_start + (i + 1) * 12]
+            for i, (row, name) in enumerate(rows)
+        ):
+            continue
+        changed = True
+        data.extend(bytes((-len(data)) % 4))
+        new_table = len(data)
+        data.extend(b''.join(row for row, name in rows))
+        for index, (row, name) in enumerate(rows):
+            field = new_table + index * 12
+            if name is not None:
+                pointer = len(data) if name else 0
+                if name:
+                    data.extend(name + b'\x00')
+                struct.pack_into('<I', data, field, pointer)
+                data[field + 4] = 0
+            if struct.unpack_from('<I', data, field)[0]:
+                fields.add(field)
+        struct.pack_into('<2I', data, object_start, new_table, len(rows))
+        fields.add(object_start)
+    if not changed:
+        return source
+    data.extend(bytes((-len(data)) % 4))
+    new_table = len(data)
+    for field in sorted(fields):
+        if field < 32 or field + 4 > new_table:
+            raise ValueError('MH2 material relocation field is out of bounds')
+        pointer = struct.unpack_from('<I', data, field)[0]
+        if pointer >= new_table:
+            raise ValueError('MH2 material relocation target is out of bounds')
+        data.extend(struct.pack('<I', field))
+    struct.pack_into('<4I', data, 8, len(data), new_table, new_table, len(fields))
+    return bytes(data)
+
+
+def readWordChecked(data, offset):
+    if offset < 0 or offset + 4 > len(data):
+        raise ValueError('MH2 field is outside the model')
+    return struct.unpack_from('<I', data, offset)[0]
+
+
+def removeMh2ObjectInfos(source, excluded, layout_name='pc_retail_object_list_5_6'):
+    if not excluded:
+        return source
+    data = bytearray(source)
+    fields = (4, 5) if layout_name == 'pc_retail_object_list_4_5' else (5, 6)
+    entry = readWordChecked(data, 32)
+    last_entry = readWordChecked(data, 36)
+    visited_entries = set()
+    while entry and entry not in visited_entries:
+        visited_entries.add(entry)
+        body = readWordChecked(data, entry + 8)
+        first = readWordChecked(data, body + fields[0] * 4)
+        last = readWordChecked(data, body + fields[1] * 4)
+        current = first
+        chain = []
+        while current and current not in chain and current != body + fields[0] * 4:
+            chain.append(current)
+            if current == last:
+                break
+            current = readWordChecked(data, current)
+        removed = set(chain) & set(excluded)
+        if removed:
+            kept = [offset for offset in chain if offset not in removed]
+            previous_sentinel = readWordChecked(data, chain[0] + 4)
+            next_sentinel = readWordChecked(data, chain[-1])
+            if kept:
+                struct.pack_into('<I', data, body + fields[0] * 4, kept[0])
+                struct.pack_into('<I', data, body + fields[1] * 4, kept[-1])
+                for index, offset in enumerate(kept):
+                    next_offset = kept[index + 1] if index + 1 < len(kept) else next_sentinel
+                    previous_offset = kept[index - 1] if index else previous_sentinel
+                    struct.pack_into('<2I', data, offset, next_offset, previous_offset)
+            else:
+                sentinel = body + fields[0] * 4
+                struct.pack_into('<I', data, body + fields[0] * 4, sentinel)
+                struct.pack_into('<I', data, body + fields[1] * 4, sentinel)
+        if entry == last_entry:
+            break
+        entry = readWordChecked(data, entry)
+    return bytes(data)
+
+
+def exportMh2RebuiltModel(root, output_path, context=None, selected_meshes=None):
+    mh2SyncEditedMeshes(root)
     root = recoverMh2RootProperties(root)
+    if not isObjectExportable(root):
+        raise ValueError("This model is marked Don't Export")
     original = loadMh2NativeModel(root)
     source, compressed_header, compressed_suffix = readPcContainer(original)
-    meshes = gatherMh2PcMeshes(root)
+    meshes = gatherMh2PcMeshes(root, context, selected_meshes)
+    for obj in meshes.values():
+        if getattr(obj, 'mode', '') == 'EDIT':
+            obj.update_from_editmode()
+    original_source = source
+    excluded = {int(obj.get('bleeds_mh2_objinfo_offset', 0)) for obj in objectChildren(root)
+                if obj.type == 'MESH' and not isModelMesh(obj)} - set(meshes)
+    excluded.discard(0)
+    source = removeMh2ObjectInfos(source, excluded, root.get('bleeds_mh2_entry_layout', ''))
+    source = updateMh2PcMaterials(source, meshes)
     signatures = {offset: mh2GeometryChanges(obj) for offset, obj in meshes.items()}
     for offset, obj in meshes.items():
         if mh2GeometryMatchesSource(obj, source):
@@ -1482,16 +1860,26 @@ def exportMh2RebuiltModel(root, output_path):
     total_vertices = sum(len(obj.data.vertices) for obj in meshes.values())
     total_faces = sum(len(obj.data.polygons) for obj in meshes.values())
 
-    if signatures and all(changes == set() for changes in signatures.values()):
+    if source == original_source and signatures and all(changes == set() for changes in signatures.values()):
         writeMh2NativeBytes(output_path, original)
         return len(meshes), total_vertices, total_faces
 
-    if signatures and all(
-        changes is not None and changes <= {'positions', 'uv', 'transform'}
+    if (source == original_source and signatures
+            and not any(isinstance(obj, Mh2PcMeshPart) for obj in meshes.values())) and all(
+        changes is not None and changes <= {'positions', 'uv'}
         for changes in signatures.values()
     ):
-        exportMh2PcPositions(root, output_path)
-        return len(meshes), total_vertices, total_faces
+        try:
+            exportMh2PcPositions(root, output_path)
+            return len(meshes), total_vertices, total_faces
+        except (IndexError, RuntimeError, ValueError) as exc:
+            message = str(exc)
+            empty_layer = ('bpy_prop_collection[index]' in message or
+                           'out of range, size 0' in message)
+            split_uv = ('has split coordinates on vertex' in message and
+                        'native vertex duplication is required' in message)
+            if not empty_layer and not split_uv:
+                raise
 
     geometry = {}
     for offset, obj in sorted(meshes.items()):
@@ -1499,11 +1887,14 @@ def exportMh2RebuiltModel(root, output_path):
             continue
         block, vertices, faces = encodePcGeometry(obj, source)
         geometry[offset] = block
-    if not geometry:
-        raise ValueError('No MH2 PC geometry was found beneath the selected model')
-
-    rebuilt = rebuildPmlcGeometry(source, geometry)
+    rebuilt = rebuildPmlcGeometry(source, geometry) if geometry else source
     validateMh2PcRebuild(rebuilt, geometry)
+    if struct.unpack_from('<I', rebuilt, 8)[0] != len(rebuilt):
+        raise ValueError('MH2 model size changed without updating its header')
+    relocation_start = struct.unpack_from('<I', rebuilt, 16)[0]
+    relocation_count = struct.unpack_from('<I', rebuilt, 20)[0]
+    if relocation_start + relocation_count * 4 != len(rebuilt):
+        raise ValueError('MH2 relocation table does not match the rebuilt file')
     if compressed_header is not None:
         header = bytearray(compressed_header)
         struct.pack_into('<I', header, 4, len(rebuilt))

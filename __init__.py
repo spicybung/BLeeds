@@ -15,12 +15,12 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.5.3.6"
+__version__ = "1.5.3.7"
 
 bl_info = {
     "name": "BLeeds",
     "author": "spicybung",
-    "version": (1, 5, 3, 6),
+    "version": (1, 5, 3, 7),
     "blender": (2, 90, 0),
     "location": "File > Import / Export",
     "description": "Importer/Exporter for Leeds Engine & RenderWare formats",
@@ -119,38 +119,96 @@ def get_mesh_domain_size(mesh, domain):
     return 0
 
 
+LEGACY_MESH_ATTRIBUTES = {
+    ('POINT', 'INT'): 'vertex_layers_int',
+    ('POINT', 'FLOAT'): 'vertex_layers_float',
+    ('FACE', 'INT'): 'polygon_layers_int',
+    ('FACE', 'FLOAT'): 'polygon_layers_float',
+}
+
+
 def mesh_has_native_attributes(mesh):
-    return mesh is not None and hasattr(mesh, "attributes") and getattr(mesh, "attributes", None) is not None
+    if mesh is None:
+        return False
+    return getattr(mesh, 'attributes', None) is not None or hasattr(mesh, 'vertex_layers_int')
+
+
+class NativeMeshAttribute:
+    def __init__(self, mesh, name):
+        self.mesh = mesh
+        self.name = str(name)
+
+    @property
+    def data(self):
+        return self.mesh.attributes.get(self.name).data
+
+    @property
+    def data_type(self):
+        return self.mesh.attributes.get(self.name).data_type
+
+    @property
+    def domain(self):
+        return self.mesh.attributes.get(self.name).domain
+
+
+class LegacyMeshAttribute:
+    def __init__(self, mesh, name, domain, data_type, collection_name):
+        self.mesh = mesh
+        self.name = str(name)
+        self.domain = domain
+        self.data_type = data_type
+        self.collection_name = collection_name
+
+    @property
+    def data(self):
+        return getattr(self.mesh, self.collection_name).get(self.name).data
 
 
 def get_native_mesh_attribute(mesh, name):
-    if not mesh_has_native_attributes(mesh):
+    if mesh is None:
         return None
-    try:
-        return mesh.attributes.get(name)
-    except Exception:
-        return None
+    attributes = getattr(mesh, 'attributes', None)
+    if attributes is not None:
+        attribute = attributes.get(name)
+        if attribute is not None and hasattr(attribute, 'data'):
+            return NativeMeshAttribute(mesh, name)
+    for (domain, data_type), collection_name in LEGACY_MESH_ATTRIBUTES.items():
+        collection = getattr(mesh, collection_name, None)
+        if collection is not None and collection.get(name) is not None:
+            return LegacyMeshAttribute(mesh, name, domain, data_type, collection_name)
+    return None
 
 
 def remove_native_mesh_attribute(mesh, attribute):
-    if not mesh_has_native_attributes(mesh) or attribute is None:
+    if mesh is None or attribute is None:
         return
-    try:
-        mesh.attributes.remove(attribute)
-    except Exception:
-        pass
+    if isinstance(attribute, LegacyMeshAttribute):
+        collection = getattr(mesh, attribute.collection_name)
+        layer = collection.get(attribute.name)
+    else:
+        collection = getattr(mesh, 'attributes', None)
+        layer = collection.get(attribute.name) if collection is not None else None
+    if collection is not None and layer is not None:
+        collection.remove(layer)
 
 
 def create_native_mesh_attribute(mesh, name, data_type, domain):
-    if not mesh_has_native_attributes(mesh):
+    if mesh is None:
         return None
+    data_type = str(data_type or 'INT').upper()
+    domain = str(domain or 'POINT').upper()
     try:
-        return mesh.attributes.new(
-            name=name,
-            type=str(data_type or "INT").upper(),
-            domain=str(domain or "POINT").upper(),
-        )
-    except Exception:
+        attributes = getattr(mesh, 'attributes', None)
+        if attributes is not None:
+            attributes.new(name=name, type=data_type, domain=domain)
+        else:
+            collection_name = LEGACY_MESH_ATTRIBUTES.get((domain, data_type))
+            collection = getattr(mesh, collection_name, None) if collection_name else None
+            if collection is None:
+                return None
+            collection.new(name=name)
+        return get_native_mesh_attribute(mesh, name)
+    except (AttributeError, TypeError, ValueError, RuntimeError):
         return None
 
 
@@ -166,14 +224,27 @@ class FallbackMeshAttributeElement:
 
     @property
     def value(self):
-        values = self.attribute.get_values()
+        values = self.attribute.get_stored_values()
         if 0 <= self.index < len(values):
             return values[self.index]
         return self.attribute.default_value()
 
     @value.setter
     def value(self, new_value):
-        values = self.attribute.get_values()
+        values = self.attribute.get_stored_values()
+        if 0 <= self.index < len(values):
+            try:
+                if self.attribute.data_type == 'FLOAT':
+                    value = float(new_value)
+                else:
+                    value = int(new_value) & 0xFFFFFFFF
+                    if value >= 0x80000000:
+                        value -= 0x100000000
+                values[self.index] = value
+                return
+            except (TypeError, ValueError, OverflowError):
+                pass
+        values = list(values)
         target_length = max(len(values), self.index + 1)
         if len(values) < target_length:
             values.extend([self.attribute.default_value()] * (target_length - len(values)))
@@ -195,7 +266,7 @@ class FallbackMeshAttributeData:
         self.attribute = attribute
 
     def __len__(self):
-        return len(self.attribute.get_values())
+        return len(self.attribute.get_stored_values())
 
     def __getitem__(self, index):
         item_index = int(index)
@@ -243,17 +314,19 @@ class FallbackMeshAttribute:
     def domain_key(self):
         return get_fallback_attribute_key(self.name, "domain")
 
-    def get_values(self):
+    def get_stored_values(self):
         if self.mesh is None:
             return []
         try:
-            raw_values = self.mesh.get(self.value_key(), [])
-        except Exception:
-            raw_values = []
-        try:
-            return list(raw_values)
-        except Exception:
+            values = self.mesh.get(self.value_key(), [])
+            if hasattr(values, '__len__') and hasattr(values, '__getitem__') and not isinstance(values, (str, bytes)):
+                return values
             return []
+        except (AttributeError, TypeError, RuntimeError):
+            return []
+
+    def get_values(self):
+        return list(self.get_stored_values())
 
     def set_values(self, values):
         if self.mesh is None:
@@ -268,7 +341,8 @@ class FallbackMeshAttribute:
         else:
             for value in values:
                 try:
-                    cleaned_values.append(int(value))
+                    number = int(value) & 0xFFFFFFFF
+                    cleaned_values.append(number - 0x100000000 if number >= 0x80000000 else number)
                 except Exception:
                     cleaned_values.append(0)
         try:
@@ -279,8 +353,13 @@ class FallbackMeshAttribute:
             pass
 
     def ensure_length(self, count):
-        values = self.get_values()
         count = max(0, int(count or 0))
+        stored = self.get_stored_values()
+        if (len(stored) == count and self.value_key() in self.mesh
+                and self.mesh.get(self.type_key()) == self.data_type
+                and self.mesh.get(self.domain_key()) == self.domain):
+            return self
+        values = list(stored)
         if len(values) < count:
             values.extend([self.default_value()] * (count - len(values)))
         elif len(values) > count and count > 0:
@@ -328,6 +407,7 @@ def remove_mesh_attribute(mesh, attribute):
 
 
 def ensure_mesh_attribute(mesh, name, data_type, domain="POINT"):
+    # Use the mesh layers this Blender version actually supports.
     if mesh is None:
         return None
     data_type_name = str(data_type or "INT").upper().strip()
@@ -344,7 +424,12 @@ def ensure_mesh_attribute(mesh, name, data_type, domain="POINT"):
                 remove_native_mesh_attribute(mesh, attribute)
                 attribute = None
         if attribute is None:
+            previous = get_fallback_mesh_attribute(mesh, name)
             attribute = create_native_mesh_attribute(mesh, name, data_type_name, domain_name)
+            if (attribute is not None and previous is not None
+                    and previous.domain == domain_name and previous.data_type == data_type_name
+                    and len(attribute.data) == len(previous.data)):
+                attribute.data.foreach_set('value', previous.get_values())
         if attribute is not None:
             return attribute
 
@@ -421,6 +506,7 @@ _BLEEDS_ENTITY_TYPE_VALUES = {
     "CUTSCENE_MODEL",
     "VEHICLE_MODEL",
     "COLLISION",
+    "2D_EFFECT",
     "2DFX",
 }
 
@@ -429,6 +515,9 @@ def stamp_bleeds_entity_type(obj, entity_type):
     if obj is None:
         return
     value = str(entity_type or "UNKNOWN").upper().strip()
+    if value in {"2D_EFFECT", "2DFX"}:
+        from .ops.object_types import effectRole
+        value = effectRole(obj)
     if value not in _BLEEDS_ENTITY_TYPE_VALUES:
         value = "UNKNOWN"
     try:
@@ -448,6 +537,8 @@ def map_mdl_type_to_entity_type(mdl_type):
         "SIMPLEMODEL": "SIMPLE_MODEL",
         "PED": "PED_MODEL",
         "PEDMODEL": "PED_MODEL",
+        "CLUMP": "PED_MODEL",
+        "CLUMPMODEL": "PED_MODEL",
         "CUT": "CUTSCENE_MODEL",
         "CUTSCENEMODEL": "CUTSCENE_MODEL",
         "VEH": "VEHICLE_MODEL",
@@ -482,51 +573,31 @@ def get_bleeds_type_owner(obj):
 
 def determine_bleeds_entity_type(obj):
     if obj is None:
-        return "UNKNOWN"
-
-    current = obj
-    while current is not None:
-        try:
-            explicit = str(getattr(current, "bleeds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
-            if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
-                return explicit
-        except Exception:
-            pass
-        try:
-            explicit = str(current.get("blds_entity_type", "UNKNOWN") or "UNKNOWN").upper().strip()
-            if explicit in _BLEEDS_ENTITY_TYPE_VALUES and explicit != "UNKNOWN":
-                return explicit
-        except Exception:
-            pass
-        try:
-            mdl_type = getattr(current, "bleeds_mdl_type", current.get("bleeds_mdl_type", ""))
-            mapped = map_mdl_type_to_entity_type(mdl_type)
-            if mapped != "UNKNOWN":
-                return mapped
-        except Exception:
-            pass
-        try:
-            if bool(current.get("bleeds_col2_object", False)):
-                return "COLLISION"
-            if str(current.get("blds_kind", "")).upper().strip() == "LEEDS_2DFX":
-                return "2DFX"
-            if (
-                current.get("blds_kind") is not None
-                or current.get("blds_res_id") is not None
-                or current.get("blds_res_index") is not None
-            ):
-                return "OBJECT"
-        except Exception:
-            pass
-        current = getattr(current, "parent", None)
-
-    return "UNKNOWN"
+        return 'UNKNOWN'
+    from .ops.object_types import describeObject
+    info = describeObject(obj)
+    role = info['role']
+    if role == 'MODEL':
+        return {'SimpleModel': 'SIMPLE_MODEL', 'ClumpModel': 'PED_MODEL',
+                'ClumpModel (CUT)': 'CUTSCENE_MODEL', 'VehicleModel': 'VEHICLE_MODEL'}.get(
+                    info['model_type'], 'OBJECT')
+    return {'COLLISION': 'COLLISION', '2D_EFFECT': '2D_EFFECT', '2DFX': '2DFX', 'LIGHT': 'LIGHT',
+            'EMPTY': 'EMPTY', 'ARMATURE': 'ARMATURE', 'DONT_EXPORT': 'DONT_EXPORT'}.get(role, 'UNKNOWN')
 
 
 from .gui import gui
 
 
 _classes = [
+    gui.OBJECT_PT_BLeeds_Object,
+    gui.BLEEDS_PG_animation_viewer,
+    gui.BLEEDS_UL_animation_actions,
+    gui.BLEEDS_OT_preview_animation,
+    gui.BLEEDS_OT_animation_rest_pose,
+    gui.BLEEDS_OT_animation_finish_preview,
+    gui.BLEEDS_OT_animation_playback,
+    gui.BLEEDS_OT_animation_keyframe,
+    gui.VIEW3D_PT_bleeds_animation_viewer,
     gui.IMPORT_OT_BLeeds_MobileTxd,
     gui.EXPORT_OT_BLeeds_MobileTxd,
     gui.IMPORT_OT_BLeeds_MobileImg,
@@ -554,11 +625,10 @@ _classes = [
     gui.OBJECT_OT_BLeeds_SnapArmature,
     gui.OBJECT_PT_BLeeds_SnapArmature,
     gui.OBJECT_PT_MDL_Manhunt2Properties,
-    gui.OBJECT_PT_BLeeds_2DFX,
-    gui.DATA_PT_BLeeds_2DFX_Light,
-    gui.CW_InstanceProps,
-    gui.CW_OT_LoadFromCustom,
-    gui.CW_OT_SaveToCustom,
+    gui.VIEW3D_GGT_BLeeds_2D_Effects,
+    gui.OBJECT_OT_BLeeds_EffectPointLight,
+    gui.OBJECT_PT_BLeeds_2D_Effects,
+    gui.DATA_PT_BLeeds_2D_Effects_Light,
     gui.CW_MT_ExportChoice,
     gui.TOPBAR_MT_file_import_bleeds,
     gui.IMPORT_SCENE_OT_stories_lvz,
@@ -640,6 +710,11 @@ def unregister_lvz_img_progress_properties():
 
 
 def register_bleeds_mdl_object_props():
+    from .ops.object_types import OBJECT_TYPE_ITEMS
+    gui.effects.registerEffectProperties()
+    if not hasattr(bpy.types.Object, 'bleeds_object_type'):
+        bpy.types.Object.bleeds_object_type = EnumProperty(
+            name='Object Type', items=OBJECT_TYPE_ITEMS, default='AUTO')
     if not hasattr(bpy.types.Object, "bleeds_entity_type"):
         bpy.types.Object.bleeds_entity_type = EnumProperty(
             name="Leeds Type",
@@ -647,12 +722,13 @@ def register_bleeds_mdl_object_props():
             items=[
                 ("UNKNOWN", "Unknown", "Not classified by BLeeds"),
                 ("SIMPLE_MODEL", "SimpleModel", "Leeds prop or simple model"),
-                ("PED_MODEL", "PedModel", "Leeds pedestrian or skinned actor model"),
-                ("CUTSCENE_MODEL", "CutsceneModel", "Leeds cutscene actor model"),
-                ("VEHICLE_MODEL", "VehModel", "Leeds vehicle model"),
+                ("PED_MODEL", "ClumpModel", "Leeds pedestrian or skinned actor model"),
+                ("CUTSCENE_MODEL", "ClumpModel (CUT)", "Leeds cutscene actor model"),
+                ("VEHICLE_MODEL", "VehicleModel", "Leeds vehicle model"),
                 ("OBJECT", "World Object", "Placed Leeds world or map object"),
                 ("COLLISION", "Collision", "Leeds collision object"),
-                ("2DFX", "2DFX", "Leeds 2D effect helper"),
+                ("2D_EFFECT", "2D Effect", "Leeds 2D effect"),
+                ("2DFX", "2DFX", "GTA III and GTA VC effects"),
             ],
             default="UNKNOWN",
         )
@@ -750,7 +826,9 @@ def register_bleeds_mdl_object_props():
         )
 
 def unregister_bleeds_mdl_object_props():
+    gui.effects.unregisterEffectProperties()
     for prop_name in (
+        "bleeds_object_type",
         "bleeds_entity_type",
         "bleeds_is_mdl_root",
         "bleeds_mdl_platform",
@@ -829,9 +907,10 @@ def register():
             safe_register_class(cls)
             registered_classes.append(cls)
 
-        bpy.types.Object.cw_instance = bpy.props.PointerProperty(
-            type=gui.CW_InstanceProps
-        )
+        bpy.types.Scene.bleeds_animation_viewer = PointerProperty(type=gui.BLEEDS_PG_animation_viewer)
+        bpy.types.Material.bleeds_mh2_texture_name = StringProperty(
+            name='MH2 Texture Name', description='Texture dictionary entry used by the exported MH2 PC material',
+            default='')
 
         append_menu_callback(import_menu, gui.cw_menu_import)
         import_hooked = True
@@ -857,8 +936,10 @@ def register():
             remove_menu_callback(export_menu, gui.cw_menu_export)
         if import_hooked:
             remove_menu_callback(import_menu, gui.cw_menu_import)
-        if hasattr(bpy.types.Object, "cw_instance"):
-            del bpy.types.Object.cw_instance
+        if hasattr(bpy.types.Scene, 'bleeds_animation_viewer'):
+            del bpy.types.Scene.bleeds_animation_viewer
+        if hasattr(bpy.types.Material, 'bleeds_mh2_texture_name'):
+            del bpy.types.Material.bleeds_mh2_texture_name
         for cls in reversed(registered_classes):
             try:
                 unregister_class(cls)
@@ -879,8 +960,16 @@ def unregister():
     remove_menu_callback(get_file_import_menu_type(), gui.cw_menu_import)
     remove_menu_callback(get_file_export_menu_type(), gui.cw_menu_export)
 
-    if hasattr(bpy.types.Object, "cw_instance"):
-        del bpy.types.Object.cw_instance
+    for scene in bpy.data.scenes:
+        if scene.bleeds_animation_viewer.preview_rig is not None:
+            try:
+                gui.animationViewerRestore(bpy.context, scene=scene)
+            except (ValueError, RuntimeError) as exc:
+                print('BLeeds could not restore the animation preview: {}'.format(exc))
+    if hasattr(bpy.types.Scene, 'bleeds_animation_viewer'):
+        del bpy.types.Scene.bleeds_animation_viewer
+    if hasattr(bpy.types.Material, 'bleeds_mh2_texture_name'):
+        del bpy.types.Material.bleeds_mh2_texture_name
 
     for cls in reversed(_classes):
         unregister_class(cls)

@@ -19,10 +19,13 @@ from pathlib import Path
 
 import bpy
 from mathutils import Vector
+from .object_types import isObjectExportable, objectRole, storedObjectValue
 
 from ..leedsLib import col2 as col2_core
 
 def object_is_col2(obj) -> bool:
+    if storedObjectValue(obj, 'bleeds_object_type', 'AUTO') != 'AUTO':
+        return objectRole(obj) == 'COLLISION'
     try:
         if bool(obj.get("bleeds_col2_object", False)):
             return True
@@ -39,7 +42,7 @@ def get_objects_for_export(context, selected_only: bool):
 
     export_objects = []
     for obj in objects:
-        if getattr(obj, "type", None) != "MESH":
+        if getattr(obj, "type", None) != "MESH" or not isObjectExportable(obj):
             continue
         if selected_only or object_is_col2(obj):
             export_objects.append(obj)

@@ -49,6 +49,8 @@ class IMPORT_OT_BLeeds_MobileTxd(Operator, ImportHelper):
     def executeImport(self, context):
         try:
             images = importTextures(self.filepath, self.platform)
+            from ..ops.native_mobile import applyDffTextures
+            applyDffTextures(images)
         except Exception as exc:
             print('Texture dictionary import failed: {}'.format(exc))
             self.report({'ERROR'}, str(exc))
@@ -68,9 +70,24 @@ class EXPORT_OT_BLeeds_MobileTxd(Operator, ExportHelper):
     def draw(self, context):
         self.layout.prop(self, 'source')
 
+    def invoke(self, context, event):
+        sources = {str(image.get('bleeds_mobile_txd')) for image in bpy.data.images if image.get('bleeds_mobile_txd')}
+        material = context.object.active_material if context.object and context.object.type == 'MESH' else None
+        if material and material.use_nodes:
+            active_sources = {str(node.image['bleeds_mobile_txd']) for node in material.node_tree.nodes
+                              if node.type == 'TEX_IMAGE' and node.image and node.image.get('bleeds_mobile_txd')}
+            if len(active_sources) == 1:
+                sources = active_sources
+        if not self.source and len(sources) == 1:
+            self.source = sources.pop()
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
     def execute(self, context):
         import numpy as np
         try:
+            if not self.source:
+                raise ValueError('Choose the original TXD containing the imported images')
             source = str(Path(bpy.path.abspath(self.source)).resolve())
             dictionary = openTextures(Path(source).read_bytes())
             matched = 0

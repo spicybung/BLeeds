@@ -54,8 +54,9 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     )
 
     import_textures: BoolProperty(name="Import Textures", default=True)
+    scan_dtz: BoolProperty(name="Scan for DTZ", description="Look beside the world for GAME.DTZ effects and placed models", default=True)
     import_lods: BoolProperty(
-        name="Import LODs and SuperLODs",
+        name="Import LODs/SLODs",
         description="Include LOD and SuperLOD models used at a distance",
         default=True,
     )
@@ -77,6 +78,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         layout.use_property_decorate = False
         layout.prop(self, "import_textures")
         layout.prop(self, "import_lods")
+        layout.prop(self, "scan_dtz")
         layout.prop(self, "import_vegetation")
         layout.prop(self, "import_generics")
         drawImportLogOptions(layout, self)
@@ -91,6 +93,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
             write_debug_log=self.print_text_log,
             import_game_dtz_2dfx=True,
             import_textures=self.import_textures,
+            scan_dtz=self.scan_dtz,
             import_lods=self.import_lods,
             import_vegetation=self.import_vegetation,
             import_generics=self.import_generics,

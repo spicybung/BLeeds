@@ -15,7 +15,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from .mesh_compat import objectChildren
 import math
+from .mesh_compat import meshColorLayer, colorLayerDomain
+from .object_types import isModelMesh
 import base64
 import os
 import struct
@@ -85,7 +88,7 @@ def collectPspFrames(root, armature, source_context):
             key = bone_keys[bone.name]
             records[key]['parent'] = bone_keys.get(bone.parent.name) if bone.parent is not None else None
     else:
-        empties = [obj for obj in root.children_recursive if obj.type == 'EMPTY']
+        empties = [obj for obj in objectChildren(root) if obj.type == 'EMPTY']
         empty_keys = {}
         for obj in empties:
             pointer = int(obj.get('bleeds_frame_ptr', 0))
@@ -252,17 +255,17 @@ def pspVertexWeights(obj, mesh, vertex_index, bone_nodes):
 
 
 def pspCornerColor(mesh, loop_index):
-    attributes = getattr(mesh, 'color_attributes', None)
-    attribute = attributes.active_color if attributes is not None else None
+    attribute = meshColorLayer(mesh)
     if attribute is None:
         return (255, 255, 255, 255)
-    index = loop_index if attribute.domain == 'CORNER' else mesh.loops[loop_index].vertex_index
+    index = loop_index if colorLayerDomain(attribute) == 'CORNER' else mesh.loops[loop_index].vertex_index
     value = attribute.data[index]
     color = value.color
     return tuple(max(0, min(255, round(float(channel) * 255.0))) for channel in color)
 
 
 def getPspExportMesh(context, obj):
+    # Keep the skeleton out of the mesh changes so the current pose is not saved into the model.
     modifiers = [modifier for modifier in obj.modifiers if modifier.type == 'ARMATURE']
     states = [modifier.show_viewport for modifier in modifiers]
     if not any(modifier.show_viewport and modifier.type != 'ARMATURE' for modifier in obj.modifiers):
@@ -290,7 +293,7 @@ def collectPspStrips(context, obj, root, export_matrix, bone_nodes, skinned, use
         if hasattr(mesh, 'calc_normals_split'):
             mesh.calc_normals_split()
         uv_layer = mesh.uv_layers.active
-        has_colors = bool(getattr(mesh, 'color_attributes', None) and mesh.color_attributes.active_color)
+        has_colors = meshColorLayer(mesh) is not None
         normal_matrix = export_matrix.to_3x3().inverted_safe().transposed()
         reversed_winding = export_matrix.to_3x3().determinant() < 0
         materials = []
@@ -515,7 +518,7 @@ def exportPspMdl(context, filepath, mdl_type='SIM', use_normals=True, export_gam
     game = str(export_game).upper()
     if kind not in {'SIM', 'PED', 'CUT', 'VEH'} or game not in {'LCS', 'VCS'}:
         raise ValueError("Choose LCS or VCS and a supported model type")
-    meshes = [obj for obj in root.children_recursive if obj.type == 'MESH']
+    meshes = [obj for obj in objectChildren(root) if isModelMesh(obj)]
     meshes.sort(key=lambda obj: mdl_exporter.natural_sort_key(obj.name))
     if not meshes:
         raise ValueError("No mesh parts found under the model root")

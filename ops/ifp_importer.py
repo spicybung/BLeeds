@@ -345,10 +345,13 @@ def applyManhuntIfpAnimation(
 
     reset_count = resetArmaturePose(armature_object)
     action = bpy.data.actions.new(sanitizeIfpActionName(animation.name, source_path))
+    if bpy.app.version < (4, 4, 0):
+        action.id_root = 'OBJECT'
     action.use_fake_user = True
     action["bleeds_source_ifp_path"] = source_path
     action["bleeds_source_ifp_name"] = animation.name
     action["bleeds_source_ifp_index"] = int(animation.index)
+    action['bleeds_animation_fps'] = float(fps)
     action["bleeds_source_ifp_game"] = "MANHUNT_2" if any(track.sequence_flag == "SEQT" for track in animation.tracks) else "MANHUNT_1"
     action["bleeds_mh2_quaternion_convention"] = "XYZW_MAX_ROW_TO_COLUMN_INVERSE_PLUS90_X"
     action["bleeds_ifp_solver"] = "MANHUNT_DIRECT_LOCAL_REST_BASIS"

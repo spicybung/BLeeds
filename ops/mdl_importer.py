@@ -78,8 +78,10 @@ def writeStoriesVertexMappedCorners(mesh, vertex_uvs=None, vertex_colors=None, f
     if not vertex_uvs and not vertex_colors:
         return
 
-    uv_layer = mesh.uv_layers.new(name="UVMap") if vertex_uvs else None
+    uv_name = mesh.uv_layers.new(name="UVMap").name if vertex_uvs else None
     color_attr = get_or_create_corner_color_layer(mesh, "Col") if vertex_colors else None
+    # Adding colours can move the UV layer in memory. Get it again before writing.
+    uv_layer = mesh.uv_layers.get(uv_name) if uv_name else None
     total_loops = len(mesh.loops)
     if not total_loops:
         return
@@ -3136,8 +3138,7 @@ def assign_ps2_skin(
     writeMdlVertexSkinAssignments(obj, assignments)
 
 def getPspSkinPaletteBoneNames(stories_ctx: Any, arm_obj: bpy.types.Object) -> List[str]:
-    if str(getattr(stories_ctx, "mdl_type", "")).upper() == "PED":
-        return getCanonicalPedSkinPaletteBoneNames(stories_ctx.import_type, arm_obj)
+    # Use the bone order from the file. Custom skeletons do not always use the usual list.
     arm_info = stories_ctx.atomic.armature
     entries = list(getattr(arm_info, 'hierarchy_entries', []) or [])
     frame_bones = arm_obj.get('bleeds_mdl_frame_bone_names', {})
@@ -3149,6 +3150,8 @@ def getPspSkinPaletteBoneNames(stories_ctx: Any, arm_obj: bpy.types.Object) -> L
             if name in arm_obj.data.bones:
                 palette[int(entry['node_index'])] = name
         return palette
+    if str(getattr(stories_ctx, 'mdl_type', '')).upper() == 'PED':
+        return getCanonicalPedSkinPaletteBoneNames(stories_ctx.import_type, arm_obj)
     ordered = buildPedHierarchyNodeOrder(arm_info, stories_ctx.filepath,
                                         int(stories_ctx.atomic.hierarchy_ptr))
     return [str(frame_bones.get(str(pointer), name)) for pointer, name in ordered]
@@ -4823,7 +4826,7 @@ def writeMh2MeshPointAttribute(mesh, name, data_type, values):
             )
         )
 
-    attribute = mesh.attributes.get(name)
+    attribute = ensure_mesh_attribute(mesh, name, data_type, domain='POINT')
     if attribute is None:
         try:
             attribute = mesh.attributes.new(name=name, type=data_type, domain='POINT')

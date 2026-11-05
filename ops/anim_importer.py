@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from .mesh_compat import objectChildren
 import math
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -222,7 +223,7 @@ def scoreArmatureCandidate(armature_object, active_object=None) -> int:
             score += 200
 
     try:
-        for child in armature_object.children_recursive:
+        for child in objectChildren(armature_object):
             if armatureDeformsMesh(armature_object, child):
                 score += 20
                 break
@@ -268,7 +269,7 @@ def findSelectedArmature(context):
             parent = getattr(parent, "parent", None)
 
         try:
-            for child in active.children_recursive:
+            for child in objectChildren(active):
                 add_candidate(child)
         except Exception:
             pass
@@ -1494,7 +1495,7 @@ def collectImportedMdlMeshesForArmature(armature_object, context=None) -> List[o
         meshes.append(obj)
 
     try:
-        for child in armature_object.children_recursive:
+        for child in objectChildren(armature_object):
             add_mesh(child)
     except Exception:
         pass
@@ -1502,7 +1503,7 @@ def collectImportedMdlMeshesForArmature(armature_object, context=None) -> List[o
     root_object = findImportedMdlRootForArmature(armature_object)
     if root_object is not None:
         try:
-            for child in root_object.children_recursive:
+            for child in objectChildren(root_object):
                 if getattr(child, "type", None) != "MESH":
                     continue
                 is_stories_mesh = False
@@ -1906,6 +1907,8 @@ def applyAnimEntryToArmature(
     armature_object.animation_data_create()
     if clear_existing_action or armature_object.animation_data.action is None:
         action = bpy.data.actions.new(sanitizeActionName(entry.name, source_path))
+        if bpy.app.version < (4, 4, 0):
+            action.id_root = 'OBJECT'
         action["bleeds_source_anim_path"] = source_path
         action["bleeds_source_anim_name"] = entry.name
         action["bleeds_source_anim_index"] = int(entry.index)

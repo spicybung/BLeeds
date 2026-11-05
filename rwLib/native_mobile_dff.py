@@ -96,6 +96,7 @@ def buildTriangleStrips(triangles):
 
 
 def splitTriangleStrip(strip, limit=70):
+    # Repeat the last two vertices when starting the next batch so the faces stay connected.
     if limit < 4 or limit % 2:
         raise ValueError('Mobile strip batches require an even vertex limit of at least four')
     start = 0
@@ -133,7 +134,7 @@ def geometryBounds(vertices):
     lower = tuple(min(vertex.position[axis] for vertex in vertices) for axis in range(3))
     upper = tuple(max(vertex.position[axis] for vertex in vertices) for axis in range(3))
     center = tuple((lower[axis] + upper[axis]) * 0.5 for axis in range(3))
-    radius = max(math.dist(vertex.position, center) for vertex in vertices)
+    radius = max(math.sqrt(sum((float(value) - float(origin)) ** 2 for value, origin in zip(vertex.position, center))) for vertex in vertices)
     return lower, upper, center + (radius,)
 
 
@@ -223,8 +224,9 @@ def makeMobilePacket(vertices, scale, translation, uv_scale, skinned):
 
 
 def rebuildMobileGeometry(chunk, surfaces, material_list=None):
-    source, sections = readLeedsGeometry(chunk)
-    surfaces = [surface for surface in surfaces if surface['triangles']]
+    # Recalculate the bounds and sizes after mesh edits. The old values may no longer fit.
+    source, sections = readLeedsGeometry(chunk) if chunk is not None else (None, [])
+    surfaces = splitMobileUvSurfaces([surface for surface in surfaces if surface['triangles']])
     if not surfaces:
         raise ValueError('Mobile geometry must contain at least one triangle')
     vertices = [vertex for surface in surfaces for triangle in surface['triangles'] for vertex in triangle]
@@ -244,18 +246,18 @@ def rebuildMobileGeometry(chunk, surfaces, material_list=None):
         lower, upper, sphere = geometryBounds(surface_vertices)
         bbox = encodePosition(lower, scale, translation) + encodePosition(upper, scale, translation)
         part_index = surface.get('source_part', 0)
-        flags = source.parts[part_index].geom_flags if 0 <= part_index < len(source.parts) else source.parts[0].geom_flags
+        flags = (source.parts[part_index].geom_flags if 0 <= part_index < len(source.parts) else source.parts[0].geom_flags) if source else (7 if skinned else 0x19)
         parts.append(dict(packet=packet, uv_scale=uv_scale, count=vertex_count, sphere=sphere,
                           bbox=bbox, material=surface['material'], flags=flags))
     part_count = len(parts)
     header_size = 64 + part_count * 48
     geometry_size = header_size + sum(len(part['packet']) for part in parts)
     runtime_count = sum(part['count'] + 2 for part in parts)
-    if part_count > 4095 or header_size > 65535 or geometry_size > 0xFFFFF or runtime_count > 65535:
+    if part_count > 512 or header_size > 65535 or geometry_size > 0xFFFFF or runtime_count > 65535:
         raise ValueError('Mobile geometry exceeds its header count or size limits')
     lower, upper, sphere = geometryBounds(vertices)
     bbox = encodePosition(lower, scale, translation) + encodePosition(upper, scale, translation)
-    flags = source.leeds_global_header['vertex_section_flags']
+    flags = source.leeds_global_header['vertex_section_flags'] if source else (7 if skinned else 0x0D)
     payload = bytearray(struct.pack('<4fIIHH6h6f', *sphere, geometry_size | (part_count << 20), flags, 
                                     runtime_count, header_size, *bbox, *scale, *translation))
     offset = 0
@@ -266,8 +268,10 @@ def rebuildMobileGeometry(chunk, surfaces, material_list=None):
     for part in parts:
         payload.extend(part['packet'])
     if material_list is not None:
-        sections = [material_list if section.type_id == 8 else section for section in sections]
+        sections = [material_list if section.type_id == 8 else section for section in sections] if sections else [material_list, RenderWareChunk(3, 0x310, b'')]
     payload.extend(b''.join(section.toBytes() for section in sections))
+    if chunk is None:
+        chunk = RenderWareChunk(0xF, 0xF00D, b'')
     chunk.payload = bytes(payload)
     chunk.parsed_children = sections
     chunk.declared_size = len(chunk.payload)
@@ -309,7 +313,7 @@ def buildMobileMaterialList(descriptions, source_sections):
             structure.payload = bytes(data)
         texture = next((child for child in children if child.type_id == 6), None)
         if texture_name:
-            name = texture_name.encode('ascii') + b'\0'
+            name = texture_name.encode('utf-8') + b'\0'
             name += bytes((-len(name)) % 4)
             if texture:
                 texture_children = texture.children()
@@ -332,3 +336,59 @@ def buildMobileMaterialList(descriptions, source_sections):
     material_list = RenderWareChunk(8, version, b''.join(child.toBytes() for child in result))
     material_list.parsed_children = result
     return material_list
+
+
+def interpolateMobileVertex(first, second, factor):
+    def blend(a, b):
+        return tuple(a[index] + (b[index] - a[index]) * factor for index in range(len(a)))
+    weights = defaultdict(float)
+    for bone, weight in first.weights:
+        weights[bone] += weight * (1.0 - factor)
+    for bone, weight in second.weights:
+        weights[bone] += weight * factor
+    normal = blend(first.normal, second.normal)
+    length = math.sqrt(sum(value * value for value in normal))
+    if length:
+        normal = tuple(value / length for value in normal)
+    return MobileVertex(blend(first.position, second.position), blend(first.uv, second.uv), normal,
+                        tuple(round(value) for value in blend(first.color, second.color)),
+                        tuple(sorted((bone, weight) for bone, weight in weights.items() if weight > 0.000001)))
+
+
+def splitMobileUvSurfaces(surfaces):
+    # Mobile cannot mix positive and negative UVs in one part. Split the crossing faces.
+    result = []
+    for surface in surfaces:
+        quadrants = defaultdict(list)
+        for triangle in surface['triangles']:
+            polygons = [(list(triangle), ())]
+            for axis in range(2):
+                divided = []
+                for polygon, signs in polygons:
+                    values = [vertex.uv[axis] for vertex in polygon]
+                    choices = (1,) if min(values) >= 0.0 else (-1,) if max(values) <= 0.0 else (1, -1)
+                    for sign in choices:
+                        clipped = []
+                        previous = polygon[-1]
+                        for current in polygon:
+                            before, after = previous.uv[axis] * sign, current.uv[axis] * sign
+                            if (before >= 0.0) != (after >= 0.0):
+                                vertex = interpolateMobileVertex(previous, current, before / (before - after))
+                                uv = list(vertex.uv)
+                                uv[axis] = 0.0
+                                vertex = MobileVertex(vertex.position, tuple(uv), vertex.normal, vertex.color, vertex.weights)
+                                clipped.append(vertex)
+                            if after >= 0.0:
+                                clipped.append(current)
+                            previous = current
+                        if len(clipped) >= 3:
+                            divided.append((clipped, signs + (sign,)))
+                polygons = divided
+            for polygon, signs in polygons:
+                for index in range(1, len(polygon) - 1):
+                    face = (polygon[0], polygon[index], polygon[index + 1])
+                    if len({vertex.position for vertex in face}) == 3:
+                        quadrants[signs].append(face)
+        for triangles in quadrants.values():
+            result.append(dict(surface, triangles=triangles))
+    return result

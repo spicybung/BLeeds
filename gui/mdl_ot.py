@@ -15,18 +15,19 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from ..ops.mesh_compat import objectChildren
 from ..ops import mdl_importer
 from ..leedsLib import native_mdl as mdl_core
 from ..ops import tex_importer
 
 import os
+import json
 import traceback
 import bpy
 from bpy.types import Operator, OperatorFileListElement
 from bpy_extras.io_utils import ImportHelper, ExportHelper
 from bpy.props import (
     IntProperty,
-
     StringProperty,
     BoolProperty,
     EnumProperty,
@@ -76,7 +77,7 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
 
     filename_ext = ".mdl"
     filter_glob: StringProperty(
-        default="*.mdl",
+        default="*.mdl;*.dff",
         options={"HIDDEN"},
         maxlen=255,
     )
@@ -400,6 +401,15 @@ class IMPORT_OT_Stories_mdl(Operator, ImportHelper):
         self.report({"INFO"}, f"Imported {imported_count} MDL(s).")
         return {"FINISHED"}
 
+STORIES_CONSOLE_PLATFORMS = (
+    ('PS2', 'PlayStation 2', 'Save a PlayStation 2 MDL'),
+    ('PSP', 'PlayStation Portable', 'Save a PSP MDL'),
+)
+STORIES_MOBILE_PLATFORMS = STORIES_CONSOLE_PLATFORMS + (
+    ('MOBILE', 'Mobile', 'Convert the selected model to an LCS Mobile DFF'),
+)
+
+
 class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_stories_mdl"
     bl_label = "Export R* Leeds MDL"
@@ -408,20 +418,20 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
 
     filename_ext = ".mdl"
     filter_glob: StringProperty(
-        default="*.mdl",
+        default="*.mdl;*.dff",
         options={"HIDDEN"},
         maxlen=255,
     )
 
     platform: EnumProperty(
-        name="Platform",
-        description="Stories model target",
-        items=(
-            ("PS2", "PlayStation 2", "Export a PlayStation 2 Stories MDL"),
-            ("PSP", "PlayStation Portable", "Export a PSP Stories MDL"),
-        ),
-        default="PS2",
+        name='Platform',
+        description='Choose the format to save',
+        items=STORIES_MOBILE_PLATFORMS,
+        default='PS2',
     )
+
+    mobile_source_root: StringProperty(default='', options={'HIDDEN'})
+    mobile_selected_objects: StringProperty(default='', options={'HIDDEN'})
 
     export_game: EnumProperty(
         name="Game",
@@ -439,6 +449,8 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         default="",
         options={"HIDDEN"},
     )
+
+    mh2_selected_meshes: StringProperty(default='', options={'HIDDEN'})
 
     mh2_platform: EnumProperty(
         name="Platform",
@@ -486,14 +498,6 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         options={"HIDDEN"},
     )
 
-    rounding_mode: EnumProperty(
-        name="Rounding",
-        description="Round positions to PS2 integer coordinates",
-        items=(("ROUND", "Round", "round()"),),
-        default="ROUND",
-        options={"HIDDEN"},
-    )
-
     use_normals: BoolProperty(
         name="Export Normals",
         description="Include smooth vertex normals in the Stories MDL geometry stream",
@@ -516,14 +520,6 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         default="",
     )
 
-    imported_export_mode: EnumProperty(
-        name="Rebuild Imported Model",
-        description="Export the current geometry and skin weights",
-        items=(("REBUILD", "Rebuild", "Use the current geometry and skin weights"),),
-        default="REBUILD",
-        options={"HIDDEN"},
-    )
-
     def draw(self, context):
         layout = self.layout
         layout.use_property_split = True
@@ -536,11 +532,26 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
             col.prop(self, "mh2_model_type")
             return
         col.prop(self, "platform")
+        if self.export_game == 'LCS' and self.platform == 'MOBILE':
+            col.label(text='File Type: LCS Mobile DFF')
+            return
         col.prop(self, "mdl_type")
         col.prop(self, "use_normals")
         if self.mdl_type == "SIMPLE":
             col.prop(self, "simple_model_info_id")
             col.prop(self, "simple_atomic_hash_key")
+
+    def check(self, context):
+        from pathlib import Path
+        extension = '.dff' if self.export_game == 'LCS' and self.platform == 'MOBILE' else '.mdl'
+        self.filename_ext = extension
+        if not self.filepath:
+            return False
+        target = str(Path(self.filepath).with_suffix(extension))
+        if target == self.filepath:
+            return False
+        self.filepath = target
+        return True
 
     def invoke(self, context, event):
         from ..ops import native_ps2_mdl as mdl_exporter
@@ -550,16 +561,20 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
             self.mdl_type = "CLUMP"
         self.use_normals = bool(root_use_normals)
 
+        from ..ops.object_types import importedModelOwner
+        selected_root = importedModelOwner(context.object)
+        self.mobile_source_root = selected_root.name if selected_root else ''
+        self.mobile_selected_objects = json.dumps([obj.name for obj in context.selected_objects])
         self.mh2_source_root = ''
+        self.mh2_selected_meshes = json.dumps([obj.name for obj in context.selected_objects if obj.type == 'MESH'])
         root = None
-        from ..ops.mdl_exporter import findMh2Root, normalizeMh2ArmatureNames
+        from ..ops.mdl_exporter import findMh2Root
         try:
             root = findMh2Root(context)
         except ValueError:
             root = None
 
         if root is not None:
-            normalizeMh2ArmatureNames(root)
             self.export_game = 'MH2'
             self.mh2_source_root = root.name
         else:
@@ -613,26 +628,31 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
         except Exception:
             pass
 
-        try:
-            if root is not None:
-                if hasattr(root, "bleeds_imported_export_mode"):
-                    self.imported_export_mode = str(root.bleeds_imported_export_mode or self.imported_export_mode)
-                elif "bleeds_imported_export_mode" in root:
-                    self.imported_export_mode = str(root.get("bleeds_imported_export_mode", self.imported_export_mode))
-        except Exception:
-            pass
-
+        if selected_root is not None and selected_root.get('bleeds_dff_source'):
+            self.export_game = 'LCS'
+            self.platform = 'MOBILE'
+        self.check(context)
         context.window_manager.fileselect_add(self)
         return {"RUNNING_MODAL"}
 
-    def filepathUsesManhunt2PcContainer(self, filepath):
-        try:
-            with open(filepath, "rb") as input_file:
-                return input_file.read(4) == b"PMLC"
-        except Exception:
-            return False
-
     def execute(self, context):
+        if self.platform == 'MOBILE' and self.export_game not in {'LCS', 'MH2'}:
+            self.report({'ERROR'}, 'Mobile models use LCS. Choose LCS as the export game.')
+            return {'CANCELLED'}
+        if self.export_game == 'LCS' and self.platform == 'MOBILE':
+            from pathlib import Path
+            from ..ops.native_mobile import exportDff
+            try:
+                root = bpy.data.objects.get(self.mobile_source_root) if self.mobile_source_root else None
+                selected = ([bpy.data.objects[name] for name in json.loads(self.mobile_selected_objects)
+                             if name in bpy.data.objects] if self.mobile_selected_objects else None)
+                self.filepath = str(Path(self.filepath).with_suffix('.dff'))
+                count = exportDff(context, self.filepath, root=root, selected_objects=selected)
+            except Exception as exc:
+                self.report({'ERROR'}, 'LCS Mobile export failed: %s' % exc)
+                return {'CANCELLED'}
+            self.report({'INFO'}, 'Saved LCS Mobile DFF')
+            return {'FINISHED'}
         if self.export_game == "MH2":
             try:
                 from ..ops.mdl_exporter import exportMh2Model, findMh2Root, validateMh2ExportType
@@ -643,15 +663,30 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                     raise ValueError(f'This model contains {source_platform} data, not {self.mh2_platform} data')
                 if self.mh2_platform == 'PC':
                     from ..ops.mdl_exporter import exportMh2RebuiltModel
-                    part_count, vertex_count, face_count = exportMh2RebuiltModel(root, self.filepath)
-                    self.report({"INFO"}, f"Exported MH2 PC MDL: {part_count} meshes, {vertex_count} vertices, {face_count} triangles")
-                    return {"FINISHED"}
-                part_count, vertex_count, changed_count = exportMh2Model(context, self.filepath, root=root)
+                    selected_meshes = None
+                    if self.mh2_selected_meshes:
+                        names = json.loads(self.mh2_selected_meshes)
+                        selected_meshes = [bpy.data.objects[name] for name in names if name in bpy.data.objects]
+                    part_count, vertex_count, face_count = exportMh2RebuiltModel(
+                        root, self.filepath, context=context, selected_meshes=selected_meshes)
+                else:
+                    part_count, vertex_count, changed_count = exportMh2Model(context, self.filepath, root=root)
+                    face_count = sum(len(obj.data.polygons) for obj in objectChildren(root)
+                                     if getattr(obj, 'type', None) == 'MESH')
             except Exception as exc:
+                details = traceback.format_exc()
                 traceback.print_exc()
+                try:
+                    error_text = bpy.data.texts.get('BLeeds MH2 Export Error')
+                    if error_text is None:
+                        error_text = bpy.data.texts.new('BLeeds MH2 Export Error')
+                    error_text.clear()
+                    error_text.write(details)
+                except (AttributeError, RuntimeError, TypeError):
+                    pass
                 self.report({"ERROR"}, f"Export MH2 MDL failed: {exc}")
                 return {"CANCELLED"}
-            self.report({"INFO"}, f"Exported MH2 MDL: {part_count} parts, {vertex_count} vertices ({changed_count} changed)")
+            self.report({"INFO"}, f"Exported MH2 MDL: {part_count} parts, {vertex_count} vertices, {face_count} triangles")
             return {"FINISHED"}
 
         from ..ops import native_ps2_mdl as mdl_exporter
@@ -749,7 +784,7 @@ class EXPORT_SCENE_OT_stories_mdl_ps2(bpy.types.Operator, ExportHelper):
                 filepath=self.filepath,
                 mdl_type=semantic_type if self.platform == "PSP" else internal_mdl_type,
                 max_batch_verts=self.max_batch_verts,
-                rounding_mode=self.rounding_mode,
+                rounding_mode="ROUND",
                 use_normals=use_normals,
                 imported_export_mode="REBUILD",
                 export_game=self.export_game,

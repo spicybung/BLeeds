@@ -124,7 +124,7 @@ class EXPORT_OT_tex(Operator, ExportHelper):
 
 class SCENE_PT_bleeds_texture_io(Panel):
     bl_idname = "SCENE_PT_bleeds_texture_io"
-    bl_label = "BLeeds - Texture I/O"
+    bl_label = "BLeeds - Texture Dictionary"
     bl_space_type = "PROPERTIES"
     bl_region_type = "WINDOW"
     bl_context = "scene"
@@ -135,14 +135,34 @@ class SCENE_PT_bleeds_texture_io(Panel):
         layout.use_property_split = True
         layout.use_property_decorate = False
 
+        layout.label(text='Leeds Textures')
         column = layout.column(align=True)
-        column.prop(scene, "bleeds_texture_format", text="Texture Format")
+        column.prop(scene, "bleeds_texture_format", text="Format")
         column.prop(scene, "bleeds_texture_platform", text="Platform")
         column.prop(scene, "bleeds_texture_bit_depth", text="Bit Depth")
 
         row = layout.row(align=True)
-        row.operator("import_scene.leeds_tex", text="Import Texture", icon="IMPORT")
-        row.operator("export_scene.leeds_tex", text="Export Texture", icon="EXPORT")
+        row.operator("import_scene.leeds_tex", text="Import", icon="IMPORT")
+        row.operator("export_scene.leeds_tex", text="Export", icon="EXPORT")
+        layout.separator()
+        layout.label(text='RenderWare TXD')
+        row = layout.row(align=True)
+        row.operator('import_scene.bleeds_mobile_txd', text='Import', icon='IMPORT')
+        row.operator('export_scene.bleeds_mobile_txd', text='Export', icon='EXPORT')
+        obj = context.object
+        material = obj.active_material if obj and obj.type == 'MESH' else None
+        if material and material.use_nodes:
+            images = list(dict.fromkeys(node.image for node in material.node_tree.nodes
+                                       if node.type == 'TEX_IMAGE' and node.image and node.image.get('bleeds_mobile_txd')))
+            from .object_menus import drawObjectDescription
+            for image in images:
+                details = layout.column(align=True)
+                drawObjectDescription(details, 'Texture', image.get('bleeds_mobile_texture', image.name))
+                drawObjectDescription(details, 'File', os.path.basename(image['bleeds_mobile_txd']))
+                drawObjectDescription(details, 'Platform', image.get('bleeds_txd_platform', ''))
+                drawObjectDescription(details, 'Image Format', image.get('bleeds_txd_format', ''))
+                drawObjectDescription(details, 'Size', '%d × %d' % tuple(image.size))
+                drawObjectDescription(details, 'Image Levels', image.get('bleeds_txd_levels', 1))
 
 
 classes = (IMPORT_OT_tex, EXPORT_OT_tex, SCENE_PT_bleeds_texture_io)

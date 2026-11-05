@@ -26,7 +26,7 @@ from . import drawImportLogOptions, runImport
 
 class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
     bl_idname = "import_scene.bleeds_dff"
-    bl_label = "R* Studios: DFF (.dff)"
+    bl_label = "BLeeds DFF (.dff)"
     bl_description = "Import RenderWare .DFF"
     bl_options = {"PRESET", "UNDO"}
 
@@ -53,12 +53,12 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
 
     source: EnumProperty(
         name="Source",
-        items=(("MOBILE", "LCS Mobile", "LCS iOS and Android assets"),
+        items=(("AUTO", "Automatic", "Identify the model format"), ("MOBILE", "LCS Mobile", "LCS iOS and Android assets"),
                ("BETA", "LCS Prototype", "Standard RenderWare geometry from prototype files"),
                ("MH2_AUTO", "Manhunt 2", "Detect PS2 or PSP geometry"),
                ("MH2_PS2", "Manhunt 2 PS2", "PS2 PMLC geometry"),
                ("MH2_PSP", "Manhunt 2 PSP", "PSP PMLC geometry")),
-        default="MOBILE",
+        default="AUTO",
     )
 
     def draw(self, context):
@@ -133,7 +133,7 @@ class IMPORT_OT_BLeeds_DFF(Operator, ImportHelper):
 class EXPORT_OT_BLeeds_DFF(Operator, ExportHelper):
     bl_idname = "export_scene.bleeds_dff"
     bl_label = "Export LCS Mobile DFF"
-    bl_description = "Export edited LCS mobile DFF meshes, UVs, materials, and skin weights"
+    bl_description = "Save a model as an LCS Mobile DFF"
     bl_options = {"PRESET"}
 
     filename_ext = ".dff"

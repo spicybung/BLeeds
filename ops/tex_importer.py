@@ -162,6 +162,7 @@ def choose_texture_container_platform(
 
 def find_existing_texture_image(source_path: str, texture_name: str,
                                  header_offset: Optional[int] = None) -> Optional[bpy.types.Image]:
+    # The same texture name can exist in different files. Match the source file too.
     source_key = os.path.normcase(os.path.abspath(str(source_path or "")))
     texture_key = normalize_leeds_texture_name(texture_name)
     for image in bpy.data.images:
@@ -208,6 +209,7 @@ def find_last_texture_raster_end(
     return min(candidates) if candidates else int(data_size)
 
 def find_sidecar_texture_for_mdl(mdl_path: str) -> Optional[str]:
+    # Look beside the model first, including names with different capital letters.
     if not mdl_path:
         return None
 

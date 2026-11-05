@@ -17,6 +17,7 @@
 
 import os
 import io
+from pathlib import Path
 import json
 import struct
 import zlib
@@ -27,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Tuple, Any, Optional, Iterable
 
 from mathutils import Matrix, Vector
+from ..ops.mesh_compat import meshColorLayer, colorLayerDomain
 
 
 try:
@@ -4545,8 +4547,10 @@ def write_pointer_tables_ped_ps2(
     *,
     root_offset: int,
     required_fields: Optional[Iterable[int]] = None,
+    pending_fields: Optional[Iterable[int]] = None,
 ) -> Tuple[int, int]:
     seen = set()
+    pending = {int(offset) for offset in (pending_fields or [])}
     normalized_fields: List[int] = []
 
     for raw_off in list(pointer_fields or []):
@@ -4555,6 +4559,10 @@ def write_pointer_tables_ped_ps2(
         except Exception:
             continue
         if off < 0 or off in seen:
+            continue
+        if off + 4 > len(buf):
+            raise ValueError(f'PS2 PED relocation field is outside the buffer: 0x{off:X}')
+        if off not in pending and struct.unpack_from('<I', buf, off)[0] == 0:
             continue
         seen.add(off)
         normalized_fields.append(off)
@@ -11058,6 +11066,10 @@ def write_simplemodel_ps2_ped_mdl(
         pointer_fields,
         root_offset=int(ped_local_root_offset),
         required_fields=required_relocation_fields,
+        pending_fields=[int(field) for field, name in pending_textures] + [
+            header.struct_or_flags_off, header.top_level_ptr_off,
+            header.extra_ptr0_off, header.extra_ptr1_off, header.extra_ptr2_off,
+        ],
     )
     write_texture_strings_after_tables(buf, pending_textures)
 
@@ -11357,6 +11369,25 @@ class Manhunt2MdlReader:
         self.existing_mh2_materials = None
 
     def run(self):
+        import bpy
+
+        collections = ('objects', 'collections', 'meshes', 'armatures', 'materials', 'texts')
+        previous = {name: set(getattr(bpy.data, name)) for name in collections}
+        try:
+            return self.readModelData()
+        except Exception:
+            for name in collections:
+                blocks = getattr(bpy.data, name)
+                for block in list(blocks):
+                    if block in previous[name]:
+                        continue
+                    if name in {'objects', 'collections'}:
+                        blocks.remove(block, do_unlink=True)
+                    elif name == 'texts' or block.users == 0:
+                        blocks.remove(block)
+            raise
+
+    def readModelData(self):
         import io
 
         if hasattr(self, "input_container"):
@@ -11393,6 +11424,7 @@ class Manhunt2MdlReader:
                     imported.extend(objects)
                 return imported
         self.file_size = len(self.file_data)
+        validatePmlcStructure(self.file_data)
         self.file = io.BytesIO(self.file_data)
 
         self.read_header()
@@ -11621,7 +11653,8 @@ class Manhunt2MdlReader:
         root["bleeds_export_use_normals"] = True
         root["bleeds_export_gouraud_shading"] = True
         root["bleeds_mh2_platform"] = platform
-        root["bleeds_mh2_metadata_version"] = 2
+        root["bleeds_mh2_metadata_version"] = 3
+        root["bleeds_mh2_source_name"] = Path(self.path).name
         root["bleeds_mh2_source_container"] = "Z2HM" if self.file_was_compressed else "PMLC"
         root["bleeds_mh2_decoded_size"] = int(self.file_size)
         root["bleeds_mh2_source_entry_offset"] = int(getattr(self, "entry_index_offset", self.header[8]))
@@ -11653,6 +11686,14 @@ class Manhunt2MdlReader:
             'bleeds_mh2_parent_bone_offset',
             'bleeds_mh2_import_parent_matrix',
             'bleeds_mh2_skin_palette_names',
+            'bleeds_mh2_source_part_name',
+            'bleeds_mh2_objinfo_flags',
+            'bleeds_mh2_objinfo_reserved',
+            'bleeds_mh2_objinfo_type',
+            'bleeds_mh2_material_unknown_values',
+            'bleeds_mh2_source_triangle_count',
+            'bleeds_mh2_uv_layer_count',
+            'bleeds_mh2_vertex_layout',
         )
         part_slots = []
         for mesh_object in self.imported_mesh_objects:
@@ -13062,7 +13103,8 @@ class Manhunt2MdlReader:
             mesh_object["bleeds_mh2_parent_bone_offset"] = int(parent_bone_offset)
             mesh_object["bleeds_mh2_parent_bone_name"] = parent_name
             mesh_object["bleeds_mh2_vertex_element_type"] = int(vertex_element_type)
-            mesh_object["bleeds_mh2_metadata_version"] = 2
+            mesh_object["bleeds_mh2_metadata_version"] = 3
+            mesh_object["bleeds_mh2_source_part_name"] = mesh_object.name
             mesh_object["bleeds_mh2_source_vertex_count"] = int(num_vertices)
             mesh_object["bleeds_mh2_source_triangle_count"] = int(triangle_count)
             mesh_object["bleeds_mh2_source_material_record_count"] = int(num_material_ids)
@@ -13165,7 +13207,7 @@ class Manhunt2MdlReader:
                 break
             text += value
         self.file.seek(current_position)
-        return text.decode("ascii", errors="replace")
+        return text.decode("cp1252", errors="replace")
 
     def parent_mesh_to_armature(self, mesh_object, create_rigid_parent_group=True):
         if mesh_object is None or self.armature_obj is None:
@@ -13517,7 +13559,7 @@ class Manhunt2MdlReader:
         self.configure_material_nodes(material, material_info, image)
         material["bleeds_model_game"] = "MH2"
         material["bleeds_mh2_material_index"] = material_index
-        material["bleeds_mh2_texture_name"] = texture_name
+        material["bleeds_mh2_texture_name"] = str(material_info.get("tex_name", "") or "")
         material["bleeds_mh2_texture_loaded"] = bool(image is not None)
         material["bleeds_mh2_loaded_flag"] = int(material_info.get("loaded", 0))
         material["bleeds_mh2_source_mdl_path"] = source_path
@@ -13581,7 +13623,8 @@ class Manhunt2MdlReader:
                 (index_name, 'INT', index_values, int),
                 (weight_name, 'FLOAT', weight_values, float),
             ):
-                attribute = mesh.attributes.get(name)
+                from .. import ensure_mesh_attribute
+                attribute = ensure_mesh_attribute(mesh, name, data_type, domain='POINT')
                 if attribute is None:
                     try:
                         attribute = mesh.attributes.new(name=name, type=data_type, domain='POINT')
@@ -13669,62 +13712,132 @@ class Manhunt2MdlReader:
         mesh_object["bleeds_mh2_assigned_influence_count"] = int(assigned_influence_count)
         return assigned_influence_count
 
-    def apply_vertex_colors(self, mesh, colors):
-        if not colors or len(colors) < len(mesh.vertices):
-            return None
-
-        total_loops = len(mesh.loops)
-        if total_loops == 0:
-            return None
-
-        loop_indices = np.empty(total_loops, dtype=np.int32)
-        try:
-            mesh.loops.foreach_get('vertex_index', loop_indices)
-        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
-            loop_indices = np.fromiter(
-                (int(loop.vertex_index) for loop in mesh.loops),
-                dtype=np.int32,
-                count=total_loops,
+    def write_corner_values(self, mesh, layer, property_name, values, component_count, label):
+        expected = len(mesh.loops)
+        flat_values = np.ascontiguousarray(np.asarray(values, dtype=np.float32).reshape(-1))
+        if len(flat_values) != expected * component_count:
+            raise ValueError(
+                "MH2 {} contains {} components for {} face corners".format(
+                    label, len(flat_values), expected
+                )
             )
-        mapped_colors = np.ascontiguousarray(
-            np.asarray(colors, dtype=np.float32)[loop_indices].reshape(-1)
+
+        if layer is None:
+            raise ValueError("MH2 could not create {}".format(label))
+
+        if len(layer.data) != expected:
+            mesh.update()
+        if len(layer.data) != expected:
+            raise ValueError(
+                "MH2 {} has {} face corners, expected {}".format(
+                    label, len(layer.data), expected
+                )
+            )
+
+        try:
+            layer.data.foreach_set(property_name, flat_values)
+        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
+            for loop_index in range(expected):
+                offset = loop_index * component_count
+                components = flat_values[offset:offset + component_count]
+                try:
+                    setattr(layer.data[loop_index], property_name, tuple(float(value) for value in components))
+                except (IndexError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                    raise ValueError(
+                        "MH2 could not write {} at face corner {}: {}".format(
+                            label, loop_index, exc
+                        )
+                    ) from exc
+
+    def apply_uv_layers(self, mesh, source_uv_layers):
+        vertex_count = len(mesh.vertices)
+        loop_indices = np.fromiter(
+            (int(loop.vertex_index) for loop in mesh.loops),
+            dtype=np.int32,
+            count=len(mesh.loops),
         )
 
-        color_layer = None
-        try:
-            if hasattr(mesh, 'color_attributes'):
-                color_layer = mesh.color_attributes.get('Color')
-                if color_layer is None:
-                    color_layer = mesh.color_attributes.new(name='Color', type='BYTE_COLOR', domain='CORNER')
-        except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
-            self.log('MH2 color attribute unavailable: {}'.format(exc))
+        layers = list(source_uv_layers or [])
+        if not layers:
+            layers = [[(0.0, 0.0) for vertex_index in range(vertex_count)]]
 
-        if color_layer is None or len(color_layer.data) != total_loops:
-            mesh.update()
-            try:
-                color_layer = mesh.vertex_colors.get('Color') or mesh.vertex_colors.new(name='Color')
-            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
-                self.log('MH2 legacy vertex color layer unavailable: {}'.format(exc))
-                color_layer = None
-
-        if color_layer is None or len(color_layer.data) != total_loops:
-            mesh['bleeds_mh2_source_loop_colors'] = [float(value) for value in mapped_colors]
-            self.log('MH2 color layer has no loop data; source colors retained as mesh properties')
-            return None
-
-        try:
-            color_layer.data.foreach_set('color', mapped_colors)
-        except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
-            self.log('MH2 bulk vertex color write failed: {}'.format(exc))
-            try:
-                for loop_index, vertex_index in enumerate(loop_indices):
-                    color_layer.data[loop_index].color = tuple(
-                        float(component) for component in colors[int(vertex_index)][:4]
+        for layer_index, source_uvs in enumerate(layers):
+            if len(source_uvs) != vertex_count:
+                raise ValueError(
+                    "MH2 UV{} has {} coordinates for {} vertices".format(
+                        layer_index + 1, len(source_uvs), vertex_count
                     )
-            except (IndexError, TypeError, ValueError, RuntimeError) as element_error:
-                mesh['bleeds_mh2_source_loop_colors'] = [float(value) for value in mapped_colors]
-                self.log('MH2 vertex color fallback failed: {}'.format(element_error))
-                return None
+                )
+
+            source = np.asarray(source_uvs, dtype=np.float32).reshape((vertex_count, 2))
+            if not np.isfinite(source).all():
+                raise ValueError("MH2 UV{} contains invalid coordinates".format(layer_index + 1))
+
+            name = "UVMap" if layer_index == 0 else "UVMap.{:03d}".format(layer_index)
+            layer = mesh.uv_layers.get(name)
+            if layer is None:
+                try:
+                    layer = mesh.uv_layers.new(name=name)
+                except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                    raise ValueError("MH2 could not create {}: {}".format(name, exc)) from exc
+
+            mapped_uvs = source[loop_indices] if len(loop_indices) else np.empty((0, 2), dtype=np.float32)
+            self.write_corner_values(mesh, layer, "uv", mapped_uvs, 2, name)
+            if layer_index == 0:
+                try:
+                    mesh.uv_layers.active = layer
+                except (AttributeError, TypeError, ValueError, RuntimeError):
+                    pass
+
+        return len(layers)
+
+    def apply_vertex_colors(self, mesh, colors):
+        vertex_count = len(mesh.vertices)
+        if not colors:
+            colors = [(1.0, 1.0, 1.0, 1.0) for vertex_index in range(vertex_count)]
+        if len(colors) != vertex_count:
+            raise ValueError(
+                "MH2 has {} vertex colors for {} vertices".format(len(colors), vertex_count)
+            )
+
+        source = np.asarray(colors, dtype=np.float32).reshape((vertex_count, 4))
+        if not np.isfinite(source).all():
+            raise ValueError("MH2 vertex colors contain invalid components")
+
+        loop_indices = np.fromiter(
+            (int(loop.vertex_index) for loop in mesh.loops),
+            dtype=np.int32,
+            count=len(mesh.loops),
+        )
+        mapped_colors = source[loop_indices] if len(loop_indices) else np.empty((0, 4), dtype=np.float32)
+
+        color_layers = getattr(mesh, "color_attributes", None)
+        color_layer = color_layers.get("Color") if color_layers is not None else None
+        if color_layer is None and color_layers is not None:
+            try:
+                color_layer = color_layers.new(name="Color", type="FLOAT_COLOR", domain="CORNER")
+            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                self.log("MH2 float vertex colors unavailable: {}".format(exc))
+                try:
+                    color_layer = color_layers.new(name="Color", type="BYTE_COLOR", domain="CORNER")
+                except (AttributeError, TypeError, ValueError, RuntimeError) as color_exc:
+                    raise ValueError("MH2 could not create vertex colors: {}".format(color_exc)) from color_exc
+
+        if color_layer is None:
+            try:
+                color_layer = mesh.vertex_colors.get("Color") or mesh.vertex_colors.new(name="Color")
+            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
+                raise ValueError("MH2 could not create vertex colors: {}".format(exc)) from exc
+
+        if colorLayerDomain(color_layer) != "CORNER":
+            raise ValueError("MH2 Color must contain face-corner colors")
+        self.write_corner_values(mesh, color_layer, "color", mapped_colors, 4, "vertex colors")
+
+        if color_layers is not None:
+            try:
+                color_layers.active_color = color_layer
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                pass
         return color_layer
 
     def apply_custom_normals(self, mesh, normals):
@@ -13788,53 +13901,8 @@ class Manhunt2MdlReader:
             pass
         mesh.update()
 
-        total_loops = len(mesh.loops)
-        loop_indices = np.empty(total_loops, dtype=np.int32)
-        if total_loops:
-            try:
-                mesh.loops.foreach_get('vertex_index', loop_indices)
-            except (AttributeError, TypeError, ValueError, RuntimeError, BufferError):
-                loop_indices = np.fromiter(
-                    (int(loop.vertex_index) for loop in mesh.loops),
-                    dtype=np.int32,
-                    count=total_loops,
-                )
-
-        for uv_layer_index, source_uvs in enumerate(uv_layers or []):
-            if not source_uvs or len(source_uvs) < len(vertices) or not total_loops:
-                continue
-            layer_name = 'UVMap' if uv_layer_index == 0 else 'UVMap.{}'.format(uv_layer_index + 1)
-            mapped_uvs = np.ascontiguousarray(
-                np.asarray(source_uvs, dtype=np.float32)[loop_indices].reshape(-1)
-            )
-            try:
-                uv_layer = mesh.uv_layers.get(layer_name) or mesh.uv_layers.new(name=layer_name)
-            except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
-                uv_layer = None
-                self.log("MH2 UV layer {!r} unavailable: {}".format(layer_name, exc))
-
-            if uv_layer is not None and len(uv_layer.data) != total_loops:
-                mesh.update()
-
-            if uv_layer is None or len(uv_layer.data) != total_loops:
-                mesh['bleeds_mh2_source_uv_layer_{}'.format(uv_layer_index)] = [float(value) for value in mapped_uvs]
-                self.log("MH2 UV layer {!r} has no loop data; source UVs retained as mesh properties".format(layer_name))
-                continue
-
-            try:
-                uv_layer.data.foreach_set('uv', mapped_uvs)
-            except (AttributeError, TypeError, ValueError, RuntimeError, BufferError) as exc:
-                self.log("MH2 UV layer {!r} bulk write failed: {}".format(layer_name, exc))
-                try:
-                    for loop_index, vertex_index in enumerate(loop_indices):
-                        uv_layer.data[loop_index].uv = tuple(
-                            float(component) for component in source_uvs[int(vertex_index)][:2]
-                        )
-                except (IndexError, TypeError, ValueError, RuntimeError) as element_error:
-                    mesh['bleeds_mh2_source_uv_layer_{}'.format(uv_layer_index)] = [float(value) for value in mapped_uvs]
-                    self.log("MH2 UV layer {!r} fallback write failed: {}".format(layer_name, element_error))
-
-        self.apply_vertex_colors(mesh, colors or [])
+        self.apply_uv_layers(mesh, uv_layers)
+        self.apply_vertex_colors(mesh, colors)
         self.apply_custom_normals(mesh, normals or [])
 
         for material_info in materials:
@@ -13844,7 +13912,8 @@ class Manhunt2MdlReader:
             polygon_count = len(mesh.polygons)
             material_attribute = None
             try:
-                material_attribute = mesh.attributes.get('bleeds_mh2_source_material_index')
+                from .. import ensure_mesh_attribute
+                material_attribute = ensure_mesh_attribute(mesh, 'bleeds_mh2_source_material_index', 'INT', domain='FACE')
                 if material_attribute is None:
                     material_attribute = mesh.attributes.new(
                         name='bleeds_mh2_source_material_index', type='INT', domain='FACE'
@@ -14311,16 +14380,12 @@ def mh2GeometryFingerprint(obj):
         for corner in layer.data:
             packValues('uv', corner.uv)
 
-    color_attributes = getattr(mesh, 'color_attributes', None)
-    selected_color = None
-    if color_attributes is not None:
-        selected_color = (color_attributes.get('Color') or color_attributes.get('Col')
-                          or getattr(color_attributes, 'active_color', None))
+    selected_color = meshColorLayer(mesh)
     if selected_color is None:
         packText('colors', '')
     else:
         packText('colors', selected_color.name)
-        packText('colors', selected_color.domain)
+        packText('colors', colorLayerDomain(selected_color))
         digests['colors'].update(struct.pack('<I', len(selected_color.data)))
         for entry in selected_color.data:
             packValues('colors', entry.color)
@@ -14397,6 +14462,26 @@ def loadMh2NativeModel(root):
 
 
 
+def validatePmlcStructure(data):
+    if len(data) < 48 or data[:4] != b'PMLC':
+        raise ValueError('Invalid MH2 PMLC header')
+    size, table_start, table_count = readWord(data, 8), readWord(data, 16), readWord(data, 20)
+    if size != len(data) or table_start < 48 or table_start % 4:
+        raise ValueError('Invalid MH2 model size or relocation table offset')
+    if table_start + table_count * 4 != size:
+        raise ValueError('MH2 relocation table is truncated or has trailing entries')
+    fields = struct.unpack_from('<{}I'.format(table_count), data, table_start)
+    if len(fields) != len(set(fields)):
+        raise ValueError('MH2 relocation table contains duplicate fields')
+    for field in fields:
+        if field < 32 or field % 4 or field + 4 > table_start:
+            raise ValueError('MH2 relocation field is outside the model data')
+        pointer = readWord(data, field)
+        if pointer and (pointer < 32 or pointer >= table_start):
+            raise ValueError('MH2 relocation target is outside the model data')
+    return True
+
+
 def decodePmlcContainer(raw):
     """Return PMLC bytes, the zlib stream offset, and trailing wrapper data."""
     if raw[:4] == b'PMLC':
@@ -14448,6 +14533,135 @@ def readWord(data, offset):
 
 
 
+def rebuildPmlcGeometryCompact(source, geometry_by_objinfo):
+    source_end = readWord(source, 8)
+    table_offset = readWord(source, 16)
+    count = readWord(source, 20)
+    if source_end != len(source) or table_offset < 48 or table_offset + count * 4 != source_end:
+        return None
+
+    pointer_fields = list(struct.unpack_from('<{}I'.format(count), source, table_offset))
+    if len(pointer_fields) != len(set(pointer_fields)):
+        return None
+
+    replacements = []
+    for objinfo_offset, block in geometry_by_objinfo.items():
+        objinfo_offset = int(objinfo_offset)
+        if objinfo_offset < 48 or objinfo_offset + 28 >= table_offset:
+            return None
+        if objinfo_offset + 12 not in pointer_fields:
+            return None
+
+        old_start = readWord(source, objinfo_offset + 12)
+        if old_start < 48 or old_start + 180 > table_offset:
+            return None
+        material_count = readWord(source, old_start + 0x2C)
+        face_index_count = readWord(source, old_start + 0x30)
+        vertex_count = readWord(source, old_start + 0x50)
+        vertex_stride = readWord(source, old_start + 0x60)
+        if (material_count < 1 or material_count > 4096 or
+                vertex_stride < 24 or vertex_stride > 256 or
+                face_index_count % 3):
+            return None
+
+        old_size = 180 + material_count * 44 + face_index_count * 2 + vertex_count * vertex_stride
+        old_length = (old_size + 3) & ~3
+        old_end = old_start + old_length
+        if old_end > table_offset or len(block) < 180 or len(block) % 4:
+            return None
+        if source[old_start + old_size:old_end] != bytes(old_length - old_size):
+            return None
+
+        padding = (old_length - len(block)) % 16
+        replacement = bytes(block) + bytes(padding)
+        replacements.append((old_start, old_end, replacement))
+
+    replacements.sort(key=lambda part: part[0])
+    if not replacements:
+        return None
+
+    for previous, current in zip(replacements, replacements[1:]):
+        if previous[1] > current[0]:
+            return None
+
+    target_references = {start: 0 for start, end, data in replacements}
+    for field in pointer_fields:
+        if field < 32 or field + 4 > table_offset or field % 4:
+            return None
+        target = readWord(source, field)
+        if target >= table_offset:
+            return None
+        if target in target_references:
+            target_references[target] += 1
+
+    if any(references != 1 for references in target_references.values()):
+        return None
+
+    for start, end, replacement in replacements:
+        internal_fields = [field - start for field in pointer_fields if start <= field < end]
+        if any(field not in (0, 8) for field in internal_fields):
+            return None
+        if any(field >= len(replacement) for field in internal_fields):
+            return None
+
+    def relocatedOffset(offset):
+        displacement = 0
+        for old_start, old_end, replacement in replacements:
+            if offset < old_start:
+                break
+            if offset < old_end:
+                relative = offset - old_start
+                if relative >= len(replacement):
+                    raise ValueError('MH2 model pointer refers to removed geometry')
+                return old_start + displacement + relative
+            displacement += len(replacement) - (old_end - old_start)
+        return offset + displacement
+
+    for field in pointer_fields:
+        target = readWord(source, field)
+        try:
+            relocatedOffset(field)
+            if target:
+                relocatedOffset(target)
+        except ValueError:
+            return None
+
+    rebuilt = bytearray()
+    source_cursor = 0
+    for start, end, replacement in replacements:
+        rebuilt.extend(source[source_cursor:start])
+        rebuilt.extend(replacement)
+        source_cursor = end
+    rebuilt.extend(source[source_cursor:table_offset])
+    rebuilt.extend(bytes((-len(rebuilt)) % 4))
+    new_table_offset = len(rebuilt)
+
+    new_fields = []
+    for field in pointer_fields:
+        new_field = relocatedOffset(field)
+        if new_field + 4 > new_table_offset:
+            raise ValueError('MH2 model relocation field is outside the rebuilt data')
+        original_target = readWord(rebuilt, new_field)
+        new_target = relocatedOffset(original_target) if original_target else 0
+        if new_target >= new_table_offset:
+            raise ValueError('MH2 model relocation target is outside the rebuilt data')
+        if new_target != original_target:
+            struct.pack_into('<I', rebuilt, new_field, new_target)
+        new_fields.append(new_field)
+
+    if len(set(new_fields)) != len(new_fields):
+        raise ValueError('MH2 model has duplicate relocation fields after rebuilding')
+    new_fields.sort()
+    for field in new_fields:
+        rebuilt.extend(struct.pack('<I', field))
+
+    struct.pack_into('<I', rebuilt, 8, len(rebuilt))
+    struct.pack_into('<I', rebuilt, 12, new_table_offset)
+    struct.pack_into('<I', rebuilt, 16, new_table_offset)
+    struct.pack_into('<I', rebuilt, 20, len(new_fields))
+    return bytes(rebuilt)
+
+
 def rebuildPmlcGeometry(source, geometry_by_objinfo):
     if len(source) < 48 or source[:4] != b'PMLC':
         raise ValueError('Expected an uncompressed MH2 PMLC model')
@@ -14462,6 +14676,10 @@ def rebuildPmlcGeometry(source, geometry_by_objinfo):
     for field in pointer_fields:
         if field + 4 > table_offset or readWord(source, field) >= table_offset:
             raise ValueError('Source contains an unsupported relocation pointer')
+
+    compact = rebuildPmlcGeometryCompact(source, geometry_by_objinfo)
+    if compact is not None:
+        return compact
 
     rebuilt = bytearray(source[:table_offset])
     old_geometry_offsets = [readWord(source, int(info_offset) + 12)

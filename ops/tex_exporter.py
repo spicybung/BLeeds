@@ -15,6 +15,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from .mesh_compat import objectChildren
 import math
 import os
 import struct
@@ -74,6 +75,7 @@ def image_to_rgba8(image: bpy.types.Image, platform: str) -> Tuple[int, int, byt
 
 
 def collect_images_from_context(context: bpy.types.Context) -> List[bpy.types.Image]:
+    # Selecting the model root should include the textures used by its meshes.
     found: List[bpy.types.Image] = []
     seen = set()
 
@@ -85,7 +87,7 @@ def collect_images_from_context(context: bpy.types.Context) -> List[bpy.types.Im
         seen_objects.add(active)
     for obj in list(objects):
         if obj.get('bleeds_is_mdl_root', False):
-            for child in obj.children_recursive:
+            for child in objectChildren(obj):
                 if child.type == 'MESH' and child not in seen_objects:
                     objects.append(child)
                     seen_objects.add(child)

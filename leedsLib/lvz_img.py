@@ -583,12 +583,16 @@ def is_game_dtz_2dfx_object(obj) -> bool:
 
 
 def collect_lvz_img_export_objects(context, selected_only: bool) -> List[bpy.types.Object]:
+    from ..ops.object_types import isObjectExportable
+
     if selected_only:
         candidates = list(getattr(context, "selected_objects", []) or [])
     else:
         candidates = list(bpy.data.objects)
     objects = []
     for obj in candidates:
+        if not isObjectExportable(obj):
+            continue
         if obj is None:
             continue
         if is_game_dtz_2dfx_object(obj):
@@ -763,7 +767,7 @@ def parse_trailing_int(text: str) -> Optional[int]:
         return None
 
 def material_texture_res_index(material) -> Optional[int]:
-    if material is None:
+    if material is None or material.get('blds_texture_stored_in_img', False):
         return None
     for key in ("blds_texture_res_index", "blds_res_index", "blds_lvz_res_index"):
         try:
@@ -774,7 +778,7 @@ def material_texture_res_index(material) -> Optional[int]:
     return parse_trailing_int(getattr(material, "name", ""))
 
 def image_texture_res_index(image) -> Optional[int]:
-    if image is None:
+    if image is None or image.get('blds_texture_stored_in_img', False):
         return None
     for key in ("blds_texture_res_index", "blds_res_index", "blds_lvz_res_index"):
         try:
@@ -804,15 +808,12 @@ def find_image_for_material(material) -> Optional[bpy.types.Image]:
 def collect_lvz_texture_images_from_objects(objects: List[bpy.types.Object]) -> Dict[int, Tuple[bpy.types.Material, bpy.types.Image]]:
     replacements: Dict[int, Tuple[bpy.types.Material, bpy.types.Image]] = {}
     for obj in objects:
-        data = getattr(obj, "data", None)
-        materials = getattr(data, "materials", None)
-        if not materials:
-            continue
-        for material in materials:
-            if material is None:
+        for slot in getattr(obj, "material_slots", ()):
+            material = slot.material
+            if material is None or material.get('blds_texture_stored_in_img', False):
                 continue
             image = find_image_for_material(material)
-            if image is None:
+            if image is None or image.get('blds_texture_stored_in_img', False):
                 continue
             res_id = material_texture_res_index(material)
             if res_id is None:
@@ -1001,8 +1002,13 @@ def build_unique_texture_ranges(lvz_bytes: bytes, rows: List[Dict]) -> Dict[int,
         resource_end = int(row.get("res_end", -1))
         if res_id < 0 or resource_start < 0 or resource_end <= resource_start:
             continue
-        payload_start = resource_start + LVZ_DIRECT_TEXTURE_HEADER_BYTES
-        if payload_start >= resource_end:
+        header_size = int(row.get('header_size', LVZ_DIRECT_TEXTURE_HEADER_BYTES))
+        payload_start = int(row.get("data_addr") or (resource_start + header_size))
+        if header_size == 8:
+            resource_end = int(row.get('data_end', -1))
+            if payload_start < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or resource_end > len(lvz_bytes) or resource_end <= payload_start:
+                continue
+        elif payload_start < resource_start + header_size or payload_start >= resource_end:
             continue
         length = resource_end - payload_start
         if length <= 0 or length > LVZ_MAX_TEXTURE_BLOB_BYTES:
@@ -1014,6 +1020,10 @@ def build_unique_texture_ranges(lvz_bytes: bytes, rows: List[Dict]) -> Dict[int,
             "table_ref_off": resource_start,
             "direct_texture": 1,
             "header_start": resource_start,
+            "header_size": header_size,
+            "depth": int(row.get('depth', 4)),
+            "mipmaps": int(row.get('mipmaps', 1)),
+            "swizzled": bool((int(row.get('raster_flags', 0)) >> 24) & 1),
         }
 
     tex_refs = []
@@ -1062,13 +1072,18 @@ def patch_lvz_texture_resources_from_scene(lvz_bytes: bytes, rows: List[Dict], o
         if info is None:
             skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": "no TEX_REF range"})
             continue
+        if info.get('header_size') == 8 and (info.get('depth') != 4 or info.get('mipmaps', 0) > 1):
+            skipped.append({'res_id': res_id, 'material': material.name, 'image': image.name,
+                            'reason': 'LCS texture editing currently supports only 4-bit textures with one mip level'})
+            continue
         start = int(info["start"])
         length = int(info["length"])
         if start < 0 or length <= 0 or start + length > len(lvz_bytes):
             skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": f"invalid TEX_REF range start=0x{start:X} len=0x{length:X}"})
             continue
         try:
-            encoded, dims, palette_count = encode_image_to_lvz_4bpp_blob(image, length, use_swizzle=use_swizzle)
+            texture_swizzle = bool(use_swizzle and info.get('swizzled')) if info.get('header_size') == 8 else use_swizzle
+            encoded, dims, palette_count = encode_image_to_lvz_4bpp_blob(image, length, use_swizzle=texture_swizzle)
         except Exception as exc:
             skipped.append({"res_id": res_id, "material": material.name, "image": image.name, "reason": str(exc)})
             continue
@@ -1494,6 +1509,8 @@ class read_lvz:
         lvz = self.decomp
         if len(lvz) < 0x24:
             raise ValueError("LVZ smaller than 0x24")
+        if not any(lvz[:0x24]):
+            raise ValueError('The LVZ header is empty; the file contains no world data')
         magic = lvz[0:4]
         _type = read_u32(lvz, 0x04)
         g0 = read_u32(lvz, 0x08)
@@ -1995,6 +2012,36 @@ class read_lvz:
             return False
         return True
 
+    def lcsDirectTextureInfo(self, addr: int):
+        if self.master_game_hint != 'lcs':
+            return None
+        data = self.decomp
+        data_end = len(data)
+        if data[:4] == b'DLRW' and len(data) >= 0x20:
+            declared_end = read_u32(data, 0x0C)
+            if 0x40 <= declared_end <= len(data):
+                data_end = declared_end
+        if addr < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or addr % 4 or addr + 8 > data_end:
+            return None
+        pointer, flags = struct.unpack_from('<II', data, addr)
+        log_width = flags & 0x3F
+        log_height = (flags >> 6) & 0x3F
+        depth = (flags >> 12) & 0x3F
+        mipmaps = (flags >> 20) & 0x0F
+        if not (1 <= log_width <= 11 and 1 <= log_height <= 11 and depth in (4, 8, 32) and mipmaps <= 8):
+            return None
+        width, height = 1 << log_width, 1 << log_height
+        payload_size = sum((max(1, width >> level) * max(1, height >> level) * depth + 7) // 8
+                           for level in range(max(1, mipmaps)))
+        payload_size += 64 if depth == 4 else 1024 if depth == 8 else 0
+        if pointer < LVZ_MIN_RESOURCE_CANDIDATE_ADDR or pointer % 4 or pointer + payload_size > data_end:
+            return None
+        if pointer < addr + 8 and pointer + payload_size > addr:
+            return None
+        return {'direct_texture': True, 'header_size': 8, 'width_half': 0, 'texture_flags': 0,
+                'data_addr': pointer, 'data_end': pointer + payload_size, 'texture_meta': flags,
+                'raster_flags': flags, 'depth': depth, 'mipmaps': mipmaps, 'width': width, 'height': height}
+
     def classify_resource_candidate(self, addr: int) -> Tuple[int, str, Dict]:
         lvz = self.decomp
         n = len(lvz)
@@ -2021,9 +2068,13 @@ class read_lvz:
             return (90, "TEX", info)
 
 
+        lcs_texture = self.lcsDirectTextureInfo(addr)
+        if lcs_texture is not None:
+            info.update(lcs_texture)
+            return (90, "TEX", info)
         if self.looks_like_mdl_material_list_candidate(addr):
             return (100, "MDL", info)
-        if self.looks_like_texture_ref_candidate(addr):
+        if self.master_game_hint != 'lcs' and self.looks_like_texture_ref_candidate(addr):
             info["ref_addr"] = a32
             info["embedded_res_id"] = b32
             return (80, "TEX_REF", info)
@@ -2120,6 +2171,11 @@ class read_lvz:
                 row["data_addr"] = info.get("data_addr")
                 row["texture_meta"] = info.get("texture_meta")
                 row["raster_flags"] = info.get("raster_flags")
+                if info.get('header_size') == 8:
+                    row['header_size'] = 8
+                    row['data_end'] = info['data_end']
+                    row['depth'] = info['depth']
+                    row['mipmaps'] = info['mipmaps']
             if kind == "TEX_REF":
                 row["ref_addr"] = info.get("ref_addr")
                 row["res_id"] = i
@@ -2196,9 +2252,10 @@ class read_lvz:
     @staticmethod
     def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
         img = bpy.data.images.new(name=name, width=w, height=h, alpha=True, float_buffer=False)
+        # Blender 2.90 clears generated pixels when this is changed afterwards.
+        img.alpha_mode = 'STRAIGHT'
         flat = (rgba.astype(np.float32) / 255.0).reshape(-1, 4)
         img.pixels = flat.flatten().tolist()
-        img.alpha_mode = 'STRAIGHT'
         img.pack()
         return img
 
@@ -2215,7 +2272,10 @@ class read_lvz:
         nt.links.new(tex.outputs["Color"], princ.inputs["Base Color"])
         if img.has_data and "Alpha" in tex.outputs and "Alpha" in princ.inputs:
             nt.links.new(tex.outputs["Alpha"], princ.inputs["Alpha"])
-            mat.blend_method = 'BLEND'
+            if hasattr(mat, 'blend_method'):
+                mat.blend_method = 'BLEND'
+            elif hasattr(mat, 'surface_render_method'):
+                mat.surface_render_method = 'DITHERED'
         nt.links.new(princ.outputs["BSDF"], out.inputs["Surface"])
         return mat
 
@@ -2415,6 +2475,9 @@ class read_lvz:
             raise ValueError(f"8bpp indices smaller than required pixels ({slab.size} < {need}).")
         if use_swizzle:
             slab = self.unswizzle8_ps2_linearized(slab, w, h)
+        if alpha_scale == "ps2":
+            # PS2's 256-colour palette swaps these two index bits.
+            slab = (slab & 0xE7) | ((slab & 0x08) << 1) | ((slab & 0x10) >> 1)
         idx2d = slab.reshape(h, w)
         idx2d = np.flipud(idx2d)
         pal_arr = np.asarray(palette, dtype=np.uint8)
@@ -2469,7 +2532,7 @@ class read_lvz:
             raise ValueError(f"unsupported direct texture dimensions {width}x{height}")
         return width, height
 
-    def direct_texture_payload_from_blob(self, blob: bytes, width: int, height: int) -> bytes:
+    def direct_texture_payload_from_blob(self, blob: bytes, width: int, height: int, payload_offset=LVZ_DIRECT_TEXTURE_HEADER_BYTES) -> bytes:
         info = self.direct_texture_raster_info_from_blob(blob)
         depth = int(info["depth"])
         mipmaps = max(1, int(info["mipmaps"]))
@@ -2486,9 +2549,11 @@ class read_lvz:
             level_w = max(1, level_w // 2)
             level_h = max(1, level_h // 2)
 
-        src_index_start = LVZ_DIRECT_TEXTURE_HEADER_BYTES
+        src_index_start = int(payload_offset)
+        if src_index_start < LVZ_DIRECT_TEXTURE_HEADER_BYTES:
+            raise ValueError("direct texture raster overlaps its header")
         src_index_end = src_index_start + level0_bytes
-        palette_start = LVZ_DIRECT_TEXTURE_HEADER_BYTES + image_bytes_total
+        palette_start = src_index_start + image_bytes_total
 
         if src_index_end > len(blob):
             raise ValueError("direct texture base mip is truncated")
@@ -2561,7 +2626,8 @@ class read_lvz:
             if end <= start:
                 continue
             blob_len = end - start
-            if blob_len < LVZ_DIRECT_TEXTURE_HEADER_BYTES:
+            header_size = int(row.get('header_size', LVZ_DIRECT_TEXTURE_HEADER_BYTES))
+            if blob_len < header_size:
                 continue
             if blob_len > LVZ_MAX_TEXTURE_BLOB_BYTES:
                 dbg(
@@ -2572,10 +2638,20 @@ class read_lvz:
 
             material_name = f"{self.stem}{res_index:0d}"
             try:
-                full_blob = self.decomp[start:end]
+                if header_size == 8:
+                    layout = self.lcsDirectTextureInfo(start)
+                    if layout is None:
+                        raise ValueError('LCS texture raster or palette lies outside the master world data')
+                    # LCS stores the raster pointer and flags in its own eight-byte header.
+                    full_blob = struct.pack('<IHHII', 0xCCCCCCCC, 0, 0, 16, layout['raster_flags'])
+                    full_blob += self.decomp[layout['data_addr']:layout['data_end']]
+                    payload_offset = LVZ_DIRECT_TEXTURE_HEADER_BYTES
+                else:
+                    full_blob = self.decomp[start:end]
+                    payload_offset = int(row.get("data_addr") or (start + LVZ_DIRECT_TEXTURE_HEADER_BYTES)) - start
                 raster_info = self.direct_texture_raster_info_from_blob(full_blob)
                 width, height = int(raster_info["width"]), int(raster_info["height"])
-                payload = self.direct_texture_payload_from_blob(full_blob, width, height)
+                payload = self.direct_texture_payload_from_blob(full_blob, width, height, payload_offset)
                 depth = int(raster_info.get("depth", 4))
                 texture_uses_swizzle = bool(self.use_swizzle and (int(raster_info.get("swizzle_mask", 0)) & 1))
                 if depth == 32:
@@ -2591,7 +2667,7 @@ class read_lvz:
                         blob=payload,
                         out_stem=material_name,
                         use_swizzle=texture_uses_swizzle,
-                        alpha_scale="ps2",
+                        alpha_scale="ps2" if self.use_swizzle else "none",
                         name_override=material_name,
                         fixed_size=(width, height),
                     )
@@ -2604,7 +2680,7 @@ class read_lvz:
                         palette_size=None,
                         use_swizzle=texture_uses_swizzle,
                         sizes_hint=None,
-                        alpha_scale="ps2",
+                        alpha_scale="ps2" if self.use_swizzle else "none",
                         name_override=material_name,
                         fixed_size=(width, height),
                         round_to_power_of_two=False,
@@ -2617,11 +2693,14 @@ class read_lvz:
                     mat["blds_lvz_ref_addr"] = int(start)
                     mat["blds_lvz_texture_blob_len"] = int(blob_len)
                     mat["blds_lvz_texture_direct"] = True
-                    mat["blds_lvz_texture_header_len"] = int(LVZ_DIRECT_TEXTURE_HEADER_BYTES)
+                    mat["blds_lvz_texture_header_len"] = header_size
                     mat["blds_lvz_texture_width_half"] = int(row.get("width_half", 0) or 0)
                     mat["blds_lvz_texture_flags"] = int(raster_info["format_flags"])
                     mat["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
                     mat["blds_lvz_texture_depth"] = int(raster_info.get("depth", 0))
+                    if header_size == 8:
+                        mat['blds_lvz_texture_data_addr'] = int(layout['data_addr'])
+                        mat['blds_lvz_texture_data_end'] = int(layout['data_end'])
                     mat["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
                     if getattr(result.get("material"), "node_tree", None) is not None:
                         for node in result["material"].node_tree.nodes:
@@ -2632,11 +2711,14 @@ class read_lvz:
                                 node.image["blds_lvz_ref_addr"] = int(start)
                                 node.image["blds_lvz_texture_blob_len"] = int(blob_len)
                                 node.image["blds_lvz_texture_direct"] = True
-                                node.image["blds_lvz_texture_header_len"] = int(LVZ_DIRECT_TEXTURE_HEADER_BYTES)
+                                node.image["blds_lvz_texture_header_len"] = header_size
                                 node.image["blds_lvz_texture_flags"] = int(raster_info["format_flags"])
                                 node.image["bleeds_uv_game_hint"] = self.master_game_hint
                                 node.image["blds_lvz_raster_flags"] = int(raster_info.get("flags", 0))
                                 node.image["blds_lvz_texture_depth"] = int(raster_info.get("depth", 0))
+                                if header_size == 8:
+                                    node.image['blds_lvz_texture_data_addr'] = int(layout['data_addr'])
+                                    node.image['blds_lvz_texture_data_end'] = int(layout['data_end'])
                                 node.image["blds_lvz_texture_swizzled"] = bool(texture_uses_swizzle)
                                 mat["blds_texture_image_name"] = node.image.name
                                 break
@@ -2677,7 +2759,9 @@ class read_lvz:
                     except Exception:
                         pass
                 start = r["ref_addr"]
-                end = unique_reference_rows[idx+1]["ref_addr"] if idx+1 < len(unique_reference_rows) else len(self.decomp)
+                allocation_starts = sorted({int(row[key]) for row in rows for key in ('res_addr', 'ref_addr')
+                                            if isinstance(row.get(key), int) and start < row[key] < len(self.decomp)})
+                end = allocation_starts[0] if allocation_starts else len(self.decomp)
                 blob_len = end - start
                 if end <= start or blob_len < 64:
                     continue
@@ -2700,7 +2784,7 @@ class read_lvz:
                         palette_size=None,
                         use_swizzle=self.use_swizzle,
                         sizes_hint=None,
-                        alpha_scale="ps2",
+                        alpha_scale="ps2" if self.use_swizzle else "none",
                         name_override=material_name,
                     )
                     mat = result["material"]
@@ -4127,15 +4211,15 @@ class read_img:
                     continue
                 if max_resource_id is not None and int(res_id) >= int(max_resource_id):
                     continue
-                if wanted is not None and int(res_id) not in wanted:
-                    continue
-                stats["wanted_rows"] += 1
                 raw_off = base + int(raw_ptr)
                 if raw_ptr < 0x20 or raw_off < base + 0x20 or raw_off + 8 > data_end:
                     stats["invalid_pointer"] += 1
                     continue
-                rows.append((resource_index, row_off, int(res_id), int(secondary_id), int(raw_ptr), int(raw_off)))
                 payload_offsets.append(int(raw_off))
+                if wanted is not None and int(res_id) not in wanted:
+                    continue
+                stats["wanted_rows"] += 1
+                rows.append((resource_index, row_off, int(res_id), int(secondary_id), int(raw_ptr), int(raw_off)))
 
             unique_payloads = sorted(set(payload_offsets))
             next_payload = {}
@@ -4145,14 +4229,8 @@ class read_img:
             for resource_index, row_off, res_id, secondary_id, raw_ptr, raw_off in rows:
                 resource_end = min(data_end, int(next_payload.get(raw_off, data_end)))
                 if resource_end <= raw_off + 8:
-                    resource_end = data_end
+                    continue
                 descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=resource_end)
-                if descriptor_off is None and resource_end < data_end:
-
-
-                    descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=data_end)
-                    if descriptor_off is not None:
-                        resource_end = data_end
                 if descriptor_off is None:
                     stats["non_geometry"] += 1
                     continue

@@ -15,12 +15,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+from .mesh_compat import objectChildren
 import re
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import bpy
 import bmesh
 import math
+from .object_types import isModelMesh
 import struct
 from collections import Counter
 from mathutils import Vector, Matrix
@@ -99,7 +101,7 @@ def create_mdl_root_for_export(context: bpy.types.Context) -> bpy.types.Object:
             hierarchy_tops.append(obj)
     for top in hierarchy_tops:
         try:
-            for child in top.children_recursive:
+            for child in objectChildren(top):
                 if getattr(child, "type", None) in {"MESH", "ARMATURE", "EMPTY"} and child not in export_objects:
                     export_objects.append(child)
         except Exception:
@@ -175,7 +177,7 @@ def gather_mesh_parts(context: bpy.types.Context, root: bpy.types.Object) -> Lis
 
     selected_under_root: List[bpy.types.Object] = []
     for obj in context.selected_objects:
-        if obj.type != "MESH":
+        if not isModelMesh(obj):
             continue
         cur = obj
         while cur is not None:
@@ -188,7 +190,7 @@ def gather_mesh_parts(context: bpy.types.Context, root: bpy.types.Object) -> Lis
     if exporting_selected_subset:
         meshes = selected_under_root
     else:
-        meshes = [o for o in root.children_recursive if o.type == "MESH"]
+        meshes = [o for o in objectChildren(root) if isModelMesh(o)]
 
     if not exporting_selected_subset:
         indexed_meshes: List[Tuple[int, bpy.types.Object]] = []
@@ -2197,27 +2199,6 @@ def buildPedWriterMaterialNames(root_cache: Dict[str, Any], part_names: List[str
                 names[tex_id] = "default"
 
     return names
-
-def getPointSourceEmitOrder(mesh: bpy.types.Mesh) -> List[int]:
-    try:
-        attribute = get_mesh_attribute(mesh, "bleeds_mdl_point_source_emit_index")
-        if attribute is None:
-            return list(range(len(mesh.vertices)))
-        values: List[Tuple[int, int]] = []
-        used = set()
-        for vertex in mesh.vertices:
-            vertex_index = int(vertex.index)
-            if vertex_index >= len(attribute.data):
-                return list(range(len(mesh.vertices)))
-            emit_index = int(attribute.data[vertex_index].value)
-            if emit_index < 0 or emit_index in used:
-                return list(range(len(mesh.vertices)))
-            used.add(emit_index)
-            values.append((emit_index, vertex_index))
-        values.sort(key=lambda item: item[0])
-        return [vertex_index for _, vertex_index in values]
-    except Exception:
-        return list(range(len(mesh.vertices)))
 
 def buildVertexLoopLookup(mesh: bpy.types.Mesh) -> Dict[int, int]:
     lookup: Dict[int, int] = {}
@@ -7051,7 +7032,7 @@ def export_stories_mdl_ps2(
 
         if ped_armature is None and root is not None:
             try:
-                for o in [root] + list(getattr(root, "children_recursive", []) or []):
+                for o in [root] + objectChildren(root):
                     if getattr(o, "type", None) == 'ARMATURE':
                         ped_armature = o
                         break
