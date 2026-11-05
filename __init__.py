@@ -923,14 +923,16 @@ def register():
         if not hasattr(bpy.types, gui.CW_MT_ExportChoice.bl_idname):
             raise RuntimeError("BLeeds export menu class was not registered")
 
-        from .ops import uv_playback
+        from .ops import uv_playback, material_effects
+        material_effects.register()
         uv_playback.registerNativeUvPlayback()
 
         print("BLeeds %s registered successfully: classes=%d, import_menu=yes, export_menu=yes" % (__version__, len(registered_classes)))
 
     except Exception as exc:
-        from .ops import uv_playback
+        from .ops import uv_playback, material_effects
         uv_playback.unregisterNativeUvPlayback()
+        material_effects.unregister()
 
         if export_hooked:
             remove_menu_callback(export_menu, gui.cw_menu_export)
@@ -955,8 +957,9 @@ def register():
         raise
 
 def unregister():
-    from .ops import uv_playback
+    from .ops import uv_playback, material_effects
     uv_playback.unregisterNativeUvPlayback()
+    material_effects.unregister()
     remove_menu_callback(get_file_import_menu_type(), gui.cw_menu_import)
     remove_menu_callback(get_file_export_menu_type(), gui.cw_menu_export)
 

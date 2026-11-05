@@ -8426,7 +8426,7 @@ def blds_create_placed_model_2dfx_helpers(collection, placed_obj, import_stem: s
             )
     return made
 
-def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True, import_textures: bool = True, scan_dtz: bool = True, import_lods: bool = IMPORT_LOD_PASSES_BY_DEFAULT, import_vegetation: bool = True, import_generics: bool = True):
+def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_transforms: bool = True, debug_print: bool = False, write_debug_log: bool = True, game_dtz_path: str = "", import_game_dtz_2dfx: bool = True, import_textures: bool = True, scan_dtz: bool = True, import_lods: bool = IMPORT_LOD_PASSES_BY_DEFAULT, import_vegetation: bool = True, import_generics: bool = True, force_texture_alpha: bool = False):
     if not lvz_path:
         operator.report({'ERROR'}, "No LVZ selected.")
         return {'CANCELLED'}
@@ -8529,6 +8529,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         stem=stem,
         use_swizzle=True,
         debug_print=debug_print,
+        force_texture_alpha=force_texture_alpha,
     )
 
     progress.update(6, "Reading LVZ...")
@@ -9465,17 +9466,55 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 import_generics=import_generics,
             )
             if (scan_dtz or game_dtz_path) and two_dfx_summary.get('status') == 'ok':
-                from .world_selection import importDtzWorldPlacements
+                from .world_selection import (
+                    importDtzWorldPlacements, writeDtzMissingModelsLog,
+                    namedWorldCategory,
+                )
+                from .world_shared_models import iterBuildSharedWorldModels
+
+                dtz_model_ids = set()
+                for entity in two_dfx_summary.get('world_entities', []):
+                    model_id = int(entity['model_id'])
+                    metadata = two_dfx_summary.get('model_meta_by_id', {}).get(model_id, {})
+                    category = namedWorldCategory(metadata.get('model_name', ''))
+                    if (category == 'VEGETATION' and import_vegetation or
+                            category == 'GENERICS' and import_generics):
+                        dtz_model_ids.add(model_id)
+
+                shared_templates = []
+                if dtz_model_ids:
+                    progress.update(96, 'Checking exact shared MDL files...')
+                    yield None
+                    shared_templates = yield from iterBuildSharedWorldModels(
+                        lvz_path, two_dfx_summary, dtz_model_ids,
+                        import_objects_collection, import_textures,
+                        progress_callback=lambda index, total: progress.update_range(
+                            96, 97, index, total, 'Checking shared MDLs...'),
+                    )
+                progress.update(97, 'Importing DTZ placements...')
+                yield None
+                exact_templates = [
+                    obj for obj in context.scene.objects
+                    if obj.type == 'MESH' and obj.get('blds_source_lvz_path') == str(lvz_path)
+                ]
+                exact_templates.extend(shared_templates)
                 dtz_count, missing_dtz_models = importDtzWorldPlacements(
                     context, two_dfx_summary, globals().get('_CURRENT_PLACED_OBJECT_RECORDS', []),
-                    [obj for obj in context.scene.objects if obj.type == 'MESH' and obj.get('blds_source_lvz_path') == str(lvz_path)],
-                    area_model_info_by_res, sector_records, import_objects_collection,
-                    import_vegetation, import_generics)
+                    exact_templates, area_model_info_by_res, sector_records,
+                    import_objects_collection, import_vegetation, import_generics)
+                try:
+                    missing_log = writeDtzMissingModelsLog(lvz_path, two_dfx_summary, dtz_count)
+                    LVZ.dbg('[dtz] missing model log: %s' % missing_log)
+                except OSError as exc:
+                    missing_log = ''
+                    LVZ.dbg('[dtz] unable to write missing model log: %s' % exc)
                 if missing_dtz_models:
-                    operator.report({'WARNING'}, '%d DTZ models have placements but no matching mesh in this pair' % len(missing_dtz_models))
+                    operator.report({'WARNING'},
+                        '%d DTZ models skipped (missing/ambiguous); see missing DTZ model log' % len(missing_dtz_models))
                 if import_root_collection is not None:
                     import_root_collection['blds_dtz_models_imported'] = dtz_count
                     import_root_collection['blds_dtz_missing_model_ids'] = json.dumps(missing_dtz_models)
+                    import_root_collection['blds_dtz_missing_model_log'] = missing_log
             if img is not None:
                 importWorldExtraTextures(lvz, img, texture_owners,
                     globals().get('_CURRENT_PLACED_OBJECT_RECORDS', []), extra_container_records, import_textures)

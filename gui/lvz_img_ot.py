@@ -54,6 +54,11 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
     )
 
     import_textures: BoolProperty(name="Import Textures", default=True)
+    force_texture_alpha: BoolProperty(
+        name="Force Texture Transparency",
+        description="Make all imported textured materials transparent, even when the source texture is opaque",
+        default=False,
+    )
     scan_dtz: BoolProperty(name="Scan for DTZ", description="Look beside the world for GAME.DTZ effects and placed models", default=True)
     import_lods: BoolProperty(
         name="Import LODs/SLODs",
@@ -63,12 +68,12 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
 
     import_vegetation: BoolProperty(
         name="Import Vegetation",
-        description="Include trees and plants. Models that cannot be identified are kept",
+        description="Import trees and plants when their actual models are available; missing models are logged",
         default=True,
     )
     import_generics: BoolProperty(
         name="Import Generics",
-        description="Include lamps, benches, bins, and other identified props",
+        description="Import lamps, benches, bins, and other props when their actual models are available",
         default=True,
     )
 
@@ -77,6 +82,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
         layout.use_property_split = True
         layout.use_property_decorate = False
         layout.prop(self, "import_textures")
+        layout.prop(self, "force_texture_alpha")
         layout.prop(self, "import_lods")
         layout.prop(self, "scan_dtz")
         layout.prop(self, "import_vegetation")
@@ -93,6 +99,7 @@ class IMPORT_SCENE_OT_stories_lvz(Operator, ImportHelper):
             write_debug_log=self.print_text_log,
             import_game_dtz_2dfx=True,
             import_textures=self.import_textures,
+            force_texture_alpha=self.force_texture_alpha,
             scan_dtz=self.scan_dtz,
             import_lods=self.import_lods,
             import_vegetation=self.import_vegetation,

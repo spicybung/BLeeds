@@ -564,18 +564,14 @@ def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image
     except Exception:
         pass
 
-    use_texture_alpha = (
-        image_has_meaningful_alpha(image)
-        and material_allows_texture_alpha(material, image)
-        and not psp_image_alpha_is_effectively_opaque(image)
-    )
-    configure_material_alpha_mode(
-        material=material,
-        bsdf_node=bsdf,
-        texture_node=existing_node,
-        use_texture_alpha=use_texture_alpha,
-    )
-
+    from .material_effects import setMaterialAlpha
+    material_opacity = float(material.get('bleeds_native_material_opacity', 1.0))
+    if material_allows_texture_alpha(material, image) and not psp_image_alpha_is_effectively_opaque(image):
+        setMaterialAlpha(material, image, bsdf, existing_node,
+                         material_opacity=material_opacity)
+    else:
+        setMaterialAlpha(material, None, bsdf, existing_node,
+                         material_opacity=material_opacity)
     try:
         material.use_screen_refraction = False
     except Exception:
@@ -611,6 +607,8 @@ def apply_image_to_material(material: bpy.types.Material, image: bpy.types.Image
             del material[key]
     configureNativeWorldUvAnimation(material, format_flags, native_game,
                                     bpy.context.scene.frame_start, v_flipped=v_flipped)
+    from .material_effects import rebuildMaterialFx
+    rebuildMaterialFx(material)
     return True
 
 def texture_names_for_material(material: bpy.types.Material) -> List[str]:
@@ -717,6 +715,10 @@ def apply_images_to_imported_mdl_materials(
                 except Exception:
                     pass
 
+    from .material_effects import rebuildMaterialFx
+    for material in bpy.data.materials:
+        if int(material.get('bleeds_rslmatfx_type', 0)) in (2, 4):
+            rebuildMaterialFx(material)
     return matched_materials, len(image_lookup), missing_names
 
 def import_sidecar_texture_for_mdl(
@@ -1137,6 +1139,8 @@ def importTextures(path, platform='AUTO'):
         pixels = dictionary.pixels(texture)
         image = bpy.data.images.new(texture['name'], texture['width'], texture['height'], alpha=True)
         image.pixels.foreach_set((pixels[::-1].astype('float32') / 255.0).ravel())
+        from .material_effects import classifyTextureAlpha
+        image['bleeds_alpha_mode'] = classifyTextureAlpha(pixels)
         del pixels
         image.pack()
         image['bleeds_mobile_txd'] = str(Path(path).resolve())

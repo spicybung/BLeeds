@@ -1496,11 +1496,12 @@ class read_lvz:
     STROW  = 0x30000000
     MSCAL  = 0x14000006
 
-    def __init__(self, decomp_bytes: bytes, stem: str, use_swizzle: bool, debug_print: bool):
+    def __init__(self, decomp_bytes: bytes, stem: str, use_swizzle: bool, debug_print: bool, force_texture_alpha: bool = False):
         self.decomp = decomp_bytes
         self.stem = stem
         self.use_swizzle = use_swizzle
         self.debug_print = debug_print
+        self.force_texture_alpha = bool(force_texture_alpha)
         self.material_by_res_index: Dict[int, bpy.types.Material] = {}
         self.master_resource_count: int = 0
         self.master_resource_stride: int = 0
@@ -2259,27 +2260,28 @@ class read_lvz:
         img.alpha_mode = 'STRAIGHT'
         flat = (rgba.astype(np.float32) / 255.0).reshape(-1, 4)
         img.pixels = flat.flatten().tolist()
+        from ..ops.material_effects import classifyTextureAlpha
+        img['bleeds_alpha_mode'] = classifyTextureAlpha(rgba)
         img.pack()
         return img
 
-    @staticmethod
-    def create_material_from_image(img: bpy.types.Image, mat_name: str) -> bpy.types.Material:
+    def create_material_from_image(self, img: bpy.types.Image, mat_name: str) -> bpy.types.Material:
+        from ..ops.material_effects import setMaterialAlpha
         mat = bpy.data.materials.new(mat_name)
         mat.use_nodes = True
         nt = mat.node_tree
-        for n in list(nt.nodes):
-            nt.nodes.remove(n)
-        out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (300, 0)
-        princ = nt.nodes.new("ShaderNodeBsdfPrincipled"); princ.location = (0, 0)
-        tex = nt.nodes.new("ShaderNodeTexImage"); tex.location = (-300, 0); tex.image = img
-        nt.links.new(tex.outputs["Color"], princ.inputs["Base Color"])
-        if img.has_data and "Alpha" in tex.outputs and "Alpha" in princ.inputs:
-            nt.links.new(tex.outputs["Alpha"], princ.inputs["Alpha"])
-            if hasattr(mat, 'blend_method'):
-                mat.blend_method = 'BLEND'
-            elif hasattr(mat, 'surface_render_method'):
-                mat.surface_render_method = 'DITHERED'
-        nt.links.new(princ.outputs["BSDF"], out.inputs["Surface"])
+        for node in list(nt.nodes):
+            nt.nodes.remove(node)
+        output = nt.nodes.new('ShaderNodeOutputMaterial')
+        output.location = (300, 0)
+        shader = nt.nodes.new('ShaderNodeBsdfPrincipled')
+        shader.location = (0, 0)
+        texture = nt.nodes.new('ShaderNodeTexImage')
+        texture.location = (-300, 0)
+        texture.image = img
+        nt.links.new(texture.outputs['Color'], shader.inputs['Base Color'])
+        nt.links.new(shader.outputs['BSDF'], output.inputs['Surface'])
+        setMaterialAlpha(mat, img, shader, texture, force=self.force_texture_alpha)
         return mat
 
     @staticmethod

@@ -761,12 +761,27 @@ def get_or_create_material_for_stories(
     a = ((rgba >> 24) & 0xFF) / 255.0 if rgba != 0 else 1.0
 
     bsdf.inputs["Base Color"].default_value = (r, g, b, a)
+    mat['bleeds_native_material_opacity'] = float(a)
+    if 0.0 < a < 0.995:
+        from .material_effects import setMaterialAlpha
+        setMaterialAlpha(mat, None, bsdf, None, material_opacity=a)
 
     mat["bleeds_material_identity"] = identity
     mat["bleeds_material_texture_name"] = key
     mat["bleeds_mdl_texture_name"] = str(getattr(mat_desc, 'texture', '') or '')
     mat["bleeds_mdl_material_entry_offset"] = int(getattr(mat_desc, 'offset', 0))
     mat["bleeds_mdl_material_rgba_hex"] = "0x%08X" % (int(getattr(mat_desc, 'rgba', 0)) & 0xFFFFFFFF)
+    fx = getattr(mat_desc, 'matfx', None)
+    if fx:
+        mat['bleeds_rslmatfx_type'] = int(fx['effect_type'])
+        mat['bleeds_rslmatfx_texture_name'] = str(fx['texture_name'])
+        mat['bleeds_rslmatfx_source_offset'] = int(fx['source_offset'])
+        mat['bleeds_rslmatfx_texture_pointer'] = int(fx['texture_pointer'])
+        if fx['effect_type'] == 2:
+            mat['bleeds_rslmatfx_strength'] = float(fx['intensity'])
+        else:
+            mat['bleeds_rslmatfx_blend_src'] = int(fx['blend_src'])
+            mat['bleeds_rslmatfx_blend_dst'] = int(fx['blend_dst'])
     return mat
 
 CUTSCENE_BODY_BONE_NAMES = {
@@ -4752,9 +4767,8 @@ def makeMaterial(record, images):
         links.new(texture.outputs['Color'], multiply.inputs[1])
         links.new(color.outputs['Color'], multiply.inputs[2])
         links.new(multiply.outputs[0], shader.inputs['Base Color'])
-        links.new(texture.outputs['Alpha'], shader.inputs['Alpha'])
-        if hasattr(material, 'blend_method'):
-            material.blend_method = 'HASHED'
+        from .material_effects import setMaterialAlpha
+        setMaterialAlpha(material, image, shader, texture, material_opacity=material.diffuse_color[3])
     else:
         links.new(color.outputs['Color'], shader.inputs['Base Color'])
     material['bleeds_model_game'] = 'MH2'

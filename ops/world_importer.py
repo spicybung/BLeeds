@@ -41,6 +41,8 @@ def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.ty
         img.pixels = flat.reshape(-1).tolist()
     img.update()
     img.alpha_mode = 'STRAIGHT'
+    from .material_effects import classifyTextureAlpha
+    img['bleeds_alpha_mode'] = classifyTextureAlpha(rgba)
     img.pack()
     return img
 
@@ -57,9 +59,8 @@ def create_material_from_image(img: bpy.types.Image, mat_name: str) -> bpy.types
     tex = nt.nodes.new("ShaderNodeTexImage"); tex.location = (-300, 0); tex.image = img
     nt.links.new(tex.outputs["Color"], principled.inputs["Base Color"])
 
-    if img.has_data and "Alpha" in tex.outputs and "Alpha" in principled.inputs:
-        nt.links.new(tex.outputs["Alpha"], principled.inputs["Alpha"])
-        mat.blend_method = 'BLEND'
+    from .material_effects import setMaterialAlpha
+    setMaterialAlpha(mat, img, principled, tex)
     nt.links.new(principled.outputs["BSDF"], out.inputs["Surface"])
     return mat
 
@@ -458,19 +459,9 @@ def createBspMaterial(
         texture.image = image
         texture.label = record.name or image.name
         links.new(texture.outputs["Color"], principled.inputs["Base Color"])
-        uses_alpha = imageUsesCutoutAlpha(image)
-        if uses_alpha and "Alpha" in texture.outputs and "Alpha" in principled.inputs:
-            links.new(texture.outputs["Alpha"], principled.inputs["Alpha"])
-            try:
-                material.blend_method = "HASHED"
-            except Exception:
-                pass
-        else:
-            try:
-                principled.inputs["Alpha"].default_value = 1.0
-                material.blend_method = "OPAQUE"
-            except Exception:
-                pass
+        from .material_effects import imageAlphaMode, setMaterialAlpha
+        uses_alpha = imageAlphaMode(image) != "OPAQUE"
+        setMaterialAlpha(material, image, principled, texture)
         material["blds_bsp_uses_texture_alpha"] = bool(uses_alpha)
         if not principled.outputs["BSDF"].is_linked:
             links.new(principled.outputs["BSDF"], output.inputs["Surface"])

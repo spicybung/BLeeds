@@ -569,26 +569,27 @@ def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.ty
     flat = (rgba.astype(np.float32) / 255.0).reshape(-1, 4)
     img.pixels = flat.flatten().tolist()
     img.alpha_mode = 'STRAIGHT'
+    from ..ops.material_effects import classifyTextureAlpha
+    img['bleeds_alpha_mode'] = classifyTextureAlpha(rgba)
     img.pack()
     return img
 
 def create_material_from_image(img: bpy.types.Image, mat_name: str) -> bpy.types.Material:
-
+    from ..ops.material_effects import setMaterialAlpha
     mat = bpy.data.materials.new(mat_name)
     mat.use_nodes = True
-    nt = mat.node_tree
-
-    for n in list(nt.nodes):
-        nt.nodes.remove(n)
-    out = nt.nodes.new("ShaderNodeOutputMaterial"); out.location = (300, 0)
-    principled = nt.nodes.new("ShaderNodeBsdfPrincipled"); principled.location = (0, 0)
-    tex = nt.nodes.new("ShaderNodeTexImage"); tex.location = (-300, 0); tex.image = img
-    nt.links.new(tex.outputs["Color"], principled.inputs["Base Color"])
-
-    if img.has_data and "Alpha" in tex.outputs and "Alpha" in principled.inputs:
-        nt.links.new(tex.outputs["Alpha"], principled.inputs["Alpha"])
-        mat.blend_method = 'BLEND'
-    nt.links.new(principled.outputs["BSDF"], out.inputs["Surface"])
+    tree = mat.node_tree
+    tree.nodes.clear()
+    output = tree.nodes.new('ShaderNodeOutputMaterial')
+    output.location = (300, 0)
+    shader = tree.nodes.new('ShaderNodeBsdfPrincipled')
+    shader.location = (0, 0)
+    texture = tree.nodes.new('ShaderNodeTexImage')
+    texture.location = (-300, 0)
+    texture.image = img
+    tree.links.new(texture.outputs['Color'], shader.inputs['Base Color'])
+    tree.links.new(shader.outputs['BSDF'], output.inputs['Surface'])
+    setMaterialAlpha(mat, img, shader, texture)
     return mat
 
 @dataclass

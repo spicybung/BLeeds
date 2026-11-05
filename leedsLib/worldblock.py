@@ -199,7 +199,6 @@ class read_chinatown:
 
             links = mat.node_tree.links
             links.new(tex_image_node.outputs["Color"], bsdf_node.inputs["Base Color"])
-            links.new(tex_image_node.outputs["Alpha"], bsdf_node.inputs["Alpha"])
             links.new(bsdf_node.outputs["BSDF"], output_node.inputs["Surface"])
 
             output_node.is_active_output = True
@@ -212,10 +211,8 @@ class read_chinatown:
                     img = bpy.data.images.load(image_path, check_existing=True)
                     tex_image_node.image = img
                     tex_image_node.interpolation = "Smart"
-                    if hasattr(mat, 'surface_render_method'):
-                        mat.surface_render_method = 'DITHERED'
-                    elif hasattr(mat, 'blend_method'):
-                        mat.blend_method = 'HASHED'
+                    from ..ops.material_effects import setMaterialAlpha
+                    setMaterialAlpha(mat, img, bsdf_node, tex_image_node)
                     read_chinatown.dprint(
                         f"      Loaded texture image: {image_path}", logf
                     )
@@ -236,12 +233,12 @@ class read_chinatown:
                         img.pixels.foreach_set((np.flipud(rgba).astype(np.float32) / 255.0).ravel())
                         img['bleeds_chinatown_tex_path'] = source_path
                         img['bleeds_chinatown_tex_flags'] = format_flags
+                        from ..ops.material_effects import classifyTextureAlpha
+                        img['bleeds_alpha_mode'] = classifyTextureAlpha(rgba)
                         img.pack()
                     tex_image_node.image = img
-                    if hasattr(mat, 'surface_render_method'):
-                        mat.surface_render_method = 'DITHERED'
-                    elif hasattr(mat, 'blend_method'):
-                        mat.blend_method = 'HASHED'
+                    from ..ops.material_effects import setMaterialAlpha
+                    setMaterialAlpha(mat, img, bsdf_node, tex_image_node)
                     read_chinatown.dprint(f"      Decoded Chinatown TEX: {tex_path}", logf)
                 except Exception as e:
                     read_chinatown.dprint(f"      Could not decode Chinatown TEX {tex_path}: {e}", logf)

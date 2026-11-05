@@ -93,7 +93,7 @@ def worldLegacyAreaTextureBlob(data, start, end):
     return header + data[start:end], start, 0
 
 
-def decodeWorldOwner(data, rows, stem, use_swizzle, game_hint, decode_pixels, base=0, area=False):
+def decodeWorldOwner(data, rows, stem, use_swizzle, game_hint, decode_pixels, base=0, area=False, force_alpha=False):
     normalized = bytearray()
     textures = []
     locations = {}
@@ -109,7 +109,8 @@ def decodeWorldOwner(data, rows, stem, use_swizzle, game_hint, decode_pixels, ba
         textures.append(dict(index=resource, res_id=resource, kind='TEX',
                              res_addr=normalized_start, res_end=len(normalized)))
         locations[resource] = (start, end, raster, header_size)
-    parser = LVZ.read_lvz(bytes(normalized), stem, use_swizzle, False)
+    parser = LVZ.read_lvz(bytes(normalized), stem, use_swizzle, False,
+                          force_texture_alpha=bool(force_alpha))
     parser.master_game_hint = game_hint
     parser.decode_textures(textures, decode_pixels=decode_pixels)
     for resource, material in parser.material_by_res_index.items():
@@ -142,13 +143,13 @@ def importWorldTextureOwners(lvz, img, sectors, decode_pixels=True):
             continue
         pointer, count = struct.unpack_from('<IH', data, base)
         rows = ownerResourceRows(data, base, end, base + pointer - 0x20, count)
-        materials = decodeWorldOwner(data, rows, lvz.stem + '_sector%d_' % sector['sector_index'], lvz.use_swizzle, lvz.master_game_hint, decode_pixels, base=base)
+        materials = decodeWorldOwner(data, rows, lvz.stem + '_sector%d_' % sector['sector_index'], lvz.use_swizzle, lvz.master_game_hint, decode_pixels, base=base, force_alpha=lvz.force_texture_alpha)
         result['sector'][int(sector['sector_index'])] = materials
         result['owner'][base] = materials
         result['sector_cells'][int(sector['sector_index'])] = (int(sector['sector_x']) // 3, int(sector['sector_y']) // 3)
     for area in img.find_area_info_records_from_lvz():
         rows = ownerResourceRows(data, int(area['file_offset']), min(len(data), int(area['data_end'])), int(area['resource_table_off']), int(area['num_resources']), True)
-        materials = decodeWorldOwner(data, rows, lvz.stem + '_area%d_' % area['area_index'], lvz.use_swizzle, lvz.master_game_hint, decode_pixels, base=int(area['file_offset']), area=True)
+        materials = decodeWorldOwner(data, rows, lvz.stem + '_area%d_' % area['area_index'], lvz.use_swizzle, lvz.master_game_hint, decode_pixels, base=int(area['file_offset']), area=True, force_alpha=lvz.force_texture_alpha)
         result['area'][int(area['area_index'])] = materials
         result['owner'][int(area['file_offset'])] = materials
         result['cell'].setdefault((int(area['cell_x']), int(area['cell_y'])), []).append(materials)
@@ -197,7 +198,8 @@ def importWorldExtraTextures(lvz, img, owners, records, extra_records, decode_pi
         pointer, count = struct.unpack_from('<IH', data, base)
         rows = ownerResourceRows(data, base, end, base + pointer - 0x20, count)
         materials = decodeWorldOwner(data, rows, lvz.stem + '_owner%x_' % base,
-                                     lvz.use_swizzle, lvz.master_game_hint, decode_pixels, base=base)
+                                     lvz.use_swizzle, lvz.master_game_hint, decode_pixels, base=base,
+                                     force_alpha=lvz.force_texture_alpha)
         owner_maps[base] = materials
         extra_maps[base] = materials
         added += len(materials)
@@ -298,10 +300,6 @@ def worldMaterialVariant(material, culling, vertex_colors):
     result.use_backface_culling = culling
     if not vertex_colors or not result.use_nodes or result.node_tree is None:
         return result
-    if hasattr(result, 'blend_method'):
-        result.blend_method = 'BLEND'
-    elif hasattr(result, 'surface_render_method'):
-        result.surface_render_method = 'DITHERED'
     nodes, links = result.node_tree.nodes, result.node_tree.links
     shader = next((node for node in nodes if node.type == 'BSDF_PRINCIPLED'), None)
     if shader is None:
@@ -319,13 +317,6 @@ def worldMaterialVariant(material, culling, vertex_colors):
         multiply.inputs[1].default_value = shader.inputs['Base Color'].default_value
     links.new(color.outputs['Color'], multiply.inputs[2])
     links.new(multiply.outputs['Color'], shader.inputs['Base Color'])
-    alpha = nodes.new('ShaderNodeMath')
-    alpha.operation = 'MULTIPLY'
-    previous_alpha = next(iter(shader.inputs['Alpha'].links), None)
-    if previous_alpha:
-        links.new(previous_alpha.from_socket, alpha.inputs[0])
-    else:
-        alpha.inputs[0].default_value = shader.inputs['Alpha'].default_value
-    links.new(color.outputs['Alpha'], alpha.inputs[1])
-    links.new(alpha.outputs[0], shader.inputs['Alpha'])
+    # Native world vertex colors provide prelighting. Texture/material state
+    # controls alpha; multiplying a 1-bit prelight alpha made entire buildings invisible.
     return result

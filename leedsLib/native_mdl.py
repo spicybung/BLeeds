@@ -122,6 +122,7 @@ class StoriesMaterialDesc:
     texture: str = ""
     rgba: int = 0
     specular: float = 0.0
+    matfx: Optional[Dict[str, Any]] = None
 
 @dataclass
 class StoriesPSPMesh:
@@ -891,7 +892,13 @@ def read_material_list(ctx: StoriesMDLContext, f) -> List[StoriesMaterialDesc]:
             _ = read_u32(f)
 
             spec_ptr = read_u32(f)
-            ctx.log(f"    ⤷ Specular Ptr: 0x{spec_ptr:X}")
+            ctx.log(f"    ⤷ Material FX Ptr: 0x{spec_ptr:X}")
+            if spec_ptr and file_len and spec_ptr + 16 <= file_len:
+                from ..ops.material_effects import readRslMatFxStream
+                cur_mat.matfx = readRslMatFxStream(f, spec_ptr, file_len)
+                if cur_mat.matfx:
+                    ctx.log("    Material FX: type=%d texture=%s" % (
+                        cur_mat.matfx['effect_type'], cur_mat.matfx['texture_name']))
             if spec_ptr > 0 and (not file_len or (spec_ptr + 12) <= file_len):
                 temp_pos = f.tell()
                 try:

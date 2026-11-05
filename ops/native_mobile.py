@@ -58,6 +58,8 @@ def importTextures(path, platform='AUTO'):
             image = bpy.data.images.new(texture.name, texture.width, texture.height, alpha=True)
             images[texture.name.casefold()] = image
             image.pixels.foreach_set((pixels[::-1].astype('float32') / 255.0).ravel())
+            from .material_effects import classifyTextureAlpha
+            image['bleeds_alpha_mode'] = classifyTextureAlpha(pixels)
             image.pack()
             image['bleeds_mobile_txd'] = str(Path(path).resolve())
             image['bleeds_mobile_texture'] = texture.name
@@ -190,7 +192,8 @@ def importDffData(context, path, source='MOBILE', import_textures=True):
                     node = material.node_tree.nodes.new('ShaderNodeTexImage')
                     node.image = image
                     material.node_tree.links.new(node.outputs['Color'], shader.inputs['Base Color'])
-                    material.node_tree.links.new(node.outputs['Alpha'], shader.inputs['Alpha'])
+                    from .material_effects import setMaterialAlpha
+                    setMaterialAlpha(material, image, shader, node, material_opacity=material.diffuse_color[3])
                 materials.append(material)
             for part_index, part in enumerate(atomic['parts']):
                 mesh = bpy.data.meshes.new('%s_%d_%d' % (root.name, atomic_index, part_index))
@@ -781,6 +784,8 @@ def applyDffTextures(images):
             node = material.node_tree.nodes.new('ShaderNodeTexImage')
         node.image = image
         material.node_tree.links.new(node.outputs['Color'], shader.inputs['Base Color'])
-        material.node_tree.links.new(node.outputs['Alpha'], shader.inputs['Alpha'])
+        from .material_effects import setMaterialAlpha
+        setMaterialAlpha(material, image, shader, node,
+                         material_opacity=material.diffuse_color[3])
         matched += 1
     return matched
