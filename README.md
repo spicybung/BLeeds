@@ -55,6 +55,6 @@ This project is licensed under the GPL 3.0 License - see the [LICENSE](LICENSE) 
 - The GTA modding community, for the inspiration years ago.
 - The GTA Mods Wiki & GTAModding Wiki(RIP)for being a huge considerate help in figuring things, such as data structures, out.
 - Daniil Sayanov, for his great help, knowledge in R* Leeds formats, as well as inspiration & motivation.
-- Guard3 for his work on G3DTZ, which was helpful in decoding the .DTZ format.
 - MAJESTIC_R3 for his Stories Map Converter program, which was surprisingly helpful in decoding file formats on its own.
+- Guard3 for his work on G3DTZ, which was helpful in decoding the .DTZ format.
 - Last, but not least, The_Hero(aap) for their incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
