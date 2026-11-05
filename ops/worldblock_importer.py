@@ -21,6 +21,7 @@ import struct
 import traceback
 
 import bpy
+from .mesh_compat import setMeshLoopAttributes, setMeshPolygonMaterialIndices
 from bpy.types import Operator
 from bpy.props import BoolProperty, StringProperty, CollectionProperty
 from bpy_extras.io_utils import ImportHelper
@@ -134,11 +135,8 @@ class worldblock_importer:
                 mesh.use_auto_smooth = True
 
         uv_layer = mesh.uv_layers.new(name="UVMap")
-        for poly_index, poly in enumerate(mesh.polygons):
-            poly.material_index = face_mats[poly_index]
-            for loop_index in poly.loop_indices:
-                v_idx = mesh.loops[loop_index].vertex_index
-                uv_layer.data[loop_index].uv = uvs[v_idx]
+        setMeshLoopAttributes(mesh, vertex_uvs=uvs, uv_layer=uv_layer)
+        setMeshPolygonMaterialIndices(mesh, face_mats)
 
         material_bank.append_all_to_mesh(mesh)
 

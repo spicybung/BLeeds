@@ -17,7 +17,6 @@
 
 import re
 from pathlib import Path
-from ..data.data_zlib import decompress_game_dtz
 
 
 def worldArchiveStem(path):
@@ -82,7 +81,8 @@ def resolveWorldSelection(filepath):
             raise ValueError("No unique matching LVZ was found for %s in the world folders." % selected.name)
         return [str(matches[0])], ''
     if extension == '.dtz':
-        decompress_game_dtz(selected.read_bytes())
+        # The importer reads and decompresses GAME.DTZ when processing the world.
+        # Doing it here as well doubles the initial DTZ read and decompression.
         paired = [str(child) for child in lvz_files if matchingWorldImg(child)]
         if not paired:
             raise ValueError("No matching LVZ/IMG pairs were found beside GAME.DTZ or in its LVZ, IMG, or MODELS folders.")

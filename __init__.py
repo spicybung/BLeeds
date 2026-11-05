@@ -15,10 +15,10 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-__version__ = "1.5.3.7"
+__version__ = "1.5.3.7b"
 
 bl_info = {
-    "name": "BLeeds",
+    "name": "BLeeds 1.5.3.7b",
     "author": "spicybung",
     "version": (1, 5, 3, 7),
     "blender": (2, 90, 0),

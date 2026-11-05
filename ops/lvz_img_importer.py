@@ -77,6 +77,11 @@ class LvzImgImportProgress:
         self.last_redraw_time = 0.0
         self.redraw_interval = 0.25
         self.last_report_bucket = -1
+        self.last_console_time = 0.0
+        self.phase_start_time = 0.0
+        self.phase_range = None
+        self.phase_current = 0
+        self.phase_total = 0
         self.started_at = time.perf_counter()
         self.map_current = 0
         self.map_total = 0
@@ -230,6 +235,12 @@ class LvzImgImportProgress:
             self.redraw()
 
         report_bucket = value // 10
+        if stage_changed and value >= 75 and current_time - self.last_console_time >= 3.0:
+            self.last_console_time = current_time
+            print("[BLeeds 1.5.3.7b] {}% | {} | elapsed {:.1f}s".format(
+                value, self.stage, current_time - self.started_at
+            ), flush=True)
+
         if report_bucket != self.last_report_bucket and value not in (0, 100):
             self.last_report_bucket = report_bucket
             try:
@@ -259,7 +270,7 @@ class LvzImgImportProgress:
         self.map_current = max(0, min(self.map_total, int(current)))
         self.model_current = max(0, min(self.model_total, int(models)))
         self.cached_current = max(0, min(self.cached_total, int(cached)))
-        self.update_range(80, 98, self.map_current, max(1, self.map_total), detail)
+        self.update_range(91, 98, self.map_current, max(1, self.map_total), detail)
 
     def build_status_text(self, value):
         elapsed = max(0.0, time.perf_counter() - self.started_at)
@@ -268,6 +279,10 @@ class LvzImgImportProgress:
             remaining = max(0, self.map_total - self.map_current)
             eta_seconds = (elapsed / float(self.map_current)) * float(remaining)
             eta_text = self.format_duration(eta_seconds)
+        elif self.phase_total > 0 and self.phase_current > 0:
+            phase_elapsed = max(0.0, time.perf_counter() - self.phase_start_time)
+            remaining = max(0, self.phase_total - self.phase_current)
+            eta_text = self.format_duration((phase_elapsed / self.phase_current) * remaining)
         else:
             eta_text = "--:--"
 
@@ -302,6 +317,12 @@ class LvzImgImportProgress:
             fraction = float(index) / float(total)
         except Exception:
             fraction = 0.0
+        range_key = (int(range_start), int(range_end))
+        if self.phase_range != range_key:
+            self.phase_range = range_key
+            self.phase_start_time = time.perf_counter()
+        self.phase_current = index
+        self.phase_total = total
         value = float(range_start) + (float(range_end) - float(range_start)) * fraction
         self.update(value, stage)
 
@@ -1896,15 +1917,16 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
                 continue
             base = len(vertices)
             vertices.extend(strip.verts[:count])
-            source_colors = list(getattr(strip, 'cols_rgba4444', []) or [])
-            colors.extend(source_colors[index] if index < len(source_colors) else (255,255,255,255) for index in range(count))
-            uvs.extend(strip.uvs[index] if index < len(strip.uvs) else (0.0, 0.0) for index in range(count))
+            source_colors = getattr(strip, 'cols_rgba4444', None) or ()
+            source_uvs = getattr(strip, 'uvs', None) or ()
+            colors.extend(source_colors[index] if index < len(source_colors) else (255, 255, 255, 255) for index in range(count))
+            uvs.extend(source_uvs[index] if index < len(source_uvs) else (0.0, 0.0) for index in range(count))
             poly_start = len(faces)
-            for i in range(count - 2):
-                if i & 1:
-                    faces.append((base + i + 1, base + i, base + i + 2))
-                else:
-                    faces.append((base + i, base + i + 1, base + i + 2))
+            faces.extend(
+                (base + index + 1, base + index, base + index + 2)
+                if index & 1 else (base + index, base + index + 1, base + index + 2)
+                for index in range(count - 2)
+            )
             face_ranges.append((poly_start, count - 2, strip.material_res_index))
 
     if not vertices or not faces:
@@ -1917,20 +1939,49 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
     mesh.validate(clean_customdata=False)
     mesh.update()
 
-    if uvs:
-        uv_layer = mesh.uv_layers.new(name="UVMap")
-        uv_data = uv_layer.data
-        for poly in mesh.polygons:
-            loop_start = poly.loop_start
-            for loop_index, vertex_index in enumerate(poly.vertices):
-                if vertex_index < len(uvs):
-                    uv_data[loop_start + loop_index].uv = uvs[vertex_index]
+    if uvs or colors:
+        loop_count = len(mesh.loops)
+        loop_vertices = None
+        if np is not None and loop_count:
+            try:
+                loop_vertices = np.empty(loop_count, dtype=np.int32)
+                mesh.loops.foreach_get('vertex_index', loop_vertices)
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                loop_vertices = None
 
-    if colors:
-        from .. import get_or_create_corner_color_layer
-        layer = get_or_create_corner_color_layer(mesh, 'Col')
-        for loop in mesh.loops:
-            layer.data[loop.index].color = tuple(value / 255.0 for value in colors[loop.vertex_index])
+        if uvs:
+            uv_layer = mesh.uv_layers.new(name="UVMap")
+            transferred = False
+            if loop_vertices is not None:
+                try:
+                    uv_values = np.asarray(uvs, dtype=np.float32)
+                    if len(uv_values) >= len(vertices) and loop_vertices.size and loop_vertices.min() >= 0 and loop_vertices.max() < len(uv_values):
+                        uv_layer.data.foreach_set('uv', np.ascontiguousarray(uv_values[loop_vertices]).reshape(-1))
+                        transferred = True
+                except (AttributeError, TypeError, ValueError, RuntimeError, IndexError):
+                    pass
+            if not transferred:
+                for loop in mesh.loops:
+                    vertex_index = loop.vertex_index
+                    if 0 <= vertex_index < len(uvs):
+                        uv_layer.data[loop.index].uv = uvs[vertex_index]
+
+        if colors:
+            from .. import get_or_create_corner_color_layer
+            layer = get_or_create_corner_color_layer(mesh, 'Col')
+            transferred = False
+            if loop_vertices is not None:
+                try:
+                    color_values = np.asarray(colors, dtype=np.float32)
+                    if len(color_values) >= len(vertices) and loop_vertices.size and loop_vertices.min() >= 0 and loop_vertices.max() < len(color_values):
+                        loop_colors = np.ascontiguousarray(color_values[loop_vertices] * (1.0 / 255.0))
+                        layer.data.foreach_set('color', loop_colors.reshape(-1))
+                        transferred = True
+                except (AttributeError, TypeError, ValueError, RuntimeError, IndexError):
+                    pass
+            if not transferred:
+                for loop in mesh.loops:
+                    layer.data[loop.index].color = tuple(value / 255.0 for value in colors[loop.vertex_index])
 
     obj = bpy.data.objects.new(mesh_name, mesh)
     target_collection = globals().get("_ACTIVE_IMPORT_OBJECTS_COLLECTION")
@@ -1939,42 +1990,47 @@ def build_mesh_from_mdl_groups(stem: str, res_index: int, groups: List[LVZ.MDLSt
     except Exception:
         bpy.context.scene.collection.objects.link(obj)
 
-
     try:
         obj.hide_viewport = True
         obj.hide_render = True
     except Exception:
         pass
+
     obj["blds_kind"] = "MDL"
     obj["blds_res_index"] = int(res_index)
     obj["blds_groups"] = len(groups)
     obj["blds_faces"] = len(faces)
     obj["blds_verts"] = len(vertices)
-    xs = [float(v[0]) for v in vertices]
-    ys = [float(v[1]) for v in vertices]
-    zs = [float(v[2]) for v in vertices]
-    cx = (min(xs) + max(xs)) * 0.5
-    cy = (min(ys) + max(ys)) * 0.5
-    cz = (min(zs) + max(zs)) * 0.5
-    radius = 0.0
+
+    min_x = max_x = float(vertices[0][0])
+    min_y = max_y = float(vertices[0][1])
+    min_z = max_z = float(vertices[0][2])
+    for x, y, z in vertices[1:]:
+        x, y, z = float(x), float(y), float(z)
+        min_x = min(min_x, x)
+        min_y = min(min_y, y)
+        min_z = min(min_z, z)
+        max_x = max(max_x, x)
+        max_y = max(max_y, y)
+        max_z = max(max_z, z)
+    cx = (min_x + max_x) * 0.5
+    cy = (min_y + max_y) * 0.5
+    cz = (min_z + max_z) * 0.5
+    radius_squared = 0.0
     for x, y, z in vertices:
-        dx = float(x) - cx
-        dy = float(y) - cy
-        dz = float(z) - cz
-        radius = max(radius, (dx * dx + dy * dy + dz * dz) ** 0.5)
-    obj["blds_local_radius"] = float(radius)
-    obj["blds_bbox_min"] = (float(min(xs)), float(min(ys)), float(min(zs)))
-    obj["blds_bbox_max"] = (float(max(xs)), float(max(ys)), float(max(zs)))
+        dx, dy, dz = float(x) - cx, float(y) - cy, float(z) - cz
+        radius_squared = max(radius_squared, dx * dx + dy * dy + dz * dz)
+    obj["blds_local_radius"] = float(math.sqrt(radius_squared))
+    obj["blds_bbox_min"] = (min_x, min_y, min_z)
+    obj["blds_bbox_max"] = (max_x, max_y, max_z)
     return obj, face_ranges
 
 
 def mdl_groups_geometry_signature(material_list, groups):
-
     vert_count = 0
     face_count = 0
-    xs = []
-    ys = []
-    zs = []
+    min_x = min_y = min_z = float('inf')
+    max_x = max_y = max_z = float('-inf')
     try:
         for group in groups or []:
             for strip in getattr(group, "strips", []) or []:
@@ -1992,12 +2048,16 @@ def mdl_groups_geometry_signature(material_list, groups):
                 vert_count += count
                 face_count += max(0, count - 2)
                 for x, y, z in verts[:count]:
-                    xs.append(float(x))
-                    ys.append(float(y))
-                    zs.append(float(z))
+                    x, y, z = float(x), float(y), float(z)
+                    min_x = min(min_x, x)
+                    min_y = min(min_y, y)
+                    min_z = min(min_z, z)
+                    max_x = max(max_x, x)
+                    max_y = max(max_y, y)
+                    max_z = max(max_z, z)
     except Exception:
         return None
-    if vert_count <= 0 or face_count <= 0 or not xs:
+    if vert_count <= 0 or face_count <= 0 or not math.isfinite(min_x):
         return None
     material_ids = []
     try:
@@ -2006,8 +2066,8 @@ def mdl_groups_geometry_signature(material_list, groups):
     except Exception:
         material_ids = []
     bounds = (
-        round(min(xs), 4), round(min(ys), 4), round(min(zs), 4),
-        round(max(xs), 4), round(max(ys), 4), round(max(zs), 4),
+        round(min_x, 4), round(min_y, 4), round(min_z, 4),
+        round(max_x, 4), round(max_y, 4), round(max_z, 4),
     )
     return (int(vert_count), int(face_count), tuple(material_ids), bounds)
 
@@ -2257,43 +2317,59 @@ def choose_exact_resource_candidate(candidates, detail, max_fit_score=5.0):
     return best[4], best[5], best[6], len(unique)
 
 
-def score_mdl_groups_for_preselect(groups) -> float:
+def score_mdl_groups_for_preselect(groups, return_bounds=False):
     if not groups:
-        return -1.0
+        return (-1.0, 0, 0, None, None) if return_bounds else -1.0
     group_count = 0
     vert_count = 0
     face_count = 0
-    xs = []
-    ys = []
-    zs = []
+    geometry_verts = 0
+    geometry_faces = 0
+    score_vertices = []
+    min_xyz = [float('inf'), float('inf'), float('inf')]
+    max_xyz = [float('-inf'), float('-inf'), float('-inf')]
     try:
         for group in groups:
             group_count += 1
-            for strip in getattr(group, "strips", []) or []:
-                count = min(len(getattr(strip, "verts", []) or []), len(getattr(strip, "uvs", []) or []), int(getattr(strip, "count", 0) or 0))
-                if count < 3:
-                    continue
-                vert_count += count
-                face_count += max(0, count - 2)
-                for x, y, z in strip.verts[:count]:
-                    xs.append(float(x))
-                    ys.append(float(y))
-                    zs.append(float(z))
+            for strip in getattr(group, 'strips', []) or []:
+                verts = getattr(strip, 'verts', []) or []
+                uvs = getattr(strip, 'uvs', []) or []
+                count = min(len(verts), len(uvs), int(getattr(strip, 'count', 0) or 0))
+                geometry_verts += len(verts)
+                geometry_count = int(getattr(strip, 'count', len(verts)) or len(verts))
+                if uvs:
+                    geometry_count = min(geometry_count, len(uvs))
+                geometry_faces += max(0, geometry_count - 2)
+                if count >= 3:
+                    vert_count += count
+                    face_count += count - 2
+                for i, vertex in enumerate(verts):
+                    x, y, z = float(vertex[0]), float(vertex[1]), float(vertex[2])
+                    if x < min_xyz[0]: min_xyz[0] = x
+                    if y < min_xyz[1]: min_xyz[1] = y
+                    if z < min_xyz[2]: min_xyz[2] = z
+                    if x > max_xyz[0]: max_xyz[0] = x
+                    if y > max_xyz[1]: max_xyz[1] = y
+                    if z > max_xyz[2]: max_xyz[2] = z
+                    if count >= 3 and i < count:
+                        score_vertices.append((x, y, z))
     except Exception:
-        return -1.0
+        return (-1.0, 0, 0, None, None) if return_bounds else -1.0
     if vert_count <= 0 or face_count <= 0:
-        return -1.0
-    radius = 0.0
-    if xs:
-        cx = (min(xs) + max(xs)) * 0.5
-        cy = (min(ys) + max(ys)) * 0.5
-        cz = (min(zs) + max(zs)) * 0.5
-        for x, y, z in zip(xs, ys, zs):
-            dx = float(x) - cx
-            dy = float(y) - cy
-            dz = float(z) - cz
-            radius = max(radius, (dx * dx + dy * dy + dz * dz) ** 0.5)
-    return (float(face_count) * 8.0) + (float(vert_count) * 2.0) + (float(group_count) * 64.0) + min(max(float(radius), 0.0), 4096.0)
+        return (-1.0, geometry_verts, geometry_faces, None, None) if return_bounds else -1.0
+    score_min = [min(x[i] for x in score_vertices) for i in range(3)]
+    score_max = [max(x[i] for x in score_vertices) for i in range(3)]
+    center = [(score_min[i] + score_max[i]) * 0.5 for i in range(3)]
+    radius_sq = 0.0
+    for x, y, z in score_vertices:
+        dx = x - center[0]
+        dy = y - center[1]
+        dz = z - center[2]
+        radius_sq = max(radius_sq, dx * dx + dy * dy + dz * dz)
+    score = (float(face_count) * 8.0) + (float(vert_count) * 2.0) + (float(group_count) * 64.0) + min(radius_sq ** 0.5, 4096.0)
+    if return_bounds:
+        return score, geometry_verts, geometry_faces, tuple(min_xyz), tuple(max_xyz)
+    return score
 
 def reset_aggregate_group_parts():
     AGGREGATE_GROUP_PARTS_BY_SECTOR.clear()
@@ -3211,16 +3287,36 @@ def add_material_slots(obj, material_by_res_index: Dict[int, bpy.types.Material]
 
     if face_ranges:
         polygons = obj.data.polygons
+        count = len(polygons)
+        if np is not None and count:
+            try:
+                indices = np.zeros(count, dtype=np.int32)
+                polygons.foreach_get('material_index', indices)
+                for poly_start, poly_count, mat_resid in face_ranges:
+                    if mat_resid is None or mat_resid < 0:
+                        continue
+                    slot = resid_to_slot.get(int(mat_resid))
+                    if slot is None:
+                        continue
+                    begin = max(0, int(poly_start))
+                    stop = min(count, int(poly_start) + int(poly_count))
+                    if stop > begin:
+                        indices[begin:stop] = int(slot)
+                polygons.foreach_set('material_index', indices)
+                return slots_added
+            except (AttributeError, TypeError, ValueError, RuntimeError):
+                pass
+
         for poly_start, poly_count, mat_resid in face_ranges:
             if mat_resid is None or mat_resid < 0:
                 continue
             slot = resid_to_slot.get(int(mat_resid))
             if slot is None:
                 continue
-            for poly_index in range(poly_start, poly_start + poly_count):
-                if 0 <= poly_index < len(polygons):
-                    polygons[poly_index].material_index = slot
+            for poly_index in range(max(0, int(poly_start)), min(count, int(poly_start) + int(poly_count))):
+                polygons[poly_index].material_index = slot
     return slots_added
+
 
 def img_chunk_end(img_bytes: bytes, cont: int, next_cont: Optional[int] = None) -> int:
     img_len = len(img_bytes)
@@ -3547,10 +3643,7 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
     if not wanted:
         return {}
 
-    cache = CONTINUES_IN_IMG_PROOF_CACHE
-    remaining = {res_id for res_id in wanted if res_id not in cache}
-    if not remaining:
-        return {res_id: list(cache.get(res_id) or []) for res_id in wanted if cache.get(res_id)}
+    remaining = wanted
 
     parser = LVZ.read_lvz(
         decomp_bytes=img_bytes,
@@ -3590,21 +3683,26 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
 
 
         if np is None:
-            total = max(1, (max(0, n - 0x20) + stride - 1) // stride)
-            step = 0
-            off = 0
-            while off + 0x20 <= n:
-                step += 1
-                if progress_callback is not None and (step % 65536 == 0 or step == total):
-                    progress_callback(step, total)
-                count16 = LVZ.read_u16(img_bytes, off)
-                size16 = LVZ.read_u16(img_bytes, off + 2)
-                if 0 < count16 <= 256 and size16 <= 0x8000:
-                    expected24 = ((4 + count16 * 24 + 15) & ~15) - 4
-                    expected22 = ((4 + count16 * 22 + 15) & ~15) - 4
-                    if size16 == expected24 or size16 == expected22:
-                        yield off
-                off += stride
+            chunk_bytes = 8 * 1024 * 1024
+            chunk_count = max(1, (n + chunk_bytes - 1) // chunk_bytes)
+            for chunk_index, chunk_start in enumerate(range(0, n, chunk_bytes)):
+                chunk_end = min(n, chunk_start + chunk_bytes)
+                aligned_start = ((chunk_start + stride - 1) // stride) * stride
+                valid_length = (chunk_end - aligned_start) // stride * stride
+                if valid_length >= stride:
+                    view = memoryview(img_bytes)[aligned_start:aligned_start + valid_length]
+                    word_format = '<I{:d}x'.format(stride - 4)
+                    for index, (word,) in enumerate(struct.iter_unpack(word_format, view)):
+                        count16 = word & 0xFFFF
+                        size16 = word >> 16
+                        if 0 < count16 <= 256 and size16 <= 0x8000:
+                            expected24 = ((4 + count16 * 24 + 15) & ~15) - 4
+                            expected22 = ((4 + count16 * 22 + 15) & ~15) - 4
+                            if size16 == expected24 or size16 == expected22:
+                                yield aligned_start + index * stride
+                if progress_callback is not None:
+                    progress_callback(chunk_index + 1, chunk_count)
+                yield None
             return
 
         chunk_bytes = 8 * 1024 * 1024
@@ -3615,6 +3713,7 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
             if aligned_start + 4 > chunk_end:
                 if progress_callback is not None:
                     progress_callback(chunk_index + 1, chunk_count)
+                yield None
                 continue
             item_count = 1 + ((chunk_end - aligned_start - 4) // stride)
             words = np.ndarray(
@@ -3633,6 +3732,7 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
                 yield int(aligned_start + int(relative_index) * stride)
             if progress_callback is not None:
                 progress_callback(chunk_index + 1, chunk_count)
+            yield None
 
     def register_candidate(target: int, candidate: dict):
         target = int(target)
@@ -3651,11 +3751,20 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
         values.sort(key=lambda row: tuple(row.get('rank_key', (999999.0, 999999.0, 0.0))))
         del values[max(1, int(CONTINUES_IN_IMG_MAX_VARIANTS_PER_RES)):]
 
+    scan_started = time.perf_counter()
+    LVZ.dbg(f"[continues-img-scan] scanning {n / (1024 * 1024):.1f} MiB of IMG for {len(remaining)} unresolved resource IDs")
+    if LVZ.DEBUG is not None:
+        LVZ.DEBUG.flush()
     for off in candidate_descriptor_offsets():
+        if off is None:
+            yield None
+            continue
         descriptor = probePs2ImgDescriptorForContinuation(img_bytes, off)
         if descriptor is None:
             continue
         scanned_descriptors += 1
+        if scanned_descriptors % 32 == 0:
+            yield None
         tex_ids = set(int(x) for x in descriptor.get("tex_ids", set()))
         target_res_ids = set()
         for tex_id in tex_ids:
@@ -3668,42 +3777,13 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
         try:
             material_list = parser.parse_mdl_material_list(raw_off, max_end=packet_end)
             groups, after = parser.parse_mdl_geometry_after_list(material_list, max_end=packet_end)
-            parser.assign_materials_by_strip_bytes(material_list, groups)
         except Exception:
             parser_failures += 1
             continue
 
-        score = score_mdl_groups_for_preselect(groups)
-        if score < 0.0:
+        score, gv, gf, bbox_min, bbox_max = score_mdl_groups_for_preselect(groups, return_bounds=True)
+        if score < 0.0 or gv <= 0 or gf <= 0 or bbox_min is None:
             continue
-        gv = 0
-        gf = 0
-        xs = []
-        ys = []
-        zs = []
-        try:
-            for group in groups:
-                for strip in getattr(group, 'strips', []) or []:
-                    verts = getattr(strip, 'verts', []) or []
-                    uvs = getattr(strip, 'uvs', []) or []
-                    try:
-                        count = int(getattr(strip, 'count', len(verts)) or len(verts))
-                    except Exception:
-                        count = len(verts)
-                    if uvs:
-                        count = min(count, len(uvs))
-                    gv += len(verts)
-                    gf += max(0, count - 2)
-                    for x, y, z in verts:
-                        xs.append(float(x))
-                        ys.append(float(y))
-                        zs.append(float(z))
-        except Exception:
-            pass
-        if gv <= 0 or gf <= 0 or not xs:
-            continue
-        bbox_min = (min(xs), min(ys), min(zs))
-        bbox_max = (max(xs), max(ys), max(zs))
 
         for target in target_res_ids:
             tex_score_bonus = 0.0
@@ -3738,8 +3818,6 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
                 'after': int(after),
                 'packet_end': int(packet_end),
                 'packet_total': int(descriptor.get('packet_total', 0)),
-                'material_list': material_list,
-                'groups': groups,
                 'tex_ids': set(tex_ids),
                 'verts': int(gv),
                 'faces': int(gf),
@@ -3749,19 +3827,17 @@ def scan_continues_in_img_descriptor_proofs(stem: str, img_bytes: bytes, lvz_rea
                 'material_count': int(descriptor.get('count', 0)),
             })
 
-    for res_id in remaining:
-        cache[int(res_id)] = list(candidates_by_res.get(int(res_id), []))
-    found = {res_id: list(cache.get(res_id) or []) for res_id in wanted if cache.get(res_id)}
-    if IMPORT_VERBOSE_RESOURCE_BUILD_LOGS:
-        LVZ.dbg(
-            f"[continues-img-scan] wanted={len(wanted)} scanned_descriptors={scanned_descriptors} "
-            f"matched_descriptors={matched_descriptors} parser_failures={parser_failures} "
-            f"found_ids={len(found)} retained_variants={sum(len(v) for v in found.values())}"
-        )
+    found = {res_id: values for res_id, values in candidates_by_res.items() if values}
+    LVZ.dbg(
+        f"[continues-img-scan] finished in {time.perf_counter() - scan_started:.2f}s; "
+        f"wanted={len(wanted)} scanned_descriptors={scanned_descriptors} "
+        f"matched_descriptors={matched_descriptors} parser_failures={parser_failures} "
+        f"found_ids={len(found)} retained_variants={sum(len(v) for v in found.values())}"
+    )
     return found
 
 
-def iter_build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str], placement_details=None, progress_callback=None):
+def iter_build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, wanted_res_ids, source_lvz_path: str, img_name: Optional[str], placement_details=None, progress_callback=None, build_progress_callback=None):
     if not ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
         return {}
     try:
@@ -3771,7 +3847,7 @@ def iter_build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes:
     if not wanted:
         return {}
 
-    proofs = scan_continues_in_img_descriptor_proofs(
+    proofs = yield from scan_continues_in_img_descriptor_proofs(
         stem,
         img_bytes,
         lvz_reader,
@@ -3801,19 +3877,29 @@ def iter_build_empty_resource_continues_in_img_mdl_objects(stem: str, img_bytes:
     for global_index, (res_id, variant_index, proof) in enumerate(flat_proofs):
         if global_index and global_index % 16 == 0:
             yield None
-        if progress_callback is not None:
-            progress_callback(global_index + 1, max(1, total_proofs))
+        if build_progress_callback is not None and (
+            global_index % 8 == 0 or global_index + 1 == total_proofs
+        ):
+            build_progress_callback(global_index + 1, max(1, total_proofs))
         raw_off = int(proof.get('raw_off', -1))
         after = int(proof.get('after', -1))
-        material_list = proof.get('material_list')
-        groups = proof.get('groups') or []
         tex_ids = set(proof.get('tex_ids') or set())
         gv = int(proof.get('verts', 0))
         gf = int(proof.get('faces', 0))
         score = float(proof.get('score', 0.0))
         final_score = float(proof.get('final_score', score))
         placement_fit = proof.get('placement_fit', None)
-        if material_list is None or not groups:
+        packet_end = int(proof.get('packet_end', -1))
+        if raw_off < 0 or packet_end <= raw_off or packet_end > len(img_bytes):
+            continue
+        try:
+            material_list = parser.parse_mdl_material_list(raw_off, max_end=packet_end)
+            groups, after = parser.parse_mdl_geometry_after_list(material_list, max_end=packet_end)
+            parser.assign_materials_by_strip_bytes(material_list, groups)
+        except Exception as exc:
+            LVZ.dbg(f"[continues-img] failed to rebuild RES={res_id} at 0x{raw_off:08X}: {exc}")
+            continue
+        if not groups:
             continue
         obj, face_ranges = build_mesh_from_mdl_groups(f"{stem}_continued_img_res", int(res_id), groups)
         if obj is None:
@@ -4373,7 +4459,97 @@ def iter_build_official_area_resource_mdl_objects(stem: str, img_bytes: bytes,
     )
     return objects
 
-def iter_build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, extra_container_records: List[Dict[str, int]], source_lvz_path: str, img_name: Optional[str], needed_res_ids=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None):
+def mdl_groups_build_geometry_bounds(groups):
+    vertex_count = 0
+    face_count = 0
+    minimum = [float('inf'), float('inf'), float('inf')]
+    maximum = [float('-inf'), float('-inf'), float('-inf')]
+    for group in groups or []:
+        for strip in getattr(group, 'strips', ()) or ():
+            vertices = strip.verts
+            count = min(len(vertices), int(strip.count))
+            if count < 3:
+                continue
+            vertex_count += count
+            face_count += count - 2
+            for x, y, z in vertices[:count]:
+                if x < minimum[0]: minimum[0] = x
+                if y < minimum[1]: minimum[1] = y
+                if z < minimum[2]: minimum[2] = z
+                if x > maximum[0]: maximum[0] = x
+                if y > maximum[1]: maximum[1] = y
+                if z > maximum[2]: maximum[2] = z
+    if not face_count:
+        return 0, 0, None, None
+    return vertex_count, face_count, tuple(minimum), tuple(maximum)
+
+
+def iter_select_linked_area_model_rows(overlay_rows, parser, placement_details, progress_callback=None):
+    details_by_res = {}
+    for detail_index, detail in enumerate(placement_details or []):
+        try:
+            resource_id = int(detail[0])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if resource_id >= 0:
+            details_by_res.setdefault(resource_id, []).append((detail_index, detail))
+
+    best_by_placement = {}
+    examined = 0
+    valid_geometry = 0
+    accepted_fits = 0
+    total_rows = len(overlay_rows)
+    seen_offsets = set()
+    for row_index, row in enumerate(overlay_rows):
+        if row_index and row_index % 128 == 0:
+            yield None
+        if progress_callback is not None and (row_index % 64 == 0 or row_index + 1 == total_rows):
+            progress_callback(row_index + 1, total_rows)
+
+        resource_id = int(row.get('res_id', -1))
+        requested_details = details_by_res.get(resource_id)
+        if not requested_details:
+            continue
+        raw_off = int(row.get('raw_off', -1))
+        resource_end = int(row.get('resource_end', row.get('sector_end', len(parser.decomp))))
+        key = (resource_id, raw_off, resource_end)
+        if key in seen_offsets:
+            continue
+        seen_offsets.add(key)
+        examined += 1
+
+        try:
+            material_list = parser.parse_mdl_material_list(raw_off, max_end=resource_end)
+            groups, _after = parser.parse_mdl_geometry_after_list(material_list, max_end=resource_end)
+            vertex_count, face_count, bbox_min, bbox_max = mdl_groups_build_geometry_bounds(groups)
+            if face_count == 0:
+                continue
+        except Exception:
+            continue
+
+        valid_geometry += 1
+        for detail_index, detail in requested_details:
+            fit = placement_bbox_fit(bbox_min, bbox_max, detail)
+            if fit is None or float(fit[0]) > CONTINUES_IN_IMG_MAX_PLACEMENT_FIT_SCORE:
+                continue
+            accepted_fits += 1
+            ranking = (float(fit[0]), -face_count, -vertex_count, row_index)
+            previous = best_by_placement.get(detail_index)
+            if previous is None or ranking < previous[0]:
+                best_by_placement[detail_index] = (ranking, row_index)
+
+    chosen_row_indices = sorted({value[1] for value in best_by_placement.values()})
+    LVZ.dbg(
+        '[area-mdl] placement preselect: total_rows={} parsed={} valid={} fits={} '
+        'placements={} selected_models={}'.format(
+            total_rows, examined, valid_geometry, accepted_fits,
+            len(best_by_placement), len(chosen_row_indices)
+        )
+    )
+    return [overlay_rows[index] for index in chosen_row_indices]
+
+
+def iter_build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_reader: LVZ.read_lvz, img_reader: LVZ.read_img, extra_container_records: List[Dict[str, int]], source_lvz_path: str, img_name: Optional[str], needed_res_ids=None, include_alt_12_layouts: bool = False, wanted_res_ids=None, progress_callback=None, placement_details=None, selection_progress_callback=None, collection_progress_callback=None):
     if not extra_container_records:
         return []
 
@@ -4385,10 +4561,27 @@ def iter_build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_re
     )
     parser.material_by_res_index = lvz_reader.material_by_res_index
 
-    overlay_rows = img_reader.collect_sector_overlay_resources(extra_container_records, max_resource_id=None, include_alt_12_layouts=include_alt_12_layouts, wanted_res_ids=wanted_res_ids, progress_callback=progress_callback)
+    scan_progress = collection_progress_callback if placement_details is not None else progress_callback
+    overlay_rows = img_reader.collect_sector_overlay_resources(
+        extra_container_records,
+        max_resource_id=None,
+        include_alt_12_layouts=include_alt_12_layouts,
+        wanted_res_ids=wanted_res_ids,
+        progress_callback=scan_progress,
+    )
     if needed_res_ids is not None:
         needed_res_ids = set(int(value) for value in needed_res_ids)
         overlay_rows = [row for row in overlay_rows if int(row.get("res_id", -1)) in needed_res_ids]
+    if placement_details is not None:
+        LVZ.dbg('[area-mdl] linked AREA resource records: {:d}; checking actual placements before creating Blender meshes'.format(len(overlay_rows)))
+        overlay_rows = yield from iter_select_linked_area_model_rows(
+            overlay_rows,
+            parser,
+            placement_details,
+            progress_callback=selection_progress_callback,
+        )
+        LVZ.dbg('[area-mdl] selected linked AREA meshes to build: {:d}'.format(len(overlay_rows)))
+
     area_objects: List[bpy.types.Object] = []
     seen = set()
     skipped_duplicate = 0
@@ -4403,7 +4596,7 @@ def iter_build_extra_area_direct_mdl_objects(stem: str, img_bytes: bytes, lvz_re
         if overlay_index and overlay_index % 16 == 0:
             yield None
         if progress_callback is not None and (overlay_index % 8 == 0 or overlay_index + 1 == total_overlay_rows):
-            progress_callback(overlay_index + 1, total_overlay_rows)
+            progress_callback(overlay_index + 1, max(1, total_overlay_rows))
         sector_index = int(overlay.get("sector_index", -1))
         res_id = int(overlay.get("res_id", -1))
         raw_off = int(overlay.get("raw_off", -1))
@@ -8954,11 +9147,21 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             lvz_path,
             img_name,
             needed_res_ids=needed_deep_res_ids,
-
-
             include_alt_12_layouts=False,
             wanted_res_ids=needed_deep_res_ids,
-            progress_callback=lambda index, total: progress.update_range(75, 79, index, total, "Importing MDLs..."),
+            placement_details=missing_after_primary,
+            collection_progress_callback=lambda index, total: progress.update_range(
+                75, 76, index, total,
+                "Reading linked AREA records: {:d}/{:d}".format(index, total),
+            ),
+            selection_progress_callback=lambda index, total: progress.update_range(
+                76, 78, index, total,
+                "Matching linked AREA models: {:d}/{:d}".format(index, total),
+            ),
+            progress_callback=lambda index, total: progress.update_range(
+                78, 79, index, total,
+                "Building linked AREA meshes: {:d}/{:d}".format(index, total),
+            ),
         )
         area_direct_objects.extend(legacy_area_direct_objects)
         log_overlay_resource_stats(img, "linked-auxiliary")
@@ -9010,7 +9213,10 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
 
         aera_promoted_rows = 0
         aera_promoted_res_ids = set()
-        for _detail in details:
+        for promotion_index, _detail in enumerate(details):
+            if promotion_index and promotion_index % 128 == 0:
+                progress.update(79, "Matching AREA models: {:d}/{:d}".format(promotion_index, len(details)))
+                yield None
             try:
                 _res_id = int(_detail[0])
                 _sector_index = int(_detail[15]) if len(_detail) > 15 else -1
@@ -9056,7 +9262,10 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
         unresolved_details = []
         suspicious_exact_slice_details = []
         exact_fit_rejected_before_raw = 0
-        for detail in details:
+        for resolution_index, detail in enumerate(details):
+            if resolution_index and resolution_index % 128 == 0:
+                progress.update(79, "Checking model matches: {:d}/{:d}".format(resolution_index, len(details)))
+                yield None
             resource_id = int(detail[0])
             sector_index = int(detail[15]) if len(detail) > 15 else -1
             row_index = int(detail[19]) if len(detail) > 19 else -1
@@ -9133,8 +9342,10 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
 
 
         raw_scan_res_ids = {int(detail[0]) for detail in raw_scan_details if int(detail[0]) >= 0}
+        progress.update(80, "Checking missing IMG models...")
+        yield None
         if raw_scan_res_ids and ENABLE_EMPTY_RESOURCE_CONTINUES_IN_IMG:
-            progress.update(79, "Importing MDLs...")
+            progress.update(80, "Scanning IMG model data...", force=True)
             yield None
             LVZ.dbg(f"[progress] checking raw IMG model data for {len(raw_scan_res_ids)} exact resource IDs")
             if LVZ.DEBUG is not None:
@@ -9148,7 +9359,14 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 lvz_path,
                 img_name,
                 placement_details=raw_scan_details,
-                progress_callback=lambda index, total: progress.update_range(79, 80, index, total, "Importing MDLs..."),
+                progress_callback=lambda index, total: progress.update_range(
+                    80, 89, index, total,
+                    "Scanning IMG model data: {:d}/{:d} chunks".format(index, total),
+                ),
+                build_progress_callback=lambda index, total: progress.update_range(
+                    89, 91, index, total,
+                    "Recovering IMG models: {:d}/{:d}".format(index, total),
+                ),
             )
             merged_continued_img = 0
             for key, obj in continued_img_overlay_by_sector_res.items():
@@ -9157,6 +9375,8 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
                 overlay_by_sector_res[key] = obj
                 merged_continued_img += 1
             LVZ.dbg(f"[raw-img-models] recovered={merged_continued_img} requested={len(raw_scan_res_ids)}")
+            progress.update(91, "IMG model scan complete")
+            yield None
 
     linked_instances = 0
     removed_unplaced = 0
@@ -9199,7 +9419,7 @@ def iter_import_lvz_img_archive(operator, context, lvz_path: str, apply_img_tran
             planned_model_total = len(planned_model_keys)
             planned_cached_total = max(0, len(details) - planned_model_total)
             progress.configure_map_plan(len(details), planned_model_total, planned_cached_total)
-            progress.update(80, "Placing objects...")
+            progress.update(91, "Placing objects...")
             LVZ.dbg(
                 "Leeds Stories map import plan: {} placements, {} exact sector/RES models, {} cached placements".format(
                     len(details), planned_model_total, planned_cached_total

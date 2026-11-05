@@ -32,6 +32,7 @@ from mathutils import Matrix, Vector
 from ..leedsLib import native_mdl as stories_mdl
 from ..rwLib.dff import readModel
 from .tex_importer import companionTexture, importTextures
+from .mesh_compat import setMeshLoopAttributes, setMeshPolygonMaterialIndices
 from ..leedsLib import lvz_img as embedded_mdl
 from ..data.bone_data import normalizePedSkinBoneName
 from .. import ensure_mesh_attribute, get_mesh_attribute, remove_mesh_attribute, get_or_create_corner_color_layer, set_active_object, set_object_selected, set_mesh_auto_smooth, set_mesh_gouraud_shading, stamp_bleeds_entity_type
@@ -3911,24 +3912,15 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
     mesh.validate(clean_customdata=False)
     mesh.update()
 
-    if uvs:
-        uv_layer = mesh.uv_layers.new(name="UVMap")
-        for polygon in mesh.polygons:
-            loop_start = polygon.loop_start
-            for loop_offset, vertex_index in enumerate(polygon.vertices):
-                if vertex_index < len(uvs):
-                    uv_layer.data[loop_start + loop_offset].uv = uvs[vertex_index]
-
-    if colors:
-        try:
-            color_layer = get_or_create_corner_color_layer(mesh, "Color")
-            for polygon in mesh.polygons:
-                loop_start = polygon.loop_start
-                for loop_offset, vertex_index in enumerate(polygon.vertices):
-                    if vertex_index < len(colors):
-                        color_layer.data[loop_start + loop_offset].color = colors[vertex_index]
-        except Exception:
-            pass
+    uv_layer = mesh.uv_layers.new(name="UVMap") if uvs else None
+    try:
+        color_layer = get_or_create_corner_color_layer(mesh, "Color") if colors else None
+    except Exception:
+        color_layer = None
+    setMeshLoopAttributes(
+        mesh, vertex_uvs=uvs, uv_layer=uv_layer,
+        vertex_colors=colors, color_layer=color_layer,
+    )
 
     obj = bpy.data.objects.new(name, mesh)
     collection = getOrCreateRawEmbeddedMdlCollection(context, collection_name)
@@ -3941,9 +3933,7 @@ def buildRawEmbeddedStoriesMdlMeshObject(context: bpy.types.Context, filepath: s
         mat_name = f"texRES_{material_id}" if material_id >= 0 else "texRES_none"
         mat = bpy.data.materials.new(mat_name)
         obj.data.materials.append(mat)
-    for polygon_index, material_slot in enumerate(face_material_ids):
-        if polygon_index < len(obj.data.polygons):
-            obj.data.polygons[polygon_index].material_index = int(material_slot)
+    setMeshPolygonMaterialIndices(obj.data, face_material_ids)
 
     obj["bleeds_mdl_structure_detected"] = True
     obj["bleeds_mdl_detected_game"] = str(detected.get("game", "VCS") or "VCS")

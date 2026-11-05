@@ -48,3 +48,83 @@ def objectChildren(obj):
         result.append(child)
         pending.extend(reversed(tuple(child.children)))
     return result
+
+
+def setMeshLoopAttributes(mesh, vertex_uvs=None, uv_layer=None,
+                          vertex_colors=None, color_layer=None,
+                          colors_are_bytes=False):
+    if uv_layer is None and color_layer is None:
+        return
+
+    loop_count = len(mesh.loops)
+    if not loop_count:
+        return
+
+    loop_vertices = None
+    numpy_module = None
+    try:
+        import numpy as numpy_module
+        loop_vertices = numpy_module.empty(loop_count, dtype=numpy_module.int32)
+        mesh.loops.foreach_get('vertex_index', loop_vertices)
+    except (ImportError, AttributeError, TypeError, ValueError, RuntimeError):
+        loop_vertices = None
+
+    if uv_layer is not None and vertex_uvs:
+        transferred = False
+        if loop_vertices is not None:
+            try:
+                values = numpy_module.asarray(vertex_uvs, dtype=numpy_module.float32)
+                if (len(values) and loop_vertices.min() >= 0
+                        and loop_vertices.max() < len(values)):
+                    uv_layer.data.foreach_set(
+                        'uv', numpy_module.ascontiguousarray(values[loop_vertices]).reshape(-1)
+                    )
+                    transferred = True
+            except (AttributeError, TypeError, ValueError, RuntimeError, IndexError):
+                pass
+        if not transferred:
+            for loop in mesh.loops:
+                vertex_index = int(loop.vertex_index)
+                if 0 <= vertex_index < len(vertex_uvs):
+                    uv_layer.data[loop.index].uv = vertex_uvs[vertex_index]
+
+    if color_layer is not None and vertex_colors:
+        transferred = False
+        if loop_vertices is not None:
+            try:
+                values = numpy_module.asarray(vertex_colors, dtype=numpy_module.float32)
+                if colors_are_bytes:
+                    values = values * (1.0 / 255.0)
+                if (len(values) and loop_vertices.min() >= 0
+                        and loop_vertices.max() < len(values)):
+                    color_layer.data.foreach_set(
+                        'color', numpy_module.ascontiguousarray(values[loop_vertices]).reshape(-1)
+                    )
+                    transferred = True
+            except (AttributeError, TypeError, ValueError, RuntimeError, IndexError):
+                pass
+        if not transferred:
+            for loop in mesh.loops:
+                vertex_index = int(loop.vertex_index)
+                if 0 <= vertex_index < len(vertex_colors):
+                    rgba = vertex_colors[vertex_index]
+                    color_layer.data[loop.index].color = (
+                        tuple(float(value) / 255.0 for value in rgba)
+                        if colors_are_bytes else rgba
+                    )
+
+
+def setMeshPolygonMaterialIndices(mesh, indices):
+    polygons = mesh.polygons
+    count = min(len(polygons), len(indices))
+    if count <= 0:
+        return
+    if count == len(polygons):
+        try:
+            import numpy as np
+            polygons.foreach_set('material_index', np.asarray(indices, dtype=np.int32))
+            return
+        except (ImportError, AttributeError, TypeError, ValueError, RuntimeError):
+            pass
+    for polygon_index in range(count):
+        polygons[polygon_index].material_index = int(indices[polygon_index])

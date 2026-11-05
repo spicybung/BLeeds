@@ -17,6 +17,7 @@
 
 import os
 import tempfile
+from bisect import bisect_right
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any, Iterable
 
@@ -957,16 +958,17 @@ def decode_chk_to_blender_images(
 
     raster_offsets = sorted({int(item[4]) for item in textures})
     next_raster = {offset: raster_offsets[index + 1] for index, offset in enumerate(raster_offsets[:-1])}
+    structural_offsets = sorted(set(
+        [len(data)] + [int(value) for value in container_bases]
+        + [int(hdr['glob1']), int(hdr['glob2']), int(hdr['coll_size'])]
+        + [int(entry[1]) for entry in raw_entries]
+    ))
     block_sizes: List[int] = []
     for texture in textures:
         start = int(texture[4])
-        structural_end = find_last_texture_raster_end(
-            raster_offset=start,
-            container_bases=container_bases,
-            global_offsets=(hdr['glob1'], hdr['glob2'], hdr['coll_size'],
-                            *(entry[1] for entry in raw_entries)),
-            data_size=len(data),
-        )
+        boundary_index = bisect_right(structural_offsets, start)
+        structural_end = (structural_offsets[boundary_index]
+                          if boundary_index < len(structural_offsets) else len(data))
         end = min(next_raster.get(start, structural_end), structural_end)
         block_size = max(0, int(end) - int(start))
         if block_size <= 0:
@@ -978,6 +980,18 @@ def decode_chk_to_blender_images(
 
     blender_images: List[bpy.types.Image] = []
     source_path = os.path.abspath(input_path)
+    source_key = os.path.normcase(source_path)
+    existing_images_by_header = {}
+    for existing_image in bpy.data.images:
+        try:
+            existing_source = os.path.normcase(os.path.abspath(str(existing_image.get('bleeds_texture_source_path', '') or '')))
+            if existing_source != source_key:
+                continue
+            existing_name = normalize_leeds_texture_name(existing_image.get('bleeds_texture_name', existing_image.name))
+            existing_offset = existing_image.get('bleeds_texture_header_offset', None)
+            existing_images_by_header[(existing_name, existing_offset)] = existing_image
+        except Exception:
+            continue
     texture_errors = []
     for entry_index, ((name, tex_off, entry_base, header, raster_offset), block_size) in enumerate(zip(textures, block_sizes)):
         if isinstance(header, PspTexHeader):
@@ -1013,7 +1027,7 @@ def decode_chk_to_blender_images(
         rgba_flat *= (1.0 / 255.0)
 
         image_name = f"{prefix}{name}"
-        img = find_existing_texture_image(source_path, name, header_offset=tex_off)
+        img = existing_images_by_header.get((normalize_leeds_texture_name(name), tex_off))
         if img is None:
             img = bpy.data.images.new(name=image_name, width=w, height=h, alpha=True)
         elif int(img.size[0]) != int(w) or int(img.size[1]) != int(h):
@@ -1075,6 +1089,7 @@ def decode_chk_to_blender_images(
         except Exception:
             pass
         blender_images.append(img)
+        existing_images_by_header[(normalize_leeds_texture_name(name), tex_off)] = img
     if not blender_images and texture_errors:
         raise ValueError(texture_errors[0])
     return blender_images

@@ -487,7 +487,7 @@ def hexdump_bytes(b: bytes, max_len: int = 32) -> str:
     return " ".join(f"{x:02X}" for x in b[:n])
 
 def half_to_float(h: int) -> float:
-    return float(np.frombuffer(struct.pack('<H', h), dtype=np.float16)[0])
+    return struct.unpack('<e', struct.pack('<H', int(h) & 0xFFFF))[0]
 
 def float_to_half_u16(value: float) -> int:
     return int(np.frombuffer(np.float16(float(value)).tobytes(), dtype=np.uint16)[0])
@@ -702,38 +702,41 @@ def find_ver2_entry_for_abs_offset(entries: List[Dict[str, object]], abs_off: in
             return entry
     return None
 
-def looks_like_img_instance_row(img_bytes: bytes, off: int, max_resource_id: Optional[int] = None) -> bool:
+def decode_img_instance_row(img_bytes: bytes, off: int, max_resource_id: Optional[int] = None):
     if off < 0 or off + 0x50 > len(img_bytes):
-        return False
-    res_id = read_u16(img_bytes, off + 0x02)
+        return None
+
+    res_id = struct.unpack_from('<H', img_bytes, off + 0x02)[0]
     if res_id == 0 or res_id == 0xFFFF:
-        return False
+        return None
     if max_resource_id is not None and res_id >= int(max_resource_id):
-        return False
+        return None
+
     try:
-        bounds = [half_to_float(read_u16(img_bytes, off + 0x04 + i * 2)) for i in range(4)]
-        matrix = struct.unpack_from("<16f", img_bytes, off + 0x10)
-    except Exception:
-        return False
-    if not all(math.isfinite(float(v)) for v in bounds):
-        return False
-    if not all(math.isfinite(float(v)) for v in matrix):
-        return False
-    if any(abs(float(v)) > 100000.0 for v in matrix):
-        return False
-    row_scale0 = math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1] + matrix[2] * matrix[2])
-    row_scale1 = math.sqrt(matrix[4] * matrix[4] + matrix[5] * matrix[5] + matrix[6] * matrix[6])
-    row_scale2 = math.sqrt(matrix[8] * matrix[8] + matrix[9] * matrix[9] + matrix[10] * matrix[10])
-    scales = (row_scale0, row_scale1, row_scale2)
-    if not all(math.isfinite(float(v)) for v in scales):
-        return False
-    if any(v > 4096.0 for v in scales):
-        return False
-    if any(v <= 0.000001 for v in scales):
-        return False
-    if abs(float(matrix[15]) - 1.0) > 0.001:
-        return False
-    return True
+        bounds = struct.unpack_from('<4e', img_bytes, off + 0x04)
+        matrix = struct.unpack_from('<16f', img_bytes, off + 0x10)
+    except (struct.error, OverflowError):
+        return None
+
+    if not all(math.isfinite(value) for value in bounds):
+        return None
+    if not all(math.isfinite(value) and abs(value) <= 100000.0 for value in matrix):
+        return None
+    if abs(matrix[15] - 1.0) > 0.001:
+        return None
+
+    scales = (
+        math.sqrt(matrix[0] * matrix[0] + matrix[1] * matrix[1] + matrix[2] * matrix[2]),
+        math.sqrt(matrix[4] * matrix[4] + matrix[5] * matrix[5] + matrix[6] * matrix[6]),
+        math.sqrt(matrix[8] * matrix[8] + matrix[9] * matrix[9] + matrix[10] * matrix[10]),
+    )
+    if not all(math.isfinite(value) and 0.000001 < value <= 4096.0 for value in scales):
+        return None
+    return res_id, bounds, matrix, scales
+
+
+def looks_like_img_instance_row(img_bytes: bytes, off: int, max_resource_id: Optional[int] = None) -> bool:
+    return decode_img_instance_row(img_bytes, off, max_resource_id) is not None
 
 def material_or_image_wants_texture_write(material, image) -> bool:
     for owner in (material, image):
@@ -3097,10 +3100,11 @@ class read_lvz:
         w += 4
         need_bytes_pos = nvert_all * 6
         if w + need_bytes_pos > n: raise ValueError("Position payload truncated.")
-        verts: List[Tuple[float,float,float]] = []
-        for i in range(nvert_eff):
-            off = w + i * 6
-            verts.append(self.readVec3I16Norm(buf, off))
+        position_values = struct.iter_unpack('<hhh', memoryview(buf)[w:w + need_bytes_pos])
+        verts: List[Tuple[float,float,float]] = [
+            (x / 32767.5, y / 32767.5, z / 32767.5)
+            for x, y, z in position_values
+        ]
         w += need_bytes_pos
         w = align_up4(w)
 
@@ -3113,10 +3117,8 @@ class read_lvz:
         w += 4
         need_bytes_uv = nvert_all * 2
         if w + need_bytes_uv > n: raise ValueError("UV payload truncated.")
-        uvs: List[Tuple[float,float]] = []
-        for i in range(nvert_eff):
-            off = w + i * 2
-            uvs.append(self.readPackedWorldUv(buf, off))
+        uv_values = struct.iter_unpack('<BB', memoryview(buf)[w:w + need_bytes_uv])
+        uvs: List[Tuple[float,float]] = [(u / 128.0, v / 128.0) for u, v in uv_values]
         w += need_bytes_uv
         w = align_up4(w)
 
@@ -3125,12 +3127,19 @@ class read_lvz:
         w += 4
         need_bytes_col = nvert_all * 2
         if w + need_bytes_col > n: raise ValueError("Prelight payload truncated.")
+        color_values = struct.iter_unpack('<H', memoryview(buf)[w:w + need_bytes_col])
         cols_raw_u16: List[int] = []
         cols_rgba4444: List[Tuple[int,int,int,int]] = []
-        for i in range(nvert_eff):
-            c16 = read_u16(buf, w + i * 2)
-            cols_raw_u16.append(c16)
-            cols_rgba4444.append(self.decodeRgba5551(c16))
+        append_raw_color = cols_raw_u16.append
+        append_rgba_color = cols_rgba4444.append
+        for c16, in color_values:
+            append_raw_color(c16)
+            append_rgba_color((
+                (c16 & 31) * 255 // 31,
+                ((c16 >> 5) & 31) * 255 // 31,
+                ((c16 >> 10) & 31) * 255 // 31,
+                255 if c16 & 0x8000 else 0,
+            ))
         w += need_bytes_col
         w = align_up4(w)
 
@@ -3983,8 +3992,10 @@ class read_img:
             if read_u32(img, raw_off) == 0x6C018000:
                 return False
 
-            descriptor_off = self.find_mdl_material_list_start_near(raw_off, max_end=sector_end)
-            return descriptor_off is not None
+            # add_overlay already verified this exact descriptor offset with
+            # find_mdl_material_list_start_near. Running that parser again for
+            # every resource here is expensive and cannot add a new model.
+            return True
 
         bound_groups: Dict[int, List[Dict[str, int]]] = {}
         for overlay in overlays:
@@ -4018,20 +4029,24 @@ class read_img:
                 except Exception:
                     continue
             starts.sort(key=lambda item: (item[0], item[1], item[2]))
+            start_offsets = [item[0] for item in starts]
+            next_other_row = [len(starts)] * len(starts)
+            for start_index in range(len(starts) - 2, -1, -1):
+                if starts[start_index + 1][1] != starts[start_index][1]:
+                    next_other_row[start_index] = start_index + 1
+                else:
+                    next_other_row[start_index] = next_other_row[start_index + 1]
             for overlay in group_overlays:
                 try:
                     raw_off = int(overlay.get("raw_off", -1))
                     row_off = int(overlay.get("resource_row_off", -1))
                     sector_end = int(overlay.get("sector_end", len(img)))
                     resource_end = sector_end
-                    for next_raw, next_row_off, _layout in starts:
-                        if next_raw <= raw_off:
-                            continue
-                        if next_row_off == row_off:
-                            continue
-                        if next_raw > raw_off + 4:
-                            resource_end = min(resource_end, next_raw)
-                            break
+                    next_index = bisect_right(start_offsets, raw_off + 4)
+                    if next_index < len(starts) and starts[next_index][1] == row_off:
+                        next_index = next_other_row[next_index]
+                    if next_index < len(starts):
+                        resource_end = min(resource_end, starts[next_index][0])
                     resource_end = max(raw_off + 4, min(resource_end, sector_end, len(img)))
                     overlay["resource_end"] = int(resource_end)
                     if resource_end < sector_end:
@@ -4389,13 +4404,14 @@ class read_img:
                 off = start
                 while off + 0x50 <= stop:
                     stats["candidate_rows"] += 1
-                    if not looks_like_img_instance_row(img, off, max_resource_id=max_resource_id):
+                    decoded_row = decode_img_instance_row(img, off, max_resource_id=max_resource_id)
+                    if decoded_row is None:
                         off += 0x50
                         continue
                     stats["valid_rows"] += 1
+                    res_id, bounds, m, scales = decoded_row
                     ipl_raw = read_u16(img, off + 0x00)
                     ipl_id = int(ipl_raw & 0x7FFF)
-                    res_id = read_u16(img, off + 0x02)
                     if (not include_lod) and str(pass_name) in IMG_LOD_PASS_NAMES:
                         stats["skipped_lod_rows"] += 1
                         off += 0x50
@@ -4411,11 +4427,7 @@ class read_img:
                         stats["skipped_lod_rows"] += 1
                         off += 0x50
                         continue
-                    sx = half_to_float(read_u16(img, off + 0x04))
-                    sy = half_to_float(read_u16(img, off + 0x06))
-                    sz = half_to_float(read_u16(img, off + 0x08))
-                    sr = half_to_float(read_u16(img, off + 0x0A))
-                    m = struct.unpack_from("<16f", img, off + 0x10)
+                    sx, sy, sz, sr = bounds
 
 
                     dedupe_key = (
@@ -4431,9 +4443,7 @@ class read_img:
                         off += 0x50
                         continue
                     seen_keys.add(dedupe_key)
-                    s0 = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
-                    s1 = math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])
-                    s2 = math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])
+                    s0, s1, s2 = scales
                     details.append((
                         int(res_id), cont, off - cont, int(ipl_raw), ipl_id,
                         sx, sy, sz, sr, s0, s1, s2, m,
@@ -4625,13 +4635,7 @@ class read_img:
                 off = start
                 while off + 0x50 <= stop:
                     stats["candidate_rows"] += 1
-                    if not looks_like_img_instance_row(img, off, max_resource_id=max_resource_id):
-                        off += 0x50
-                        continue
-                    stats["valid_rows"] += 1
-                    ipl_raw = read_u16(img, off + 0x00)
-                    ipl_id = int(ipl_raw & 0x7FFF)
-                    res_id = read_u16(img, off + 0x02)
+                    sx, sy, sz, sr = bounds
                     if (not include_lod) and str(pass_name) in IMG_LOD_PASS_NAMES:
                         stats["skipped_lod_rows"] += 1
                         off += 0x50
@@ -4652,9 +4656,8 @@ class read_img:
                     sz = half_to_float(read_u16(img, off + 0x08))
                     sr = half_to_float(read_u16(img, off + 0x0A))
                     m = struct.unpack_from("<16f", img, off + 0x10)
-                    s0 = math.sqrt(m[0]*m[0] + m[1]*m[1] + m[2]*m[2])
-                    s1 = math.sqrt(m[4]*m[4] + m[5]*m[5] + m[6]*m[6])
-                    s2 = math.sqrt(m[8]*m[8] + m[9]*m[9] + m[10]*m[10])
+                    sx, sy, sz, sr = bounds
+                    s0, s1, s2 = scales
                     details.append((
                         int(res_id), cont, off - cont, int(ipl_raw), ipl_id,
                         sx, sy, sz, sr, s0, s1, s2, m,

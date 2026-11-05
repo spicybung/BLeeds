@@ -27,6 +27,7 @@ from .. import get_or_create_corner_color_layer, set_mesh_auto_smooth, stamp_ble
 from ..leedsLib import bsp, world
 from ..rwLib.dff import readWorld
 from .mdl_importer import mh2ImportTransaction, makeMaterial, makeMesh
+from .mesh_compat import setMeshLoopAttributes, setMeshPolygonMaterialIndices
 from .tex_importer import companionTexture, importTextures
 
 def image_from_rgba_uint8(rgba: np.ndarray, name: str, w: int, h: int) -> bpy.types.Image:
@@ -557,14 +558,12 @@ def assignCornerColors(mesh, block: bsp.BSPGeometryBlock) -> None:
     layer = get_or_create_corner_color_layer(mesh, "Color")
     if layer is None:
         return
-    try:
-        data = layer.data
-        for loop_index, loop in enumerate(mesh.loops):
-            rgba = block.vertices[int(loop.vertex_index)].color
-            color = tuple(float(value) / 255.0 for value in rgba)
-            data[loop_index].color = color
-    except Exception:
-        pass
+    setMeshLoopAttributes(
+        mesh,
+        vertex_colors=[vertex.color for vertex in block.vertices],
+        color_layer=layer,
+        colors_are_bytes=True,
+    )
 
 
 def buildBspMeshObject(
@@ -611,21 +610,33 @@ def buildBspMeshObject(
     for source_index in used_material_indices:
         local_material_indices[int(source_index)] = len(mesh.materials)
         mesh.materials.append(materials[int(source_index)])
-    for polygon_index, polygon in enumerate(mesh.polygons):
-        source_index = face_materials[polygon_index] if polygon_index < len(face_materials) else 0
-        polygon.material_index = int(local_material_indices.get(int(source_index), 0))
-        try:
+    polygon_materials = [
+        int(local_material_indices.get(int(face_materials[index]), 0))
+        if index < len(face_materials) else 0
+        for index in range(len(mesh.polygons))
+    ]
+    setMeshPolygonMaterialIndices(mesh, polygon_materials)
+    try:
+        mesh.polygons.foreach_set('use_smooth', np.ones(len(mesh.polygons), dtype=np.bool_))
+    except (AttributeError, TypeError, ValueError, RuntimeError):
+        for polygon in mesh.polygons:
             polygon.use_smooth = True
-        except Exception:
-            pass
 
     try:
         uv_layer = mesh.uv_layers.new(name="UVMap")
-        for loop_index, loop in enumerate(mesh.loops):
-            uv_layer.data[loop_index].uv = block.vertices[int(loop.vertex_index)].uv
     except Exception:
-        pass
-    assignCornerColors(mesh, block)
+        uv_layer = None
+    try:
+        color_layer = get_or_create_corner_color_layer(mesh, "Color")
+    except Exception:
+        color_layer = None
+    setMeshLoopAttributes(
+        mesh,
+        vertex_uvs=[vertex.uv for vertex in block.vertices], uv_layer=uv_layer,
+        vertex_colors=[vertex.color for vertex in block.vertices],
+        color_layer=color_layer,
+        colors_are_bytes=True,
+    )
     set_mesh_auto_smooth(mesh, True)
     try:
         mesh.auto_smooth_angle = math.radians(60.0)
