@@ -1,3 +1,4 @@
+
 # Finally, an I/O for the GTA Stories games, and more!
 
 [![License](https://img.shields.io/badge/license-GPLv3-blue.svg)](LICENSE)
@@ -6,37 +7,37 @@
 
 ## Supported Formats
 
-The following is a list of file formats that are currently supported by the addon
+The following is a list of file formats that are currently supported by the addon.
 
 #### File Types
 
-- [X] Model files (.mdl), (.dff)*
-  - [X] Import
-  - [x] Export 
-- [X] Texture Files (.chk, .xtx, .tex)*
-  - [X] Import
-  - [X] Export 
-- [X] Collision files (.col2)*
-  - [X] Import
-  - [x] Export *
-- [X] Animation files (.anim), (.ifp)*
-  - [X] Import 
-  - [X] Export *
-- [X] Map files (.wrld, .wbl, .bsp)*
-  - [X] Import
-  - [x] Export *
-- [X] IMG archives (.img + .lvz)
-  - [X] Import *
+- [x] Model files (.mdl, .dff)*
+  - [x] Import
+  - [x] Export
+- [x] Texture files (.chk, .xtx, .tex)*
+  - [x] Import
+  - [x] Export
+- [x] Collision files (.col2)*
+  - [x] Import
+  - [x] Export
+- [x] Animation files (.anim, .ifp)*
+  - [x] Import
+  - [x] Export
+- [x] Map files (.wrld, .wbl, .bsp)*
+  - [x] Import
+  - [x] Export
+- [x] IMG archives (.img + .lvz)*
+  - [x] Import
   - [ ] Export
 
-* all of the above are currently experimental, meaning not all files have been tested yet.
+*All of the above are currently experimental, meaning not all files have been tested yet.*
 
-## How to use
+## How to Use
 
-1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest Release.
-2. Import the downloaded .zip file by selecting it from *(User) Preferences/Addons/Install from File*
-3. Set the addon "BLeeds" to enabled
-4. Import files from Import tab, export files from the Export tab
+1. [Download](https://github.com/spicybung/BLeeds/releases/latest) the addon ZIP file from the latest release.
+2. Install the downloaded ZIP file through Blender's **Edit > Preferences > Add-ons > Install from Disk** (or **Install from File** in older Blender versions).
+3. Enable the **BLeeds** addon.
+4. Import files from the **Import** menu, or export files from the **Export** menu.
 
 ## Contributing
 
@@ -48,13 +49,14 @@ For documentation, visit the [BLeeds Wiki](https://github.com/spicybung/BLeeds/w
 
 ## License
 
-This project is licensed under the GPL 3.0 License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GPL 3.0 License. See the [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
-- Special thanks to the Blender community and contributors, for their open-source efforts.
+
+- Special thanks to the Blender community and contributors for their open-source efforts.
 - The GTA modding community, for the inspiration years ago.
-- The GTA Mods Wiki & GTAModding Wiki(RIP)for being a huge considerate help in figuring things, such as data structures, out.
-- Daniil Sayanov, for his great help, knowledge in R* Leeds formats, as well as inspiration & motivation.
+- The GTA Mods Wiki & GTAModding Wiki (RIP) for being a huge, considerate help in figuring things such as data structures out.
+- Daniil Sayanov, for his great help, knowledge of R* Leeds formats, as well as inspiration and motivation.
 - MAJESTIC_R3 for his Stories Map Converter program, which was surprisingly helpful in decoding file formats on its own.
 - Guard3 for his work on G3DTZ, which was helpful in decoding the .DTZ format.
-- Last, but not least, The_Hero(aap) for their incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
+- Last, but not least, The_Hero (aap) for his incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
