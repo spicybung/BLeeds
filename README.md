@@ -59,4 +59,5 @@ This project is licensed under the GPL 3.0 License. See the [LICENSE](LICENSE) f
 - Daniil Sayanov, for his great help, knowledge of R* Leeds formats, as well as inspiration and motivation.
 - MAJESTIC_R3 for his Stories Map Converter program, which was surprisingly helpful in decoding file formats on its own.
 - Guard3 for his work on G3DTZ, which was helpful in decoding the .DTZ format.
-- Last, but not least, The_Hero (aap) for his incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
+- Allen/Leeaao for sharing his scripts, thus knowledge, for Manhunt 2.
+- Last, but absolutely not least, The_Hero (aap) for his incredible knowledge and previous Leeds reverse engineering efforts. He has been invaluable to the community.
