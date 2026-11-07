@@ -33,7 +33,7 @@ The following is a list of file formats that are currently supported by the addo
 
 ## How to use
 
-1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest master branch
+1. [Download](https://github.com/spicybung/BLeeds/archive/refs/heads/master.zip) the addon zip file from the latest Release.
 2. Import the downloaded .zip file by selecting it from *(User) Preferences/Addons/Install from File*
 3. Set the addon "BLeeds" to enabled
 4. Import files from Import tab, export files from the Export tab
