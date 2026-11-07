@@ -54,7 +54,7 @@ This project is licensed under the GPL 3.0 License. See the [LICENSE](LICENSE) f
 ## Acknowledgments
 
 - Special thanks to the Blender community and contributors for their open-source efforts.
-- The GTA modding community, for the inspiration years ago.
+- The GTA modding community, for the initial inspiration to get into this years ago.
 - The GTA Mods Wiki & GTAModding Wiki (RIP) for being a huge, considerate help in figuring things such as data structures out.
 - Daniil Sayanov, for his great help, knowledge of R* Leeds formats, as well as inspiration and motivation.
 - MAJESTIC_R3 for his Stories Map Converter program, which was surprisingly helpful in decoding file formats on its own.
